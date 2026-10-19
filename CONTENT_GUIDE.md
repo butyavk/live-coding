@@ -208,10 +208,15 @@ without an entry falls back to the hint in its docstring.
 the build; tasks and drills without an entry are listed as warnings. Keep both files free of
 imports and of non-erasable TypeScript.
 
-**Mock mode.** `?mock=<id>` on a task page (the picker links there) shows only that task and
-nothing that names its technique: no other exercises, no page title (heading and browser tab),
-table of contents, skill-map box, page links or "Edit page" link, no difficulty, target time or
-notes about the data.
+**Mock mode.** A mock runs on the task's mock page, `/mock/<id>/` and `/ru/mock/<id>/`
+(`src/pages/mock/`, `MockPage.astro`; the picker links there): the task alone, on an address and
+under a title ("Mock interview") that name no topic, because a real interviewer never says which
+pattern a task belongs to. Every task placed on a page gets one; nothing to add by hand. The
+mock pages have no sidebar entry and stay out of the site search and the sitemap (`noindex`).
+While the mock runs, nothing in the task names its technique either: no difficulty, target time
+or notes about the data. Old links to a topic page with `?mock=<id>` go to the mock page. Drafts
+and the solved state use the same keys as on the topic page, so a pass in a mock counts on the
+plan and the map.
 
 | In a mock | What happens |
 |---|---|
@@ -219,14 +224,13 @@ notes about the data.
 | Editor | Starts from the starter code, not from the reader's draft; "Restore my draft" brings the draft back. The mock's code is kept for this tab only |
 | Questions | The candidate types their own under "Your questions". The task's list stays hidden until "Show the questions" or the end of the mock; then each question gets an "I asked this" box and a score |
 | Hint | Opens after five minutes |
-| Solution and walkthrough | Open after Check passes or the time is up |
+| Solution | Opens after Check passes or the time is up |
 | Failed Check | Shows where the difference is, never the expected value |
-| "End the mock" | Brings the page back and shows the time used, the self-review checklist, "Another mock" and, in a mock of both kinds, "Next task" |
+| "End the mock" | Brings the task's labels back and shows the time used, the self-review checklist, "Open the walkthrough" (the task on its topic page, in a new tab), "Another mock" and, in a mock of both kinds, "Next task". A reload after that shows the self-review again |
 
 The walkthrough is the first `<Reveal>` after the `<Task>` and before the next heading or
-exercise. Outside a mock it is soft-locked like the solution: one click once Check has passed
-or the target time is up, otherwise a confirm step. So keep each walkthrough right after its
-task.
+exercise. It is soft-locked like the solution: one click once Check has passed or the target
+time is up, otherwise a confirm step. So keep each walkthrough right after its task.
 
 ## 6. Russian version
 

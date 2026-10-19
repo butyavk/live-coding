@@ -57,6 +57,7 @@ stay there without being published.
 | `src/data/generated/practice.json` | reference outputs of every exercise, written by `npm run exercises` |
 | `src/data/flashcards.ts` | the flashcards (the Anki decks in `public/flashcards/` are exported from it) |
 | `src/components/practice/` | the exercise widgets: drills, traps, tasks, the playground, the mock interview |
+| `src/pages/mock/`, `src/pages/ru/mock/` | the mock interview's page of each task, `/mock/<id>/`, made for every task placed on a page; not in the sidebar, the search or the sitemap |
 | `src/runtime/` | the PostgreSQL and Python workers and the Python test runner |
 | `exercises/` | the dataset as CSV, task files, tests and solutions, also for offline practice |
 | `scripts/` | build steps and checks |

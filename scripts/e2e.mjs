@@ -9,9 +9,12 @@
 // - a failed Check on a task says where the difference is but shows the expected value only on
 //   request (drills still show it); walkthroughs are soft-locked; "Start fresh" on a solved task;
 // - Russian pages: the "Перевод" toggle and the Russian UI; hints open;
-// - the mock interview: the plan filter, the clock (max(25, target + 10) minutes, kept on reload),
-//   the starter code with "Restore my draft", the candidate's own questions, nothing that names the
-//   technique, no expected values on a failed Check, and the self-review at the end;
+// - the mock interview: the task on its own page, whose address names no topic (also after a
+//   reload, in "both" and from an old ?mock= link), the plan filter, the clock (max(25, target + 10)
+//   minutes, kept on reload), the starter code with "Restore my draft", the candidate's own
+//   questions, nothing that names the technique, no expected values on a failed Check, the
+//   database task, the self-review at the end and the link to the walkthrough (ONLY=mock runs
+//   just this part);
 // - without WebAssembly JSPI, a Python task whose tests need the database is never marked solved;
 // - the study plan and the skill map share one plan choice, one progress and one Reset, and both
 //   count the exercises that passed Check (ONLY=plan runs just this part).
@@ -274,9 +277,9 @@ if (!ONLY || ONLY === 'plan') {
   done();
 }
 
-if (!ONLY) {
+if (!ONLY || ONLY === 'mock') {
   // -------------------------------------------------------------- wrong but plausible queries fail on the edge-case data
-  {
+  if (!ONLY) {
     const done = section('edge cases');
     const sol = (id) => P.sqlTasks[id].solution;
     const swap = (id, from, to) => {
@@ -318,7 +321,7 @@ if (!ONLY) {
   }
 
   // -------------------------------------------------------------- Russian UI, translation toggle, hints
-  {
+  if (!ONLY) {
     const done = section('russian and hints');
     const { page, ctx, errors } = await open('/ru/sql/left-join-and-zeros/', { dark: true });
     const ref = sqlDrills.find((d) => d.id === 's-left-zero').ref;
@@ -371,7 +374,7 @@ if (!ONLY) {
   }
 
   // -------------------------------------------------------------- Check on tasks, walkthrough lock, Start fresh
-  {
+  if (!ONLY) {
     const done = section('task check');
     const path = placed.get('q01').page;
     const { page, ctx, errors } = await open(path);
@@ -430,47 +433,55 @@ if (!ONLY) {
     // Every task has a saved draft: the mock must still start from the starter code.
     const ids = [...Object.keys(P.sqlTasks), ...Object.keys(P.pyTasks)];
     const drafts = `try { if (!sessionStorage.getItem('e2e-drafts')) { sessionStorage.setItem('e2e-drafts', '1'); for (const id of ${JSON.stringify(ids)}) localStorage.setItem('lcm-draft:' + id, '-- my old draft ' + id); } } catch {}`;
+    // A mock runs on the task's mock page, /mock/<id>/ or /ru/mock/<id>/: the address names no
+    // topic, so no section or page slug from scripts/pages.json, in the path, the query or the hash.
+    const MOCK_URL = /\/mock\/([a-z0-9]+)\/$/;
+    const idOf = (url) => (new URL(url).pathname.match(MOCK_URL) ?? [])[1];
+    const topicWords = new Set(Object.entries(pages).flatMap(([s, list]) => [s, ...list]));
+    const neutral = (url, id) => {
+      const u = new URL(url);
+      const parts = [...u.pathname.split('/'), ...u.search.split(/[?&=]/), ...u.hash.slice(1).split('/')].filter(Boolean);
+      return sitePath(url) === `/mock/${id}/` && !u.search && !parts.some((p) => topicWords.has(p)) && !u.href.includes(placed.get(id).page);
+    };
+    const topicHref = (id, lang) => new URL(BASE).pathname + lang + placed.get(id).page;
+    const topicTitle = (id, lang) => readFileSync(`${root}src/content/docs${lang}${placed.get(id).page.replace(/\/$/, '.mdx')}`, 'utf8').match(/^title:\s*"?(.+?)"?\s*$/m)[1];
+    const solvedIn = (page, id) => page.evaluate((i) => !!JSON.parse(localStorage.getItem('lcm-progress') || '{}').activities?.[`ex:${i}`], id);
     for (const [lang, kind] of [['', 'sql'], ['/ru', 'py']]) {
       const { page, ctx, errors } = await open(`${lang}/start/mock-interview/`, { init: drafts });
       await page.locator(`input[name="lcm-mock-kind"][value="${kind}"]`).check();
       await page.locator('[data-mock-start]').click();
-      await page.waitForURL(/[?&]mock=/, { timeout: 20000 });
-      const id = new URL(page.url()).searchParams.get('mock');
+      await page.waitForURL(MOCK_URL, { timeout: 20000 });
+      const id = idOf(page.url());
       const task = P.sqlTasks[id] ?? P.pyTasks[id];
       ok(`mock (${kind}${lang}): picked a ${kind} task`, kind === 'sql' ? !!P.sqlTasks[id] : !!P.pyTasks[id], id);
       ok(`mock ${id}: stays in the language`, new URL(page.url()).pathname.includes('/ru/') === (lang === '/ru'), page.url());
-      ok(`mock ${id}: from the default (medium) plan`, planPages('medium').has(sitePath(page.url())), page.url());
+      ok(`mock ${id}: the address names no topic`, neutral(page.url(), id), page.url());
+      ok(`mock ${id}: from the default (medium) plan`, planPages('medium').has(placed.get(id)?.page), placed.get(id)?.page);
       await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
       const mins = mockMinutes(task.target);
       ok(`mock ${id}: the clock is max(25, target + 10) = ${mins} minutes`, (await page.locator('[data-mock-clock]').innerText()).includes(String(mins)));
-      const others = await page.evaluate((i) => [...document.querySelectorAll('[data-lcp]')].filter((b) => b.dataset.id !== i && b.getClientRects().length > 0).length, id);
-      ok(`mock ${id}: other exercises hidden`, others === 0, `${others} visible`);
+      const others = await page.evaluate((i) => [...document.querySelectorAll('[data-lcp]')].filter((b) => b.dataset.id !== i).length, id);
+      ok(`mock ${id}: the task alone on the page`, others === 0, `${others} other exercises`);
       ok(`mock ${id}: the task is shown`, await block(page, id).isVisible());
       const t = `[data-lcp][data-id="${id}"]`;
       ok(`mock ${id}: difficulty and target hidden`, !(await shown(page, `${t} [data-mock-hide]`)));
       ok(`mock ${id}: hint hidden`, !(await shown(page, `${t} [data-hint]`)));
       ok(`mock ${id}: solution hidden`, !(await shown(page, `${t} [data-solution]`)));
-      ok(`mock ${id}: page title hidden`, !(await shown(page, 'h1#_top')));
-      ok(`mock ${id}: skill-map box and page links hidden`, !(await shown(page, '.lcm-topic')) && !(await shown(page, '.pagination-links')));
-      ok(`mock ${id}: "Edit page" link hidden`, !(await shown(page, 'footer a[href*="/edit/"]')));
+      ok(`mock ${id}: no walkthrough on the page`, (await page.locator('details.lcp-reveal:not([data-hint])').count()) === 0);
+      ok(`mock ${id}: neutral page title`, /^(Mock interview|Мок-интервью)$/.test((await page.locator('h1#_top').innerText()).trim()), await page.locator('h1#_top').innerText());
+      ok(`mock ${id}: neutral browser tab title`, /^(Mock interview|Мок-интервью) \|/.test(await page.title()), await page.title());
+      ok(`mock ${id}: the topic's title is not on the page`, !(await page.locator('main').innerText()).includes(topicTitle(id, lang)), topicTitle(id, lang));
+      const topicLinks = await page.evaluate((h) => [...document.querySelectorAll('main a[href]')].filter((a) => a.getClientRects().length > 0 && new URL(a.href).pathname === h).length, topicHref(id, lang));
+      ok(`mock ${id}: no visible link to the topic page`, topicLinks === 0, `${topicLinks} links`);
+      ok(`mock ${id}: no table of contents, skill-map box, page links or "Edit page" link`, !(await shown(page, '.right-sidebar-container')) && !(await shown(page, '.lcm-topic')) && !(await page.locator('.pagination-links a').count()) && !(await page.locator('footer a[href*="/edit/"]').count()));
       ok(`mock ${id}: no current page in the sidebar`, (await page.locator('nav.sidebar [aria-current="page"]').count()) === 0);
-      ok(`mock ${id}: neutral browser tab title`, /^(Mock interview|Мок-интервью)/.test(await page.title()), await page.title());
+      ok(`mock ${id}: not in the sidebar, the site search or search engines`, !(await page.locator('nav.sidebar a[href*="/mock/"]').count()) && !(await page.locator('[data-pagefind-body]').count()) && (await page.locator('meta[name="robots"][content="noindex"]').count()) === 1);
       ok(`mock ${id}: Pause and reset hidden`, !(await shown(page, `${t} [data-timer="toggle"]`)) && !(await shown(page, `${t} [data-timer="reset"]`)));
       if (task.ask.length) {
         ok(`mock ${id}: the task's questions hidden`, !(await shown(page, `${t} [data-ask-list]`)));
         ok(`mock ${id}: "Your questions" box shown`, await shown(page, `${t} [data-ask-notes]`));
         await block(page, id).locator('[data-ask-notes]').fill('Which time zone?');
       }
-      const hasWalk = await page.evaluate((i) => {
-        const top = [...document.querySelector('.sl-markdown-content').children].find((c) => c.querySelector(`[data-lcp][data-id="${i}"]`));
-        for (let n = top?.nextElementSibling; n; n = n.nextElementSibling) {
-          if (n.matches('details.lcp-reveal')) return true;
-          if (/^H[1-6]$/.test(n.tagName) || n.classList.contains('sl-heading-wrapper') || n.querySelector('[data-lcp]')) return false;
-        }
-        return false;
-      }, id);
-      ok(`mock ${id}: walkthrough hidden`, !(await shown(page, '.sl-markdown-content > details.lcp-reveal')));
-      ok(`mock ${id}: table of contents hidden`, !(await shown(page, '.right-sidebar-container')));
       await page.waitForFunction((i) => document.querySelector(`[data-lcp][data-id="${i}"]`)?.lcpBlock?.editor, id, { timeout: 20000 });
       const code = () => page.evaluate((i) => document.querySelector(`[data-lcp][data-id="${i}"]`).lcpBlock.editor.get(), id);
       ok(`mock ${id}: the editor starts from the starter code`, (await code()) === task.template, (await code()).slice(0, 60));
@@ -479,9 +490,11 @@ if (!ONLY) {
       ok(`mock ${id}: timer runs`, /^00:0[1-9]$/.test(before), before);
       await page.reload({ waitUntil: 'load' });
       await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
+      ok(`mock ${id}: the address names no topic after a reload`, neutral(page.url(), id), page.url());
       await page.waitForTimeout(1100);
       const after = await block(page, id).locator('[data-timer-display]').innerText();
       ok(`mock ${id}: a reload keeps the clock`, after > before, `${before} → ${after}`);
+      ok(`mock ${id}: a reload keeps the mock running`, (await page.locator('[data-mock-end]').count()) === 1 && (await page.evaluate(() => document.documentElement.classList.contains('lcp-mock'))));
       if (task.ask.length) ok(`mock ${id}: a reload keeps the typed questions`, (await block(page, id).locator('[data-ask-notes]').inputValue()) === 'Which time zone?');
       const restore = page.locator('[data-mock-restore]');
       ok(`mock ${id}: "Restore my draft" offered`, (await restore.count()) === 1);
@@ -499,20 +512,84 @@ if (!ONLY) {
       }
       await setCode(page, id, task.solution);
       const v = await check(page, id);
-      ok(`mock ${id}: solution passes`, v.pass, v.text.slice(0, 160));
+      const skipped = await block(page, id).locator('.lcp-tests .lcp-skip').count();
+      ok(`mock ${id}: solution passes`, v.pass && !skipped, v.text.slice(0, 160));
+      ok(`mock ${id}: the pass is stored as solved, as on the topic page`, await solvedIn(page, id));
       await page.waitForTimeout(1300);
       ok(`mock ${id}: solution opens after the pass`, await shown(page, `${t} [data-solution]`));
-      if (hasWalk) ok(`mock ${id}: walkthrough opens after the pass`, await shown(page, '.sl-markdown-content > details.lcp-reveal'));
+      ok(`mock ${id}: no walkthrough link before the end`, !(await shown(page, '[data-mock-walk]')));
       await page.locator('[data-mock-end]').click();
       ok(`mock ${id}: self-review shown, with the whole checklist`, (await page.locator('[data-mock-bar] input[type="checkbox"]').count()) === 9);
       ok(`mock ${id}: the self-review is not a pass banner`, (await page.locator('[data-mock-bar] .lcp-banner').getAttribute('class')).includes('lcp-review'));
       ok(`mock ${id}: page back to normal`, !(await page.evaluate(() => document.documentElement.classList.contains('lcp-mock'))));
-      ok(`mock ${id}: the link leaves mock mode`, !new URL(page.url()).searchParams.has('mock'), page.url());
       if (task.ask.length) {
         ok(`mock ${id}: the task's questions open at the end`, await shown(page, `${t} [data-ask-list]`));
         ok(`mock ${id}: one "I asked this" box per question`, (await block(page, id).locator('[data-ask-tick]').count()) === task.ask.length);
       }
+      // The end offers the walkthrough: the task on its topic page, where the pass counts too.
+      const walkLink = page.locator('[data-mock-bar] a[data-mock-walk]');
+      ok(`mock ${id}: "Open the walkthrough" offered at the end`, await walkLink.isVisible());
+      const href = (await walkLink.getAttribute('href')) ?? '';
+      ok(`mock ${id}: "Open the walkthrough" goes to the task on its topic page`, new URL(href, page.url()).pathname === topicHref(id, lang) && href.endsWith(`#${id}`), href);
+      // A reload after the end shows the self-review again, with the mock's code; no new mock.
+      await page.reload({ waitUntil: 'load' });
+      await page.locator('[data-mock-bar] .lcp-review').waitFor({ timeout: 20000 });
+      await block(page, id).locator('[data-editor]').scrollIntoViewIfNeeded();
+      await page.waitForFunction((i) => document.querySelector(`[data-lcp][data-id="${i}"]`)?.lcpBlock?.editor, id, { timeout: 20000 });
+      ok(`mock ${id}: a reload after the end shows the self-review, not a new mock`, (await page.locator('[data-mock-end]').count()) === 0 && !(await page.evaluate(() => document.documentElement.classList.contains('lcp-mock'))) && (await walkLink.isVisible()));
+      ok(`mock ${id}: a reload after the end keeps the mock's code`, (await code()) === task.solution, (await code()).slice(0, 60));
+      const topic = await ctx.newPage();
+      topic.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+      await topic.goto(new URL(href, page.url()).href, { waitUntil: 'load' });
+      ok(`mock ${id}: the topic page has the task and its walkthrough`, (await block(topic, id).isVisible()) && (await topic.locator('.sl-markdown-content > details.lcp-reveal').count()) > 0);
+      ok(`mock ${id}: the topic page shows the task as solved`, await block(topic, id).locator('[data-solved]').isVisible());
       ok(`mock ${id}: no console errors`, !errors.length, errors.join(' | ').slice(0, 300));
+      await ctx.close();
+    }
+
+    // The task that needs the database (WebAssembly JSPI) works on its mock page, opened directly.
+    {
+      const id = Object.keys(P.pyTasks).find((k) => P.pyTasks[k].db && placed.get(k));
+      const { page, ctx, errors } = await open(`/ru/mock/${id}/`);
+      await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
+      ok(`mock ${id} (database): a direct link starts the mock`, (await page.locator('[data-mock-clock]').innerText()).includes(String(mockMinutes(P.pyTasks[id].target))));
+      await setCode(page, id, P.pyTasks[id].solution);
+      const v = await check(page, id);
+      const skipped = await block(page, id).locator('.lcp-tests .lcp-skip').count();
+      ok(`mock ${id} (database): the tests with the database run and pass`, v.pass && !skipped, `${v.text.slice(0, 160)} (${skipped} skipped)`);
+      ok(`mock ${id} (database): no console errors`, !errors.length, errors.join(' | ').slice(0, 300));
+      await ctx.close();
+    }
+
+    // At phone width the mock pages do not scroll sideways.
+    for (const path of ['/mock/q12/', '/ru/mock/p01/']) {
+      const { page, ctx, errors, status } = await open(path, { viewport: { width: 390, height: 844 } });
+      await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
+      const [sw, cw] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
+      ok(`${path}: opens`, status === 200, `HTTP ${status}`);
+      ok(`${path}: no horizontal scroll at 390px`, sw <= cw, `${sw} > ${cw}`);
+      ok(`${path}: no console errors`, !errors.length, errors.join(' | ').slice(0, 300));
+      await ctx.close();
+    }
+
+    // The mock pages stay out of the sitemap.
+    {
+      const { page, ctx } = await open('/');
+      const index = await (await page.request.get(`${BASE}/sitemap-index.xml`)).text();
+      const maps = [...index.matchAll(/<loc>[^<]*\/(sitemap-\d+\.xml)<\/loc>/g)].map((m) => m[1]);
+      const xml = (await Promise.all(maps.map(async (m) => (await page.request.get(`${BASE}/${m}`)).text()))).join('');
+      ok('mock pages: not in the sitemap', maps.length > 0 && xml.includes('/start/mock-interview/') && !xml.includes('/mock/q'), maps.join());
+      await ctx.close();
+    }
+
+    // An old mock link on a topic page goes to the mock page.
+    {
+      const path = placed.get('q12').page;
+      const { page, ctx, errors } = await open(`/ru${path}?mock=q12#q12`);
+      await page.waitForURL(MOCK_URL, { timeout: 20000 });
+      await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
+      ok('old ?mock= link: goes to the mock page, in the language', neutral(page.url(), 'q12') && new URL(page.url()).pathname.includes('/ru/'), page.url());
+      ok('old ?mock= link: no console errors', !errors.length, errors.join(' | ').slice(0, 300));
       await ctx.close();
     }
 
@@ -521,17 +598,29 @@ if (!ONLY) {
       const { page, ctx, errors } = await open('/start/mock-interview/');
       await page.locator('input[name="lcm-mock-kind"][value="both"]').check();
       await page.locator('[data-mock-start]').click();
-      await page.waitForURL(/[?&]mock=/, { timeout: 20000 });
+      await page.waitForURL(MOCK_URL, { timeout: 20000 });
       const plan = JSON.parse(await page.evaluate(() => sessionStorage.getItem('lcm-mock')));
       const [a, b] = plan.queue.map((q) => q.id);
       const sum = mockMinutes(P.sqlTasks[a].target) + mockMinutes(P.pyTasks[b].target);
       ok('mock both: a SQL task, then a Python task', !!P.sqlTasks[a] && !!P.pyTasks[b], `${a}, ${b}`);
+      ok('mock both: the first task on its mock page', neutral(page.url(), a), page.url());
       await page.locator('[data-mock-bar]').waitFor({ timeout: 20000 });
       const clock = await page.locator('[data-mock-clock]').innerText();
       ok('mock both: task 1 of 2, the sum for the whole mock', clock.includes('1 of 2') && clock.includes(String(sum)), clock);
       await page.locator('[data-mock-end]').click();
       const next = page.locator('[data-mock-bar] a.lcp-btn-primary');
-      ok('mock both: "Next task" goes to the Python task', ((await next.getAttribute('href')) ?? '').includes(`mock=${b}`));
+      ok('mock both: "Next task" goes to the Python task\'s mock page', neutral(new URL((await next.getAttribute('href')) ?? '', page.url()).href, b), await next.getAttribute('href'));
+      await next.click();
+      await page.waitForURL(MOCK_URL, { timeout: 20000 });
+      await page.locator('[data-mock-bar] [data-mock-clock]').waitFor({ timeout: 20000 });
+      const clock2 = await page.locator('[data-mock-clock]').innerText();
+      ok('mock both: task 2 of 2 on a page that names no topic', neutral(page.url(), b) && clock2.includes('2 of 2') && clock2.includes(String(sum)), `${page.url()} ${clock2}`);
+      ok('mock both: the Python task is shown', await block(page, b).isVisible());
+      await page.reload({ waitUntil: 'load' });
+      await page.locator('[data-mock-bar] [data-mock-clock]').waitFor({ timeout: 20000 });
+      ok('mock both: a reload keeps task 2 of 2 and the address', neutral(page.url(), b) && (await page.locator('[data-mock-clock]').innerText()).includes('2 of 2'), page.url());
+      await page.locator('[data-mock-end]').click();
+      ok('mock both: the last task ends the mock', (await page.locator('[data-mock-bar] a.lcp-btn-primary').count()) === 0 && (await page.evaluate(() => sessionStorage.getItem('lcm-mock'))) === null);
       ok('mock both: no console errors', !errors.length, errors.join(' | ').slice(0, 300));
       await ctx.close();
     }
@@ -542,6 +631,7 @@ if (!ONLY) {
       const { page, ctx, errors } = await open('/start/mock-interview/', { init: "try { localStorage.setItem('lcm-study-plan', 'short'); } catch {}" });
       ok('mock plan: the picker names the plan', /Short/.test(await page.locator('[data-mock-plan]').innerText()));
       const cfg = JSON.parse(await page.locator('[data-mock-cfg]').textContent());
+      ok('mock plan: the picker links to mock pages only', [...cfg.sql, ...cfg.py].every((x) => sitePath(new URL(x.url, page.url()).href) === `/mock/${x.id}/`));
       const outside = [...cfg.sql, ...cfg.py].filter((x) => !short.has(`/${x.page}`));
       ok('mock plan: some tasks are outside the short plan', outside.length > 0);
       let inside = true;
@@ -549,8 +639,8 @@ if (!ONLY) {
         await page.goto(BASE + '/start/mock-interview/', { waitUntil: 'load' });
         await page.locator(`input[name="lcm-mock-kind"][value="${i % 2 ? 'py' : 'sql'}"]`).check();
         await page.locator('[data-mock-start]').click();
-        await page.waitForURL(/[?&]mock=/, { timeout: 20000 });
-        if (!short.has(sitePath(page.url()))) inside = false;
+        await page.waitForURL(MOCK_URL, { timeout: 20000 });
+        if (!short.has(placed.get(idOf(page.url()))?.page)) inside = false;
       }
       ok('mock plan: tasks come from the short plan', inside);
       ok('mock plan: no console errors', !errors.length, errors.join(' | ').slice(0, 300));
@@ -561,15 +651,15 @@ if (!ONLY) {
       const any = await open('/start/mock-interview/', { init: fixed });
       await any.page.locator('[data-mock-any]').check();
       await any.page.locator('[data-mock-start]').click();
-      await any.page.waitForURL(/[?&]mock=/, { timeout: 20000 });
-      ok('mock plan: "Any task" picks outside the plan too', k >= 0 && new URL(any.page.url()).searchParams.get('mock') === cfg.sql[k].id, `${any.page.url()} (want ${cfg.sql[k]?.id})`);
+      await any.page.waitForURL(MOCK_URL, { timeout: 20000 });
+      ok('mock plan: "Any task" picks outside the plan too', k >= 0 && idOf(any.page.url()) === cfg.sql[k].id, `${any.page.url()} (want ${cfg.sql[k]?.id})`);
       await any.ctx.close();
     }
     done();
   }
 
   // -------------------------------------------------------------- no JSPI: never solved when tests are skipped
-  {
+  if (!ONLY) {
     const done = section('no JSPI');
     const id = Object.keys(P.pyTasks).find((k) => P.pyTasks[k].db && placed.get(k));
     if (id) {

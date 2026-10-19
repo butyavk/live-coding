@@ -1,6 +1,13 @@
-// The mock interview, shared by the picker (MockInterview.astro) and the task pages (client.ts):
-// the clock and the queue of tasks in sessionStorage. The picker reads the study plan through
-// readPlan() in src/components/lib/plan-store.ts.
+// The mock interview, shared by the picker (MockInterview.astro), the mock pages (MockPage.astro)
+// and client.ts: the address of a task's mock page, the clock and the queue of tasks in
+// sessionStorage. The picker reads the study plan through readPlan() in
+// src/components/lib/plan-store.ts.
+
+/**
+ * The page of a task in a mock: /mock/<id>/ or /ru/mock/<id>/ (src/pages/). The address names no
+ * topic, as a real interviewer never says which pattern a task belongs to.
+ */
+export const mockHref = (id: string, ru: boolean) => `${import.meta.env.BASE_URL.replace(/\/?$/, '/')}${ru ? 'ru/' : ''}mock/${id}/`;
 
 /**
  * Minutes a task gets in a mock: 25, the slot a task gets in a real round; the hardest tasks get
@@ -33,6 +40,18 @@ export interface MockPlan {
 }
 
 export const MOCK_KEY = 'lcm-mock';
+
+/** A task whose mock has ended in this tab: a reload of its page shows the self-review again. */
+export interface MockEnded {
+  /** Seconds the task took, and the minutes the clock gave. */
+  used: number;
+  mins: number;
+  /** The next task's page in a mock of both kinds, or ''. */
+  next: string;
+  /** The page to go back to for another mock. */
+  back: string;
+}
+export const endedKey = (id: string) => `lcm-mock-ended:${id}`;
 
 export function readMock(): MockPlan | null {
   try {

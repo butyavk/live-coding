@@ -1,0 +1,41 @@
+---
+// One task of a mock interview, alone on a page whose address names no topic: /mock/<id>/ and
+// /ru/mock/<id>/ (src/pages/). A real interviewer never says which pattern a task belongs to, so
+// the topic page's slug, title, table of contents, walkthrough and skill-map box never show.
+// client.ts (setupMock) finds [data-mock-page] and runs the mock: the clock, the candidate's own
+// questions, the starter code and, at the end, the self-review with the link below to the
+// task's topic page (the walkthrough). Drafts and the solved state use the same keys as there.
+// Not for search: no sidebar entry, no site search (pagefind: false), noindex, and the sitemap
+// leaves these pages out (astro.config.mjs).
+//   <MockPage id="q12" locale="en" />
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import Task from './Task.astro';
+import { strings, type Locale } from './lib/i18n';
+import { taskPageHref, taskPages } from './lib/task-pages';
+
+interface Props {
+  id: string;
+  locale: Locale;
+}
+const { id, locale } = Astro.props;
+const T = strings(locale);
+const topic = taskPageHref(await taskPages(), id, locale);
+if (!topic) throw new Error(`Mock page: task ${id} is not placed on any page`);
+---
+<StarlightPage
+  frontmatter={{
+    title: T.mockTitle,
+    description: T.mockPageDesc,
+    pagefind: false,
+    tableOfContents: false,
+    prev: false,
+    next: false,
+    editUrl: false,
+    head: [{ tag: 'meta', attrs: { name: 'robots', content: 'noindex' } }],
+  }}
+>
+  <div data-mock-page={id}>
+    <Task id={id} />
+    <a class="lcp-btn" href={`${topic}#${id}`} target="_blank" rel="noopener" data-mock-walk hidden>{T.mockWalk}</a>
+  </div>
+</StarlightPage>

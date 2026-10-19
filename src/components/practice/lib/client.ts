@@ -7,7 +7,7 @@ import { pg, py, type SqlRun } from './runtime';
 import { compareEdge, compareResult, edgePrint, type EdgeExpected, type ExpectedSet, type Verdict } from './compare';
 import { banner, el, lastResult, pyErrorView, sqlRunView, userLine, verdictView, type PyErr } from './dom';
 import type { Editor } from './editor';
-import { mockMinutes, readMock, writeMock, type MockClock, type MockPlan } from './mock';
+import { endedKey, mockHref, mockMinutes, readMock, writeMock, type MockClock, type MockEnded, type MockPlan } from './mock';
 import { loadProgress, onProgressChange, setActivity } from '../../lib/progress';
 
 const isRu = !!document.documentElement.lang?.toLowerCase().startsWith('ru');
@@ -41,7 +41,7 @@ const store = storeOf(() => localStorage);
 /** Mock interviews keep their own code for the tab, so a reload does not lose it. */
 const session = storeOf(() => sessionStorage);
 
-/** True while the page is in mock interview mode (?mock=<id>). */
+/** True while a mock interview runs on this page (a mock page, /mock/<id>/). */
 let mockActive = false;
 
 interface Cfg {
@@ -754,13 +754,15 @@ class PyPlayground extends PyBlock {
 }
 
 // ---------------------------------------------------------------- mock interview mode
-// A task page opened as /…/?mock=q05#q05 (from the mock interview page) shows only that task, and
-// nothing that names its technique: no other tasks, no page title, table of contents, skill-map
-// box or page links, no difficulty, notes or walkthrough. The clock is max(25, target + 10)
-// minutes (lib/mock.ts) and survives a reload; the editor starts from the starter code; the
-// task's questions stay hidden while the candidate types their own. The hint opens after five
-// minutes; the solution and the walkthrough after a pass or when the time is up. "End the mock"
-// brings everything back, shows the task's questions to tick and the self-review checklist.
+// A mock page (/mock/q05/, MockPage.astro, from the mock interview page) shows one task on an
+// address that names no topic, and nothing on the page names its technique either: no topic title,
+// table of contents, skill-map box or walkthrough, no difficulty or notes. The clock is
+// max(25, target + 10) minutes (lib/mock.ts) and survives a reload; the editor starts from the
+// starter code; the task's questions stay hidden while the candidate types their own. The hint
+// opens after five minutes; the solution after a pass or when the time is up. "End the mock" brings
+// the task's labels back, shows the task's questions to tick, the self-review checklist and a link
+// to the walkthrough on the topic page; a reload after that shows the self-review again.
+// Old links to a topic page with ?mock=<id> go to the mock page.
 const mockPage = `${import.meta.env.BASE_URL.replace(/\/?$/, '/')}${isRu ? 'ru/' : ''}start/mock-interview/`;
 const askedKey = (id: string) => `lcm-mock-asked:${id}`;
 const mockDraftKey = (id: string) => `lcm-mock-draft:${id}`;
@@ -819,39 +821,66 @@ function reviewView(used: number, mins: number, actions: HTMLElement[]): HTMLEle
   );
 }
 
-function setupMock(blocks: Block[]) {
+/** Old mock links, /<topic>/?mock=<id>#<id>, name the topic: go to the task's mock page instead. */
+function legacyMock(): boolean {
   const id = new URLSearchParams(location.search).get('mock');
-  if (!id) return;
-  const b = blocks.find((x) => x.cfg.id === id && (x instanceof SqlTask || x instanceof PyTask)) as TaskBlock | undefined;
-  const content = b?.root.closest('.sl-markdown-content');
-  if (!b || !content) return;
-  const top = [...content.children].find((c) => c.contains(b.root)) as HTMLElement | undefined;
-  if (!top) return;
-  const html = document.documentElement;
-  mockActive = true;
-  html.classList.add('lcp-mock');
-  top.classList.add('lcp-mock-keep');
-  b.root.classList.add('lcp-mock-task');
-  b.redo = true;
-  b.syncSolved();
-  for (const d of b.root.querySelectorAll<HTMLDetailsElement>('details[data-solution], details[data-hint], [data-ask-list] details')) d.open = false;
+  if (!id || !document.querySelector(`[data-lcp^="task-"][data-id="${CSS.escape(id)}"]`)) return false;
+  location.replace(mockHref(id, isRu));
+  return true;
+}
 
-  // Outside the task: the page title (heading and browser tab) and the current page in the sidebar
-  // name the technique. The table of contents, the skill-map box and the page links go by CSS.
-  const titlePanel = document.querySelector('h1#_top')?.closest('.content-panel');
-  titlePanel?.classList.add('lcp-mock-off');
-  const current = [...document.querySelectorAll<HTMLElement>('nav.sidebar [aria-current="page"]')];
-  for (const a of current) a.removeAttribute('aria-current');
-  const pageTitle = document.title;
-  document.title = pageTitle.includes(' | ') ? `${T.mockTitle} | ${pageTitle.split(' | ').pop()}` : T.mockTitle;
+function setupMock(blocks: Block[]) {
+  const top = document.querySelector<HTMLElement>('[data-mock-page]');
+  const id = top?.dataset.mockPage;
+  const b = blocks.find((x) => x.cfg.id === id && (x instanceof SqlTask || x instanceof PyTask)) as TaskBlock | undefined;
+  if (!top || !id || !b) return;
+  const walk = top.querySelector<HTMLAnchorElement>('[data-mock-walk]');
+  const html = document.documentElement;
+  // The mock page keeps the mock's code for this tab, also after the end; the reader's own draft
+  // (the topic page's) is one click away.
+  b.mockDrafts(true);
+  const bar = el('div', { class: 'lcp-mock-bar not-content', 'data-mock-bar': '' });
+  top.before(bar);
+
+  /** The end: the self-review, "Next task" in a mock of both kinds, the walkthrough, another mock. */
+  const review = (e: MockEnded, revealAsk: () => void) => {
+    revealAsk();
+    const actions: HTMLElement[] = [];
+    if (e.next) actions.push(el('a', { class: 'lcp-btn lcp-btn-primary', href: e.next, text: T.mockNext }));
+    if (walk) {
+      walk.hidden = false;
+      actions.push(walk);
+    }
+    actions.push(el('a', { class: 'lcp-btn', href: e.back || mockPage, text: T.mockAgain }));
+    bar.replaceChildren(reviewView(e.used, e.mins, actions));
+  };
 
   // The plan: the queue from the picker, or this task alone when the link was opened directly.
   const mins = mockMinutes(b.cfg.target ?? 20);
   const found = readMock();
-  const plan: MockPlan = found && found.queue[0]?.id === id ? found : { queue: [{ id, url: `${location.pathname}${location.search}#${id}`, mins }], back: '', count: 1, total: mins };
+  const live = !!found && found.queue[0]?.id === id;
+  // This task's mock already ended in this tab (a reload, or Back from the next page): the review again.
+  let ended: MockEnded | null = null;
+  try {
+    ended = live ? null : JSON.parse(session.get(endedKey(id)) || 'null');
+  } catch {
+    /* ignore */
+  }
+  if (ended && typeof ended.used === 'number') {
+    review(ended, mockAsk(b));
+    return;
+  }
+  const plan: MockPlan = live ? found! : { queue: [{ id, url: mockHref(id, isRu), mins }], back: '', count: 1, total: mins };
   const count = plan.count || plan.queue.length;
   const total = plan.total || mins;
   const k = count - plan.queue.length + 1;
+
+  mockActive = true;
+  html.classList.add('lcp-mock');
+  b.root.classList.add('lcp-mock-task');
+  b.redo = true;
+  b.syncSolved();
+  for (const d of b.root.querySelectorAll<HTMLDetailsElement>('details[data-solution], details[data-hint], [data-ask-list] details')) d.open = false;
 
   // The clock, resumed after a reload. One left running for hours belongs to an abandoned mock.
   const saved = plan.clock?.[id] ?? null;
@@ -859,6 +888,7 @@ function setupMock(blocks: Block[]) {
   if (!state) {
     session.set(mockDraftKey(id), null);
     session.set(askedKey(id), null);
+    session.set(endedKey(id), null);
   }
   writeMock(plan);
   b.timer.mock(state, mins, (c) => {
@@ -867,7 +897,6 @@ function setupMock(blocks: Block[]) {
   });
 
   // The editor starts from the starter code; the reader's saved draft is one click away.
-  b.mockDrafts(true);
   if (b.editor) b.editor.set(session.get(mockDraftKey(id)) ?? b.cfg.starter ?? '');
   const draft = b.savedDraft();
   const restore = draft ? el('button', { type: 'button', class: 'lcp-btn', 'data-mock-restore': '', text: T.mockRestore }) : null;
@@ -880,20 +909,11 @@ function setupMock(blocks: Block[]) {
 
   const note = el('div', { class: 'lcp-small', hidden: true, text: T.mockOver });
   const endBtn = el('button', { type: 'button', class: 'lcp-btn lcp-btn-primary', 'data-mock-end': '', text: T.mockEnd });
-  const bar = el(
-    'div',
-    { class: 'lcp-mock-bar not-content lcp-mock-keep', 'data-mock-bar': '' },
-    banner('info', T.mockTitle, el('div', { 'data-mock-clock': '', text: count > 1 ? T.mockClockOf(mins, k, count, total) : T.mockClock(mins) }), el('div', { text: T.mockHow }), note, el('div', { class: 'lcp-bar' }, endBtn, restore)),
-  );
-  top.before(bar);
-  requestAnimationFrame(() => bar.scrollIntoView({ block: 'start' }));
+  bar.append(banner('info', T.mockTitle, el('div', { 'data-mock-clock': '', text: count > 1 ? T.mockClockOf(mins, k, count, total) : T.mockClock(mins) }), el('div', { text: T.mockHow }), note, el('div', { class: 'lcp-bar' }, endBtn, restore)));
 
   const unlock = (what: 'hint' | 'all') => {
     b.root.querySelector('[data-hint]')?.classList.add('lcp-mock-unlocked');
-    if (what === 'all') {
-      b.root.querySelector('[data-solution]')?.classList.add('lcp-mock-unlocked');
-      b.walk?.classList.add('lcp-mock-keep');
-    }
+    if (what === 'all') b.root.querySelector('[data-solution]')?.classList.add('lcp-mock-unlocked');
   };
   const step = () => {
     if (b.timer.seconds >= 300) unlock('hint');
@@ -910,21 +930,13 @@ function setupMock(blocks: Block[]) {
     b.timer.endMock();
     mockActive = false;
     html.classList.remove('lcp-mock');
-    titlePanel?.classList.remove('lcp-mock-off');
-    for (const a of current) a.setAttribute('aria-current', 'page');
-    document.title = pageTitle;
-    b.mockDrafts(false);
     b.syncSolved();
-    revealAsk();
-    // A reload now shows the normal page.
-    history.replaceState(history.state, '', `${location.pathname}${location.hash}`);
-    const rest = plan.queue.filter((q) => q.id !== id);
-    if (rest.length) writeMock({ ...(readMock() ?? plan), queue: rest });
-    else writeMock(null);
-    const actions: HTMLElement[] = [];
-    if (rest.length) actions.push(el('a', { class: 'lcp-btn lcp-btn-primary', href: rest[0].url, text: T.mockNext }));
-    actions.push(el('a', { class: 'lcp-btn', href: plan.back || mockPage, text: T.mockAgain }));
-    bar.replaceChildren(reviewView(used, mins, actions));
+    const p = readMock() ?? plan;
+    const rest = p.queue.filter((q) => q.id !== id);
+    writeMock(rest.length ? { ...p, queue: rest } : null);
+    const e: MockEnded = { used, mins, next: rest[0]?.url ?? '', back: p.back };
+    session.set(endedKey(id), JSON.stringify(e));
+    review(e, revealAsk);
     bar.scrollIntoView({ block: 'start' });
   });
 }
@@ -941,6 +953,7 @@ const KINDS: Record<string, new (root: HTMLElement) => Block> = {
 };
 
 function init() {
+  if (legacyMock()) return;
   const blocks: Block[] = [];
   document.querySelectorAll<HTMLElement>('[data-lcp]').forEach((root) => {
     if (root.dataset.lcpReady) return;

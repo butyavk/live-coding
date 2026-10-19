@@ -191,7 +191,7 @@ const en = {
   mockNone: 'No task to pick.',
   mockClock: (m: number) => `${m} minutes for this task.`,
   mockClockOf: (m: number, k: number, n: number, total: number) => `Task ${k} of ${n}: ${m} minutes for this task, ${total} for the whole mock.`,
-  mockHow: 'Restate the task, ask your questions out loud, then code. The walkthrough and the solution open when Check passes or the time is up.',
+  mockHow: 'Restate the task, ask your questions out loud, then code. The solution opens when Check passes or the time is up; the walkthrough, when you end the mock.',
   mockRestore: 'Restore my draft',
   mockTime: (used: string, m: number) => `Your time: ${used}. The clock gave ${m} minutes.`,
   mockTicked: (k: number, n: number) => `${k} of ${n}`,
@@ -212,6 +212,8 @@ const en = {
     'I kept to time: code by minute 10, finished before the timer.',
   ],
   mockAgain: 'Another mock',
+  mockWalk: 'Open the walkthrough',
+  mockPageDesc: 'One task of a mock live-coding interview, on the clock.',
 };
 
 const ru: typeof en = {
@@ -388,7 +390,7 @@ const ru: typeof en = {
   mockNone: 'Нечего выбрать.',
   mockClock: (m: number) => `${m} мин на эту задачу.`,
   mockClockOf: (m: number, k: number, n: number, total: number) => `Задача ${k} из ${n}: ${m} мин на эту задачу, ${total} мин на весь мок.`,
-  mockHow: 'Перескажите задачу, задайте вопросы вслух, потом пишите код. Разбор и решение откроются, когда проверка пройдёт или время выйдет.',
+  mockHow: 'Перескажите задачу, задайте вопросы вслух, потом пишите код. Решение откроется, когда проверка пройдёт или время выйдет, а разбор — когда вы закончите мок.',
   mockRestore: 'Вернуть мой черновик',
   mockTime: (used: string, m: number) => `Ваше время: ${used}. На часах было ${m} мин.`,
   mockTicked: (k: number, n: number) => `${k} из ${n}`,
@@ -408,6 +410,8 @@ const ru: typeof en = {
     'Вы уложились во время: код к 10-й минуте, конец до сигнала таймера.',
   ],
   mockAgain: 'Ещё один мок',
+  mockWalk: 'Открыть разбор',
+  mockPageDesc: 'Задача мок-интервью по лайвкодингу, на время.',
 };
 
 export function plural(n: number, one: string, few: string, many: string): string {

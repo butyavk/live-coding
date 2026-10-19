@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import remarkBaseLinks from './src/plugins/remark-base-links.mjs';
 import rehypeTableCorner from './src/plugins/rehype-table-corner.mjs';
 
@@ -14,6 +15,25 @@ const group = (label, ru, directory, collapsed = false) => ({
   collapsed,
   items: [{ autogenerate: { directory } }],
 });
+
+/**
+ * The mock interview pages (src/pages/mock/, one per task) are not for search engines: they carry
+ * noindex and stay out of the site search, and this drops them from the sitemap that Starlight
+ * writes. It runs after the sitemap, as it comes after Starlight in `integrations`.
+ */
+const sitemapWithoutMocks = {
+  name: 'live-coding:sitemap-without-mocks',
+  hooks: {
+    'astro:build:done': async ({ dir }) => {
+      for (const f of await readdir(dir)) {
+        if (!/^sitemap-\d+\.xml$/.test(f)) continue;
+        const file = new URL(f, dir);
+        const xml = await readFile(file, 'utf8');
+        await writeFile(file, xml.replace(/<url>.*?<\/url>/gs, (u) => (/<loc>[^<]*\/mock\/[^<]*<\/loc>/.test(u) ? '' : u)));
+      }
+    },
+  },
+};
 
 export default defineConfig({
   site,
@@ -70,5 +90,6 @@ export default defineConfig({
         group('About', 'О проекте', 'about', true),
       ],
     }),
+    sitemapWithoutMocks,
   ],
 });

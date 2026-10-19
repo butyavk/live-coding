@@ -888,17 +888,11 @@ a.lcp-btn-primary {
   display: none;
 }
 /*
- * In mock mode the page shows only the task and nothing that names its technique: no other tasks,
- * no page title, no table of contents, no skill-map box, page links or "Edit page" link (its URL
- * names the page), no walkthrough, and no list of questions until the candidate has typed their
- * own. The clock cannot be paused or reset.
+ * A mock page (MockPage.astro) holds the task alone, on an address that names no topic. While the
+ * mock runs, nothing in the task names its technique either: no difficulty or target time, no notes
+ * about the data, no hint for five minutes, no solution before a pass or the end of the time, and no
+ * list of questions until the candidate has typed their own. The clock cannot be paused or reset.
  */
-html.lcp-mock .sl-markdown-content > :not(.lcp-mock-keep),
-html.lcp-mock .lcp-mock-off,
-html.lcp-mock .right-sidebar-container,
-html.lcp-mock .lcm-topic,
-html.lcp-mock .pagination-links,
-html.lcp-mock footer .meta > a,
 html.lcp-mock .lcp-mock-task [data-mock-hide],
 html.lcp-mock .lcp-mock-task [data-hint]:not(.lcp-mock-unlocked),
 html.lcp-mock .lcp-mock-task [data-solution]:not(.lcp-mock-unlocked),

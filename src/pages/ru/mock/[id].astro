@@ -1,0 +1,10 @@
+---
+// A task in a mock interview, Russian page, on an address that names no topic (see MockPage.astro).
+import MockPage from '~/components/practice/MockPage.astro';
+import { mockPaths } from '~/components/practice/lib/task-pages';
+
+export async function getStaticPaths() {
+  return mockPaths();
+}
+---
+<MockPage id={Astro.params.id!} locale="ru" />

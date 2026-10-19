@@ -1,19 +1,19 @@
 ---
-// The mock interview starter: pick SQL, Python or both, and "Start" opens a random task page in
-// mock mode (?mock=<id>#<id>, see setupMock in lib/client.ts). By default the task comes from the
-// pages of the reader's study plan (readPlan() in lib/plan-store.ts, `medium` when missing); "Any
-// task" lifts that. Tasks the reader has already solved (progress `ex:<id>`) are skipped while
-// unsolved ones are left. "Both" queues a SQL task and then a Python one; the queue and the clock
-// live in sessionStorage ('lcm-mock', lib/mock.ts).
+// The mock interview starter: pick SQL, Python or both, and "Start" opens a random task on its
+// mock page, /mock/<id>/, an address that names no topic (MockPage.astro; setupMock in
+// lib/client.ts). By default the task comes from the pages of the reader's study plan (readPlan()
+// in lib/plan-store.ts, `medium` when missing); "Any task" lifts that. Tasks the reader has already
+// solved (progress `ex:<id>`) are skipped while unsolved ones are left. "Both" queues a SQL task
+// and then a Python one; the queue and the clock live in sessionStorage ('lcm-mock', lib/mock.ts).
 //   <MockInterview />          the picker
 //   <MockInterview review />   the self-review checklist, the same list the end of a mock shows
-import { getCollection } from 'astro:content';
 import { sqlTasks } from '~/data/practice/sql-tasks';
 import { pyTasks } from '~/data/practice/py-tasks';
 import { studyPhases, timelines } from '~/data/study-plan';
 import { getTask, localeOf } from './lib/data';
 import { strings } from './lib/i18n';
-import { mockMinutes } from './lib/mock';
+import { mockHref, mockMinutes } from './lib/mock';
+import { taskPages } from './lib/task-pages';
 import './practice.css';
 
 interface Props {
@@ -23,29 +23,14 @@ interface Props {
 const { review = false } = Astro.props;
 const locale = localeOf(Astro);
 const T = strings(locale);
-const rawBase = import.meta.env.BASE_URL;
-const base = rawBase.endsWith('/') ? rawBase : `${rawBase}/`;
-
-// Which page shows each task: scan the pages for <Task id="…" />.
-const where: Record<string, { en?: string; ru?: string }> = {};
-for (const entry of await getCollection('docs')) {
-  const ru = entry.id.startsWith('ru/');
-  const slug = (ru ? entry.id.slice(3) : entry.id).replace(/(^|\/)index$/, '');
-  for (const m of (entry.body ?? '').matchAll(/<Task\s+id=["']([a-z0-9]+)["']/g)) {
-    (where[m[1]] ??= {})[ru ? 'ru' : 'en'] = slug ? `${slug}/` : '';
-  }
-}
-const urlOf = (id: string): string | null => {
-  const w = where[id];
-  if (!w) return null;
-  if (locale === 'ru' && w.ru !== undefined) return `${base}ru/${w.ru}?mock=${id}#${id}`;
-  return w.en !== undefined ? `${base}${w.en}?mock=${id}#${id}` : null;
-};
+// The page that shows each task: the study plan's filter works on pages. A task on no page has no
+// mock page either.
+const where = await taskPages();
 type Item = { id: string; url: string; mins: number; page: string };
 const list = (ids: string[]): Item[] =>
   ids.flatMap((id) => {
-    const url = urlOf(id);
-    return url ? [{ id, url, mins: mockMinutes(getTask(id).task.target), page: where[id].en ?? where[id].ru ?? '' }] : [];
+    const w = where[id];
+    return w ? [{ id, url: mockHref(id, locale === 'ru'), mins: mockMinutes(getTask(id).task.target), page: w.en ?? w.ru ?? '' }] : [];
   });
 // The pages each study plan goes through (src/data/study-plan.ts).
 const plans = Object.fromEntries(
