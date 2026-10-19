@@ -1,0 +1,218 @@
+---
+title: Grouping and counting
+description: GROUP BY and HAVING for report tasks. The order in which a query runs, why an alias fails in WHERE, three kinds of COUNT and the grain of the result.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Most report tasks say "per channel", "per month" or "per customer". `GROUP BY` turns many rows into one row per group. The usual mistakes are the wrong grain, rows counted where customers were asked for, and a condition in the wrong clause.
+
+<Aside type="tip" title="TL;DR">
+- Say the grain first: "one row per channel and month". It becomes the `GROUP BY` list.
+- Every column in `SELECT` is either in `GROUP BY` or inside an aggregate.
+- `WHERE` filters rows before grouping; `HAVING` filters groups after it.
+- `COUNT(*)` counts rows, `COUNT(col)` non-NULL values, `COUNT(DISTINCT col)` different values.
+- A `SELECT` alias works in `ORDER BY`, not in `WHERE` or `HAVING`. Sort with a second key for ties.
+</Aside>
+
+## One row per what
+
+Before you write a query, say what one row of the result is. "Revenue per channel" is one row per channel. "Transactions per channel and plan period" is one row per pair. This grain decides the `GROUP BY` list. Every column in `SELECT` must be in that list or inside an aggregate: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+
+```sql
+SELECT channel, plan_period, COUNT(*) AS transactions
+FROM transactions
+WHERE NOT is_test
+  AND channel IN ('promo', 'web')
+  AND start_time >= TIMESTAMP '2026-08-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+GROUP BY channel, plan_period
+ORDER BY channel, plan_period;
+```
+
+| channel | plan_period | transactions |
+|---|---|---|
+| promo | P1M | 6 |
+| promo | P1Y | 2 |
+| web | P1M | 37 |
+| web | P1W | 6 |
+| web | P1Y | 8 |
+
+A group exists only if it has rows. Promo access has no weekly plan in August, so there is no `promo, P1W` row with 0. To show such zeros, start from a list of all groups: see [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+
+<Trap id="group-missing" q="Will the query run?">
+
+No: `column "transactions.channel" must appear in the GROUP BY clause or be used in an aggregate function`. One country has many channels, so which one should the row show? Add `channel` to `GROUP BY`, or put it inside an aggregate.
+
+</Trap>
+
+PostgreSQL relaxes the rule in one case. When you group by a table's primary key, the other columns of that table may appear in `SELECT` without being listed: `GROUP BY m.id` is enough to show `m.name`. Listing both (`GROUP BY m.id, m.name`) is also fine and works in every database.
+
+## The order in which a query runs
+
+A query is written in one order and runs in another:
+
+| Step | Clause | What it works with |
+|---|---|---|
+| 1 | `FROM`, `JOIN` | the rows of the tables |
+| 2 | `WHERE` | one row at a time |
+| 3 | `GROUP BY` | rows that become groups |
+| 4 | `HAVING` | one group at a time, with its aggregates |
+| 5 | `SELECT` | output columns; aliases are born here |
+| 6 | `ORDER BY` | the output, aliases included |
+| 7 | `LIMIT` | the sorted output |
+
+An alias is created in step 5, so `WHERE` and `HAVING` cannot see it yet.
+
+<Trap id="where-alias" q="Will the query run?">
+
+No: `column "proceeds" does not exist`. `WHERE` runs before `SELECT`, so the alias does not exist yet. Repeat the expression in `WHERE`, or compute it in a CTE and filter outside.
+
+</Trap>
+
+<Trap id="having-alias" q="And this one, with the alias in HAVING?">
+
+No: `column "n" does not exist`. In PostgreSQL, `HAVING` needs the expression itself: `HAVING COUNT(*) > 1000`. In `ORDER BY` the alias is fine, because sorting happens after `SELECT`.
+
+</Trap>
+
+`ORDER BY` runs after `SELECT`, so it sees aliases. PostgreSQL also accepts an alias or a position in `GROUP BY`. This is a convenience of the dialect; it does not reach `WHERE` or `HAVING`.
+
+```sql
+SELECT channel AS s, COUNT(*) AS n
+FROM transactions
+GROUP BY s
+ORDER BY n DESC;
+```
+
+| s | n |
+|---|---|
+| north_market | 4594 |
+| south_market | 2855 |
+| web | 740 |
+| promo | 105 |
+
+## WHERE or HAVING
+
+A condition on single rows goes in `WHERE`: test purchases, dates, channel. A condition on a group's aggregate goes in `HAVING`: "more than 300 transactions". Products with at least 15 refunds, test purchases excluded:
+
+```sql
+SELECT product_id, COUNT(*) AS refunds
+FROM transactions
+WHERE NOT is_test
+  AND refunded_at IS NOT NULL
+GROUP BY product_id
+HAVING COUNT(*) >= 15
+ORDER BY refunds DESC, product_id;
+```
+
+| product_id | refunds |
+|---|---|
+| prd_08 | 17 |
+| prd_20 | 17 |
+| prd_04 | 16 |
+
+`HAVING channel = 'web'` also runs. But it groups every channel first and then throws most groups away. If a condition does not use an aggregate, put it in `WHERE`.
+
+## Three kinds of COUNT
+
+- `COUNT(*)` counts rows.
+- `COUNT(col)` counts rows where `col` is not NULL.
+- `COUNT(DISTINCT col)` counts different non-NULL values.
+
+<Trap id="count-forms" q="What is the difference between the three counters?">
+
+8032 rows, 180 of them with a refund, 4 channels. `COUNT(*)` counts rows, `COUNT(column)` counts rows where the column is not NULL, and `COUNT(DISTINCT column)` counts different values.
+
+</Trap>
+
+A customer can buy many times. "How many customers" is `COUNT(DISTINCT customer_id)`, not `COUNT(*)`.
+
+<Trap id="distinct-users" q="Georgia, September, no test purchases: transactions and customers. Why are the numbers different?">
+
+39 transactions and 35 customers: some customers paid more than once in the month. "How many customers" is `COUNT(DISTINCT customer_id)`. Before you count, ask who the customer is: a person across all products, or a customer of one product.
+
+</Trap>
+
+If a customer means a customer of one product, count pairs: `COUNT(DISTINCT (customer_id, product_id))`. In the practice data each `customer_id` buys one product only, so both forms give the same number. The question still shows that you thought about it.
+
+### Distinct counts do not add up
+
+A customer who paid in June and in July is one customer in each month:
+
+```sql
+SELECT CAST(date_trunc('month', start_time) AS DATE) AS month,
+       COUNT(DISTINCT customer_id) AS customers
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time >= TIMESTAMP '2026-06-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+GROUP BY 1
+ORDER BY 1;
+```
+
+| month | customers |
+|---|---|
+| 2026-06-01 | 393 |
+| 2026-07-01 | 399 |
+| 2026-08-01 | 432 |
+
+The three months add up to 1224, but the same filter without `GROUP BY` returns 691 different customers. For the whole quarter, count distinct values over the quarter. Never add up distinct counts of smaller groups.
+
+## Ties in ORDER BY
+
+With `ORDER BY gross_usd DESC` alone, two equal sums come out in any order, and `LIMIT` may cut the wrong one. Add a second key: `ORDER BY gross_usd DESC, channel`. `DESC` applies only to the column right before it, so `ORDER BY paid_at DESC, payout_id` sorts `payout_id` in ascending order.
+
+## Practice
+
+<Drill id="s-group">
+
+One row per channel: `GROUP BY channel`. The second sort key (`channel`) settles equal sums. The `promo` row stays in the result with 0.00: promo transactions are real rows, and the report shows them honestly.
+
+</Drill>
+
+<Drill id="s-having">
+
+`WHERE` keeps the paid rows of nine months before grouping; `HAVING` keeps the countries after it. In `HAVING`, write the expression `COUNT(*)` itself: PostgreSQL does not see the alias there.
+
+</Drill>
+
+<Drill id="s-distinct">
+
+A customer can buy several times in a month, so this is `COUNT(DISTINCT customer_id)`. Say out loud who the customer is: a person across all products, or a customer of one product.
+
+</Drill>
+
+<Drill id="s-arppu">
+
+ARPPU is the average revenue per paying user, here per paying customer: `SUM(revenue_usd) / COUNT(DISTINCT customer_id)`. `revenue_usd` is `numeric`, so the division keeps its decimals. If both sides were integers, you would need `1.0 *` in front. `ROUND` comes last, on the final value.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Say the grain before you write `GROUP BY`: "One row per channel and month, so I group by both." Then hold the output against it: four channels and nine months give at most 36 rows.
+
+A change to the task often comes as one short line:
+
+- **Interviewer:** "Now only channels with more than 100 customers."
+- **You:** "That's a condition on the groups, so I add HAVING COUNT(DISTINCT customer_id) > 100. The rest stays the same."
+</Aside>
+
+## Further reading
+
+- [GROUP BY and HAVING clauses](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-GROUP) — groups, and conditions on groups.
+- [SELECT](https://www.postgresql.org/docs/current/sql-select.html) — the description starts with the numbered order in which a query is processed.
+- [GROUP BY in SELECT](https://www.postgresql.org/docs/current/sql-select.html#SQL-GROUPBY) — output column names and positions, and grouping by a primary key.
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — `COUNT(*)`, `DISTINCT` and `FILTER` inside an aggregate.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — the full list.
+
+## Related topics
+
+- [Filters and dates](/sql/filters-and-dates/) — what goes into `WHERE` before any grouping.
+- [NULL logic](/sql/null-logic/) — why `COUNT(col)` skips rows and why an empty `SUM` is NULL.
+- [Conditional aggregation](/sql/conditional-aggregation/) — several counters in one `GROUP BY`.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — `COUNT(*)` against `COUNT(DISTINCT id)` when events arrive twice.
+- [Top N per group](/sql-patterns/top-n-per-group/) — when you need the best row in each group, not a summary.

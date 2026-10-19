@@ -1,0 +1,192 @@
+---
+title: LEFT JOIN и нули
+description: Каждый X, даже с нулём. Начать с X, присоединить факты через LEFT JOIN, условия на правую таблицу — в ON, считать её колонку и оборачивать суммы в COALESCE.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+В задачах часто звучит «для каждого продукта» или «включая продавцов (merchants) без продаж». Внутреннее соединение или фильтр не на своём месте выбрасывает нули. Отчёт выглядит полным, а строк в нём не хватает. Рецепт состоит из пяти шагов, и каждый защищает от известной ошибки.
+
+<Aside type="tip" title="Коротко">
+- Начинайте `FROM` с таблицы, где есть все X: `FROM merchants m LEFT JOIN …`.
+- Условия на правую таблицу — в `ON`, а не в `WHERE`. Условия на сами X — в `WHERE`.
+- Считайте колонку правой таблицы: `COUNT(cp.payout_id)`, а не `COUNT(*)`.
+- Суммы оборачивайте в `COALESCE(SUM(…), 0)`.
+- Проверьте число строк: одна строка на X.
+</Aside>
+
+## Начать с таблицы всех X
+
+`LEFT JOIN` сохраняет каждую строку левой таблицы. Левая строка без пары получает одну строку с NULL во всех колонках правой таблицы. Поэтому таблица, где есть все X, ставится слева.
+
+Пример: каждый продавец и выплаты маркетплейсов за августовские продажи. Часть выплат ещё не пришла.
+
+```sql
+SELECT m.id,
+       COUNT(cp.payout_id)             AS payouts,
+       COALESCE(SUM(cp.amount_usd), 0) AS paid_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+Первые три строки из 12:
+
+| id | payouts | paid_usd |
+|---|---|---|
+| mer_01 | 0 | 0 |
+| mer_02 | 1 | 154.57 |
+| mer_03 | 1 | 89.20 |
+
+На каждого продавца одна строка, у mer_01 и mer_11 — 0. Внутренний `JOIN` вернул бы только 10 продавцов. Двое без выплаты — ради которых отчёт и нужен — пропали бы.
+
+Вот что соединение даёт до группировки, для двух продавцов:
+
+```sql
+SELECT m.id, cp.payout_id, cp.channel, cp.amount_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+WHERE m.id IN ('mer_01', 'mer_02')
+ORDER BY m.id;
+```
+
+| id | payout_id | channel | amount_usd |
+|---|---|---|---|
+| mer_01 | NULL | NULL | NULL |
+| mer_02 | po_0026 | south_market | 154.57 |
+
+У mer_01 нет выплаты за август, поэтому он получает одну строку из NULL. Три следующих правила вытекают из этой строки.
+
+## Условия на правую таблицу — в ON
+
+`ON` применяется, пока строки подбираются в пары; `WHERE` — после соединения. Условие на правую таблицу в `WHERE` для строки из NULL даёт NULL, `WHERE` эту строку выбрасывает, и `LEFT JOIN` ведёт себя как внутреннее соединение. Если в запросе выше перенести `cp.period_month = DATE '2026-08-01'` из `ON` в `WHERE`, вернётся 10 строк: mer_01 и mer_11 исчезнут.
+
+<Trap id="left-where" q="Продажи в Японии в сентябре по каждому продукту, «включая нули». Сколько продуктов из 20 попадёт в результат?">
+
+19, а не 20 — пропал prd_06. `WHERE t.country = 'JP'` выбрасывает строки без пары (там `t.country` — NULL), и `LEFT JOIN` превращается в обычный `JOIN`. Условия на правую таблицу — в `ON`.
+
+</Trap>
+
+С условиями на левую таблицу иначе. Они выбирают, какие X попадут в отчёт, поэтому идут в `WHERE`. Только продавцы, подключённые к программе авансов:
+
+```sql
+SELECT m.id,
+       COUNT(cp.payout_id)             AS payouts,
+       COALESCE(SUM(cp.amount_usd), 0) AS paid_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+WHERE m.advances_enrolled_at IS NOT NULL
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+| id | payouts | paid_usd |
+|---|---|---|
+| mer_01 | 0 | 0 |
+| mer_03 | 1 | 89.20 |
+| mer_04 | 1 | 310.12 |
+| mer_07 | 1 | 13.58 |
+| mer_09 | 1 | 178.40 |
+| mer_11 | 0 | 0 |
+
+Другой способ держать правую сторону чистой — сначала отфильтровать её в CTE, а потом соединить результат. См. [Подзапросы и CTE](/sql/subqueries-and-cte/).
+
+## Считать колонку, а не строку
+
+После `LEFT JOIN` у продавца без выплат всё равно есть одна строка. `COUNT(*)` её считает и возвращает 1. `COUNT(cp.payout_id)` считает только настоящие пары: в строке из NULL эта колонка — NULL. Считайте ключ правой таблицы или любую колонку, которая в настоящей строке не бывает NULL.
+
+<Trap id="left-count-star" q="У prd_06 нет продаж в Японии в сентябре. Что покажут два счётчика?">
+
+`count_star` = 1, `count_col` = 0. После `LEFT JOIN` у продукта без пары остаётся одна строка с NULL справа, и `COUNT(*)` её считает. Считайте колонку правой таблицы: `COUNT(t.product_id)`.
+
+</Trap>
+
+## COALESCE для сумм
+
+`SUM` по строке из NULL — NULL. Для отчёта, а для денег всегда, превращайте его в 0: `COALESCE(SUM(cp.amount_usd), 0)`. `COUNT` в `COALESCE` не нуждается: он и так возвращает 0.
+
+Осторожно с колонками левой таблицы. Левая строка без пары сохраняет свои значения, поэтому `SUM` по колонке левой таблицы вернёт это значение, а не 0. Именно эта ловушка — во втором упражнении ниже.
+
+## Две таблицы фактов: сначала свернуть каждую
+
+«Каждый продавец с выплатами и авансами» — это две таблицы «много». Два простых `LEFT JOIN` умножают строки друг друга. Сверните каждую таблицу до одной строки на продавца, потом присоедините оба результата к `merchants`:
+
+```sql
+WITH paid AS (
+    SELECT merchant_id, SUM(amount_usd) AS paid_usd
+    FROM channel_payouts
+    WHERE period_month = DATE '2026-08-01'
+    GROUP BY merchant_id
+),
+advanced AS (
+    SELECT merchant_id, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    WHERE period_month = DATE '2026-08-01'
+    GROUP BY merchant_id
+)
+SELECT m.id,
+       COALESCE(pd.paid_usd, 0)    AS paid_usd,
+       COALESCE(v.advanced_usd, 0) AS advanced_usd
+FROM merchants m
+LEFT JOIN paid pd    ON pd.merchant_id = m.id
+LEFT JOIN advanced v ON v.merchant_id = m.id
+ORDER BY m.id;
+```
+
+Первые четыре строки из 12:
+
+| id | paid_usd | advanced_usd |
+|---|---|---|
+| mer_01 | 0 | 125.45 |
+| mer_02 | 154.57 | 0 |
+| mer_03 | 89.20 | 175.44 |
+| mer_04 | 310.12 | 384.11 |
+
+mer_01 уже получил авансы под августовские продажи, а ни один маркетплейс ему ещё не заплатил. Если вместо CTE сделать два простых `LEFT JOIN` к исходным таблицам, выплаты mer_04 удвоятся с 310,12 до 620,24: единственная строка выплаты встретится с обоими его авансами. Подробнее — в [размножении строк](/sql-patterns/row-multiplication/).
+
+## Практика
+
+<Drill id="s-left-zero">
+
+«Включая нули» — начинаем с `products` и присоединяем транзакции через `LEFT JOIN`. Все условия на `transactions` — в `ON`: в `WHERE` они выкинули бы продукты без пары. Считаем `COUNT(t.transaction_id)`: `COUNT(*)` дал бы 1 вместо 0.
+
+</Drill>
+
+<Drill id="s-stock-on-hand">
+
+Строки результата задают товары: `FROM items i LEFT JOIN stock_moves mv`. Ограничение по дате — условие на правую таблицу, поэтому оно в `ON`. В `WHERE` оно выбросило бы Stapler, у которого движений нет совсем, и Tape, у которого единственное движение — 3 октября. `WHERE mv.moved_at < … OR mv.moved_at IS NULL` возвращает Stapler, но Tape всё равно теряет. `COALESCE(SUM(mv.qty), 0)` превращает NULL в 0 единиц, а стоимость — это единицы × `i.unit_cost_usd`. Группировка по `i.id`: два товара называются Pen, и группировка по имени слила бы их в одну строку. Ловушка: `SUM(mv.qty) * i.unit_cost_usd` без `COALESCE` даёт Stapler и Tape NULL вместо 0. Сумма по пустому набору — NULL, и NULL, умноженный на цену, остаётся NULL.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Услышьте в задаче слово «every» и повторите его до того, как напишете `FROM`: «You said every product, so I start from products and LEFT JOIN the transactions. The filters on transactions go into ON.»
+
+Закончите проверкой вслух: «There are 20 products, and I get 20 rows. prd_06 has no sales in Japan, and it shows 0, not NULL.»
+
+Если следом просят «Only the products of enrolled merchants», это фильтр на левую сторону. Он идёт в `WHERE` или во внутреннее соединение с `merchants`.
+</Aside>
+
+## Что почитать
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — `LEFT OUTER JOIN` и пример одного и того же условия в `ON` и в `WHERE`.
+- [Joins between tables](https://www.postgresql.org/docs/current/tutorial-join.html) — глава учебника, включая внешние соединения.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — первое значение не NULL.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — замечание о том, что `sum` по пустому набору возвращает NULL, а не ноль.
+
+## Связанные темы
+
+- [Соединения (JOIN)](/sql/joins/) — ключи и что соединение делает с числом строк.
+- [Логика NULL](/sql/null-logic/) — почему строка из NULL не проходит ни одно условие в `WHERE`.
+- [Размножение строк](/sql-patterns/row-multiplication/) — две таблицы «много» в одном запросе.
+- [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/) — каждый день, даже без данных: `generate_series` и `LEFT JOIN`.
+- [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/) — `FULL OUTER JOIN`, когда может не хватать любой из сторон.

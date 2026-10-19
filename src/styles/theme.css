@@ -1,0 +1,305 @@
+/*
+ * Theme: "terminal".
+ * Ink on white with an indigo accent (dark: a soft blue on near-black navy); amber is
+ * reserved for signals (gaps on the skill map, "new" badges, caution asides), violet for
+ * notes. Onest for text (Cyrillic-native), JetBrains Mono for code.
+ * Every text/background pair below passes WCAG AA (4.5:1) in both themes.
+ */
+
+:root {
+  --sl-font: 'Onest Variable', 'Onest', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  --sl-content-width: 46rem;
+  --sl-line-height: 1.7;
+  --sl-line-height-headings: 1.18;
+
+  /* Dark (Starlight's default :root theme) */
+  --sl-color-accent-low: #1a2550;
+  --sl-color-accent: #7c9cff;
+  --sl-color-accent-high: #d4defd;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e5e9f2;
+  --sl-color-gray-2: #c2c9d9;
+  --sl-color-gray-3: #8b96ae;
+  --sl-color-gray-4: #56627d;
+  --sl-color-gray-5: #2f3a52;
+  --sl-color-gray-6: #1b2232;
+  --sl-color-gray-7: #141a28;
+  --sl-color-black: #0f1420;
+
+  --lcm-signal: #f2b84b;
+  --lcm-signal-low: #3a2c0f;
+  --lcm-tip-bg: #141f45;
+  --lcm-note-bg: #211a3a;
+  --lcm-note: #b39dfa;
+  --lcm-note-high: #e3dafd;
+  --lcm-caution-bg: #33270f;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #dfe6fd;
+  --sl-color-accent: #3451c7;
+  --sl-color-accent-high: #1c2d7a;
+  --sl-color-white: #151b27;
+  --sl-color-gray-1: #1e2533;
+  --sl-color-gray-2: #323b4d;
+  --sl-color-gray-3: #535e74;
+  --sl-color-gray-4: #8590a6;
+  --sl-color-gray-5: #c5ccdb;
+  --sl-color-gray-6: #e7ebf3;
+  --sl-color-gray-7: #f4f6fb;
+  --sl-color-black: #ffffff;
+
+  --lcm-signal: #9a5900;
+  --lcm-signal-low: #fbefd9;
+  --lcm-tip-bg: #eef2fe;
+  --lcm-note-bg: #f3effc;
+  --lcm-note: #6a43c4;
+  --lcm-note-high: #45238f;
+  --lcm-caution-bg: #fcf4e4;
+}
+
+/* ---------- Typography ---------- */
+
+.sl-markdown-content :is(h1, h2, h3, h4, h5),
+.content-panel h1 {
+  font-weight: 650;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+.content-panel h1#_top {
+  font-size: clamp(2rem, 1.4rem + 2.4vw, 2.9rem);
+  letter-spacing: -0.025em;
+}
+.sl-markdown-content h2 {
+  margin-top: 2.6rem;
+  padding-top: 0.2rem;
+}
+.sl-markdown-content p,
+.sl-markdown-content li {
+  text-wrap: pretty;
+}
+.sl-markdown-content strong {
+  font-weight: 620;
+}
+.sl-markdown-content code:not(pre code) {
+  font-size: 0.875em;
+  padding: 0.1em 0.35em;
+  border-radius: 0.3rem;
+  background: var(--sl-color-gray-6);
+  border: none;
+}
+.site-title {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--sl-color-white);
+}
+/* The Russian site name is long: on narrow screens it wraps onto two lines instead of being cut off. */
+@media (max-width: 50rem) {
+  .site-title {
+    white-space: normal;
+  }
+  .site-title span {
+    font-size: var(--sl-text-base);
+    line-height: 1.15;
+    text-wrap: balance;
+  }
+}
+
+/* ---------- Asides ---------- */
+
+.starlight-aside {
+  border-radius: 0 0.5rem 0.5rem 0;
+  border-inline-start-width: 3px;
+}
+.starlight-aside__title {
+  font-size: var(--sl-text-base);
+  letter-spacing: 0;
+}
+.starlight-aside--tip {
+  --sl-color-asides-text-accent: var(--sl-color-accent-high);
+  --sl-color-asides-border: var(--sl-color-accent);
+  background-color: var(--lcm-tip-bg);
+}
+:root[data-theme='light'] .starlight-aside--tip {
+  --sl-color-asides-text-accent: var(--sl-color-accent);
+}
+.starlight-aside--note {
+  --sl-color-asides-text-accent: var(--lcm-note-high);
+  --sl-color-asides-border: var(--lcm-note);
+  background-color: var(--lcm-note-bg);
+}
+:root[data-theme='light'] .starlight-aside--note {
+  --sl-color-asides-text-accent: var(--lcm-note);
+}
+.starlight-aside--caution {
+  --sl-color-asides-text-accent: var(--lcm-signal);
+  --sl-color-asides-border: var(--lcm-signal);
+  background-color: var(--lcm-caution-bg);
+}
+
+/* ---------- Badges (sidebar "New") ---------- */
+
+:root {
+  --sl-badge-tip-border: var(--lcm-signal);
+  --sl-badge-tip-bg: transparent;
+  --sl-badge-tip-text: var(--lcm-signal);
+}
+:root[data-theme='light'] {
+  --sl-badge-tip-bg: transparent;
+}
+.sl-badge {
+  font-family: var(--sl-font);
+  font-weight: 600;
+  border-radius: 999px;
+}
+.sidebar-content .sl-badge {
+  font-size: 0.68rem;
+  padding: 0.12rem 0.45rem;
+  vertical-align: 0.08em;
+}
+
+/* ---------- Sidebar ---------- */
+
+.sidebar-content .top-level > li > details > summary .group-label .large {
+  font-size: var(--sl-text-sm);
+  font-weight: 650;
+  color: var(--sl-color-white);
+}
+.sidebar-content a[aria-current='page'],
+.sidebar-content a[aria-current='page']:hover,
+.sidebar-content a[aria-current='page']:focus {
+  font-weight: 600;
+  color: var(--sl-color-accent-high);
+  background-color: var(--sl-color-accent-low);
+}
+:root[data-theme='light'] .sidebar-content a[aria-current='page'] {
+  color: var(--sl-color-accent-high);
+}
+
+/* ---------- Tables ---------- */
+
+.sl-markdown-content table:not(:where(.not-content *)) {
+  font-size: var(--sl-text-sm);
+}
+.sl-markdown-content th:not(:where(.not-content *)) {
+  font-weight: 620;
+  background: var(--sl-color-gray-7);
+}
+
+/* ---------- Link cards: quiet, with an accent edge on hover ---------- */
+
+.sl-link-card {
+  border-radius: 0.6rem;
+  box-shadow: none;
+  border-color: var(--sl-color-gray-5);
+  transition: border-color 120ms ease;
+}
+.sl-link-card:hover {
+  background: transparent;
+  border-color: var(--sl-color-accent);
+  box-shadow: inset 3px 0 0 var(--sl-color-accent);
+}
+.sl-link-card .title {
+  font-weight: 620;
+}
+
+/* ---------- Splash hero ---------- */
+
+.hero {
+  padding-block: clamp(2rem, 4vw, 4rem) 1rem;
+}
+.hero h1 {
+  font-size: clamp(2.4rem, 1.6rem + 3.6vw, 4.2rem);
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.02;
+  color: var(--sl-color-white);
+}
+.hero .tagline {
+  max-width: 38rem;
+  font-size: clamp(1.05rem, 1rem + 0.35vw, 1.25rem);
+  color: var(--sl-color-gray-2);
+}
+
+/* ---------- Footer attribution spacing ---------- */
+footer .lcm-attribution {
+  max-width: var(--sl-content-width);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sl-link-card { transition: none; }
+}
+
+/* ---------- Skill map status glyphs (map, study plan, topic footer) ---------- */
+.sm-glyph {
+  --g: var(--sl-color-gray-4);
+  position: relative;
+  flex: none;
+  width: 0.95rem;
+  height: 0.95rem;
+  border: 1.5px solid var(--g);
+  border-radius: 50%;
+  background: var(--sl-color-bg);
+}
+.sm-glyph.is-locked,
+.is-locked > .sm-glyph {
+  border-style: dashed;
+}
+.sm-glyph.is-ready,
+.is-ready > .sm-glyph {
+  --g: var(--sl-color-accent);
+}
+.sm-glyph.is-opened,
+.is-opened > .sm-glyph {
+  --g: var(--sl-color-accent);
+  background: linear-gradient(90deg, var(--g) 50%, var(--sl-color-bg) 50%);
+}
+.sm-glyph.is-learned,
+.is-learned > .sm-glyph {
+  --g: var(--sl-color-accent);
+  background: var(--g);
+}
+.sm-glyph.is-learned::after,
+.is-learned > .sm-glyph::after {
+  content: '';
+  position: absolute;
+  left: 0.26rem;
+  top: 0.1rem;
+  width: 0.22rem;
+  height: 0.42rem;
+  border: solid var(--sl-color-bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+/* Outside the chosen plan: the folded dot of the overview. */
+.sm-glyph.is-out {
+  --g: var(--sl-color-gray-4);
+  width: 0.45rem;
+  height: 0.45rem;
+  margin: 0.25rem;
+  background: var(--g);
+}
+.sm-glyph.is-gap,
+.is-gap > .sm-glyph {
+  --g: var(--lcm-signal);
+  background: var(--lcm-signal);
+}
+.sm-glyph.is-gap::after,
+.is-gap > .sm-glyph::after {
+  content: '!';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--sl-color-bg);
+}
+
+
+/* Inline code inside links: the accent on the code background is below 4.5:1 in light mode. */
+:root[data-theme='light'] .sl-markdown-content a > code {
+  color: var(--sl-color-accent-high);
+}

@@ -1,0 +1,230 @@
+---
+title: Money and ledgers
+description: Flow or balance, an append-only ledger where the balance is a SUM, NUMERIC instead of float, and rounding once at the end. On the advances program data.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Money tasks look like ordinary sums, and they fail in quiet ways: a balance computed over a date window, a float that loses cents, rounding on every row. The examples use the advances program of the practice data: its ledger is one table of signed entries, and every balance is a `SUM` over it.
+
+<Aside type="tip" title="TL;DR">
+- A **flow** is a sum over a period and has a date window. A **balance** is a state at a moment: everything up to that moment, with no lower bound.
+- A ledger is append-only. Advance and fee are positive, repayment is negative, and the balance is `SUM(amount_usd)`.
+- Money is `NUMERIC` (`NUMERIC(12, 2)` in a table), never float.
+- Round once, at the end: `ROUND(SUM(x), 2)`, not `SUM(ROUND(x, 2))`.
+- `ROUND(x, 2)` needs a numeric value. Cast a double first: `ROUND(CAST(x AS NUMERIC), 2)`.
+</Aside>
+
+## The advances program in the data
+
+The platform pays a merchant early, against a marketplace payout that has not arrived yet. An advance is at most 70 % of the proceeds expected for that channel and month, and the merchant pays a fee of 3 % of the advance. When the payout arrives, it repays the advance and the fee. The details are on the [dataset page](/start/dataset/); two tables matter here:
+
+- `advances`: one row per advance, with `amount_usd` and `fee_usd`.
+- `ledger_entries`: one row per money movement.
+
+| entry_type | sign | when it is written |
+|---|---|---|
+| `advance` | + | the platform pays the merchant |
+| `fee` | + | at the same moment as the advance |
+| `repayment` | − | when the channel payout arrives |
+
+One advance, adv_0001, in the ledger:
+
+```sql
+SELECT entry_id, entry_type, amount_usd, created_at
+FROM ledger_entries
+WHERE advance_id = 'adv_0001'
+ORDER BY created_at, entry_id;
+```
+
+| entry_id | entry_type | amount_usd | created_at |
+|---|---|---|---|
+| le_00001 | advance | 68.38 | 2026-07-02 10:00:00 |
+| le_00002 | fee | 2.05 | 2026-07-02 10:00:00 |
+| le_00003 | repayment | -70.43 | 2026-08-02 09:00:00 |
+
+The entries add up to 0, so this advance is repaid. For all 38 advances, `fee_usd` equals `ROUND(amount_usd * 0.03, 2)`.
+
+## Flow and balance
+
+A **flow** is a sum over a period: revenue for a month, advances paid in August, fees per quarter. It always has a window: `created_at >= start AND created_at < end`.
+
+A **balance** is a state at a moment: what a merchant owes, the money on an account, the subscriptions active today. It is the sum of everything before that moment. It has an upper bound and no lower bound.
+
+For mer_01, a flow and a balance:
+
+```sql
+SELECT SUM(amount_usd) AS advanced_usd           -- flow: a window of one month
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND entry_type = 'advance'
+  AND created_at >= TIMESTAMP '2026-08-01'
+  AND created_at <  TIMESTAMP '2026-09-01';
+
+SELECT SUM(amount_usd) AS owed_usd               -- balance: all history up to the moment
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at < TIMESTAMP '2026-09-01';
+```
+
+| advanced_usd |
+|---|
+| 145.09 |
+
+| owed_usd |
+|---|
+| 50.21 |
+
+The usual mistake is a window on a balance:
+
+```sql
+SELECT SUM(amount_usd) AS owed_usd               -- wrong: a window on a balance
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at >= TIMESTAMP '2026-09-01' - INTERVAL '30 days'
+  AND created_at <  TIMESTAMP '2026-09-01';
+```
+
+The answer is −20.22. The window cuts off the advances paid on 2 July but keeps the repayment of adv_0001 on 2 August. A negative debt is a sign that the window is wrong. When the task is unclear, ask: *"Is this a total for a period, or a state at a moment?"*
+
+### The balance after each entry
+
+A running sum over the ledger shows how the balance moves. It is a window function, as on [Shares and running totals](/sql-patterns/running-totals-and-shares/):
+
+```sql
+SELECT created_at, advance_id, entry_type, amount_usd,
+       SUM(amount_usd) OVER (ORDER BY created_at, entry_id) AS balance_usd
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at < TIMESTAMP '2026-09-01'
+ORDER BY created_at, entry_id;
+```
+
+Rows 6 to 11 of 11:
+
+| created_at | advance_id | entry_type | amount_usd | balance_usd |
+|---|---|---|---|---|
+| 2026-08-02 09:00:00 | adv_0001 | repayment | -70.43 | 0.00 |
+| 2026-08-02 10:00:00 | adv_0002 | advance | 48.75 | 48.75 |
+| 2026-08-02 10:00:00 | adv_0002 | fee | 1.46 | 50.21 |
+| 2026-08-02 10:00:00 | adv_0005 | advance | 96.34 | 146.55 |
+| 2026-08-02 10:00:00 | adv_0005 | fee | 2.89 | 149.44 |
+| 2026-08-15 09:00:00 | adv_0005 | repayment | -99.23 | 50.21 |
+
+The balance falls to 0.00 when the payout for June repays adv_0001. The last balance, 50.21, is the same number as the query above: it is adv_0002, which waits for the July North Market payout. `entry_id` as the second sort key keeps the order stable when entries share a timestamp.
+
+## Why append-only
+
+The ledger never changes a row. Every movement is a new row, and a correction is a new entry with the opposite sign, not an `UPDATE`. This gives three things:
+
+- **History.** The balance at any past moment is the same query with another date.
+- **Audit.** Every cent of a balance can be traced to the rows behind it.
+- **Safe retries.** A retry must not write a second advance. `advances.idempotency_key` (`merchant:channel:month`) with a unique index stops it in the database: see [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/).
+
+Many systems also keep the current balance in its own column, for fast reads. They update it in the same transaction as the new entry, so the two never disagree (see [Database concepts](/sql-patterns/database-concepts/)).
+
+## NUMERIC, not float
+
+`double precision` and `real` are binary fractions. Most decimal amounts, such as 0.1, have no exact binary form, and the error shows up in sums:
+
+```sql
+SELECT 0.1::float8 + 0.2::float8 AS float_sum,
+       0.1::float8 + 0.2::float8 = 0.3::float8 AS float_equal,
+       0.1::numeric + 0.2::numeric AS numeric_sum,
+       0.1::numeric + 0.2::numeric = 0.3 AS numeric_equal;
+```
+
+| float_sum | float_equal | numeric_sum | numeric_equal |
+|---|---|---|---|
+| 0.30000000000000004 | false | 0.3 | true |
+
+Added up a thousand times, 0.1 gives 99.9999999999986 as a float and 100.0 as `NUMERIC`.
+
+`NUMERIC` keeps decimal digits exactly. In a table, give it a precision: `NUMERIC(12, 2)` holds 12 digits, 2 of them after the point. Such a column rounds on insert: 10.005 is stored as 10.01 and 10.004 as 10.00. A value that does not fit fails with `numeric field overflow`. In Python, the same role is played by `Decimal` (see [Money and Decimal](/python/money-and-decimal/)).
+
+## Round once, at the end
+
+What the merchant gets for a sale is `charged_usd * (1 - fee_rate)`. A 2.99 sale at 15 % gives 2.5415. Round each row to cents, and each such row loses 0.0015:
+
+```sql
+SELECT channel,
+       COUNT(*) AS n,
+       ROUND(SUM(charged_usd * (1 - fee_rate)), 2) AS round_once,
+       SUM(ROUND(charged_usd * (1 - fee_rate), 2)) AS round_each_row
+FROM transactions
+WHERE NOT is_test
+  AND channel IN ('north_market', 'south_market', 'web')
+  AND start_time >= TIMESTAMP '2026-09-01'
+  AND start_time <  TIMESTAMP '2026-10-01'
+GROUP BY channel
+ORDER BY channel;
+```
+
+| channel | n | round_once | round_each_row |
+|---|---|---|---|
+| north_market | 254 | 2490.74 | 2490.32 |
+| south_market | 151 | 1858.89 | 1858.64 |
+| web | 55 | 732.84 | 732.83 |
+
+The North Market total is 42 cents short after one month. Keep full precision inside the query and round only the number you report. If the business rounds per transaction, it will say so; ask.
+
+### ROUND needs NUMERIC
+
+`ROUND(x, 2)` exists only for `NUMERIC`. With a `double precision` value, for example from `PERCENTILE_CONT` or a float column, the call fails: `function round(double precision, integer) does not exist`. Cast first: `ROUND(CAST(x AS NUMERIC), 2)`.
+
+The two types also round halves differently:
+
+| expression | result |
+|---|---|
+| `ROUND(0.125, 2)` | 0.13 |
+| `ROUND(2.5)` | 3 |
+| `ROUND(2.5::float8)` | 2 |
+| `ROUND(CAST(0.125::float8 AS NUMERIC), 2)` | 0.13 |
+
+PostgreSQL rounds `NUMERIC` halves away from zero. Python's `round()` on a `Decimal` rounds halves to even, so `round(Decimal("0.125"), 2)` is 0.12. When SQL and Python must agree, use `quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)` in Python.
+
+## Practice
+
+<Drill id="s-ledger-fees">
+
+This is a flow: the sum of fee entries per month. The month comes from the entry date, `CAST(date_trunc('month', created_at) AS DATE)`, and only entries of 2026 before today count. A balance would be a different question: the sum of all entries, with no month in it.
+
+</Drill>
+
+<Drill id="s-balance">
+
+The ledger is append-only: advance and fee are positive, repayment is negative. The balance is the sum of all entries before today. It is a balance, not a flow, so there is no 30-day window. `HAVING SUM(amount_usd) > 0` keeps the merchants who still owe, after grouping. Keep the sign: `SUM(ABS(amount_usd))` would count every repayment as more debt. `merchant_id` as the second sort key makes the order stable.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Sort the words of the task into flow or balance before you write anything:
+
+| words in the task | it is a | so the query has |
+|---|---|---|
+| "owes", "outstanding", "balance", "as of" | balance | an upper bound only |
+| "in August", "per month", "fees earned" | flow | a half-open window |
+
+Then say your choice: "This is a balance, not a flow, so there is no date window: it is the sum of all ledger entries up to today." The types fit in one breath: "NUMERIC in the database, Decimal in Python, one ROUND at the end."
+
+A natural next question: "What if two workers issue an advance at the same time?" A short answer: "I'd lock the merchant's row with SELECT … FOR UPDATE, then check the limit and insert in the same transaction." The race itself is on [Database concepts](/sql-patterns/database-concepts/).
+</Aside>
+
+## Further reading
+
+- [Numeric types](https://www.postgresql.org/docs/current/datatype-numeric.html) — integer, `NUMERIC` and floating-point types side by side.
+- [Arbitrary precision numbers](https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL) — precision and scale of `NUMERIC(12, 2)`, rounding on insert, and how halves are rounded.
+- [Mathematical functions](https://www.postgresql.org/docs/current/functions-math.html) — `round` and which argument types it accepts.
+- [Window functions](https://www.postgresql.org/docs/current/tutorial-window.html) — the running sum behind the balance after each entry.
+- [decimal](https://docs.python.org/3/library/decimal.html) — `Decimal`, `quantize` and the rounding modes in Python.
+
+## Related topics
+
+- [Conditional aggregation](/sql/conditional-aggregation/) — several sums by entry type in one query, with `FILTER`.
+- [Row multiplication](/sql-patterns/row-multiplication/) — a ledger joined to advances multiplies rows unless you aggregate first.
+- [Shares and running totals](/sql-patterns/running-totals-and-shares/) — the window function behind the running balance.
+- [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/) — advances against the marketplace payouts that repay them.
+- [Money and Decimal](/python/money-and-decimal/) — the same rules in Python.
+- [Money and reconciliation](/sql-tasks/money-and-reconciliation/) — Q14 builds the balance per merchant and per open advance.

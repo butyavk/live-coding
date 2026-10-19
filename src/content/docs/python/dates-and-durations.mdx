@@ -1,0 +1,173 @@
+---
+title: Dates and durations
+description: date, datetime and timedelta in interview tasks, adding months with calendar.monthrange, renewals from the original date, ISO strings, aware and naive times.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Subscriptions renew every month, refunds come days after a purchase, and webhooks carry ISO timestamps. So a typical Python task has a date in it: add a month, count the days between two events, group by month. The standard library covers all of it. The traps are a month that is not 30 days, a renewal date that drifts, and two kinds of `datetime` that cannot be compared.
+
+<Aside type="tip" title="TL;DR">
+- `date` for days, `datetime` for moments, `timedelta` for durations. `(b - a).days` rounds down.
+- A month is not a fixed number of days: compute the year and the month with `//` and `%`, and the day with `min(d.day, calendar.monthrange(y, m)[1])`.
+- Renewals count from the original start (`add_months(start, k)`), not from the previous renewal.
+- ISO strings: `datetime.fromisoformat(s)`; it reads `Z` since Python 3.11 (before that, `s.replace("Z", "+00:00")` first). Month key: `strftime("%Y-%m")`.
+- Aware and naive datetimes do not mix. Ask *"Are all timestamps in UTC?"* and make all of them aware.
+</Aside>
+
+## date, datetime and timedelta
+
+| Type | What it is | Example |
+|---|---|---|
+| `date` | a calendar day | `date(2026, 9, 30)` |
+| `datetime` | a moment: day and time, with or without a time zone | `datetime(2026, 9, 1, 10, 0)` |
+| `timedelta` | a duration: days, seconds, microseconds | `timedelta(days=30)` |
+
+```python
+from datetime import date, datetime, time, timedelta
+
+start = datetime(2026, 9, 1, 10, 0)
+end = datetime(2026, 9, 3, 9, 0)
+
+print(end - start)                       # 1 day, 23:00:00 -- a timedelta
+print((end - start).days)                # 1 -- whole days, rounded down
+print((start - end).days)                # -2 -- down, not toward zero
+print((end - start).total_seconds())     # 169200.0
+print(start + timedelta(days=30))        # 2026-10-01 10:00:00
+print(start.date(), start.replace(day=1, hour=0))   # 2026-09-01 2026-09-01 00:00:00
+print(datetime.combine(date(2026, 9, 30), time()))  # 2026-09-30 00:00:00 -- midnight of a date
+print(date(2026, 9, 30) - date(2026, 9, 1))         # 29 days, 0:00:00
+```
+
+Subtracting two datetimes gives a `timedelta`. Its `.days` is the number of whole days, rounded down, so 47 hours is 1 day, and minus 47 hours is −2 days. When the task wants hours or a fraction of a day, use `total_seconds()`.
+
+Do not mix `date` and `datetime` either: `date(2026, 9, 1) < datetime(2026, 9, 1, 10)` raises `TypeError: '<' not supported between instances of 'datetime.date' and 'datetime.datetime'`. Convert one side first, with `.date()` or `datetime.combine(d, time())`.
+
+## Adding months
+
+`timedelta` has no months, because months have 28 to 31 days:
+
+```python
+import calendar
+from datetime import date, timedelta
+
+print(date(2026, 1, 31) + timedelta(days=30))   # 2026-03-02 -- not "one month later"
+print(calendar.monthrange(2026, 2))             # (calendar.SUNDAY, 28)
+print(calendar.monthrange(2028, 2))             # (calendar.TUESDAY, 29) -- a leap year
+
+d, n = date(2026, 11, 15), 3
+total = d.month - 1 + n                         # months counted from zero: 10 + 3 = 13
+print(d.year + total // 12, total % 12 + 1)     # 2027 2
+```
+
+`calendar.monthrange(year, month)` returns two values: the weekday of the first day and the number of days in the month. You need the second one, `[1]`. (Since Python 3.12 the weekday prints as `calendar.SUNDAY`; it is still the number 6.)
+
+So adding `n` months takes three steps:
+
+1. Count months from zero: `total = d.month - 1 + n`.
+2. The year is `d.year + total // 12`, the month is `total % 12 + 1`. This works for negative `n` too, because `//` rounds down.
+3. Clamp the day to the length of the target month: `min(d.day, calendar.monthrange(year, month)[1])`. 31 January plus one month is 28 February, or 29 February in a leap year.
+
+### Renewals count from the original date
+
+A monthly subscription that starts on 31 January renews on the last day of each shorter month. If each renewal is computed from the previous one, the day drifts to the 28th and never comes back:
+
+| Renewal | From the previous renewal | From the original date |
+|---|---|---|
+| 0 | 2026-01-31 | 2026-01-31 |
+| 1 | 2026-02-28 | 2026-02-28 |
+| 2 | 2026-03-28 | 2026-03-31 |
+| 3 | 2026-04-28 | 2026-04-30 |
+
+The right column is `add_months(start, k)` for `k = 0, 1, 2, 3`. Which rule the billing uses is a question for the interviewer: *"Do renewals count from the original date or from the last renewal?"*
+
+## ISO strings and time zones
+
+APIs and webhooks send times as ISO 8601 strings, often with `Z` for UTC:
+
+```python
+from datetime import datetime, timezone
+
+a = datetime.fromisoformat("2026-09-01T10:00:00Z")          # "Z" is accepted since Python 3.11
+b = datetime.fromisoformat("2026-09-03T09:00:00+00:00")
+print(a, a.tzinfo)                         # 2026-09-01 10:00:00+00:00 UTC
+print(b - a, (b - a).days)                 # 1 day, 23:00:00 1
+print((b - a).total_seconds() / 86400)     # 1.9583333333333333
+print(a.isoformat(), a.strftime("%Y-%m"))  # 2026-09-01T10:00:00+00:00 2026-09
+
+s = "2026-09-01T10:00:00Z"
+print(datetime.fromisoformat(s.replace("Z", "+00:00")) == a)   # True -- works on any version
+```
+
+Before Python 3.11, `fromisoformat` did not accept `Z`. The `.replace("Z", "+00:00")` form works on every version, so it is safe when you do not know which Python the editor runs. ISO date strings in one format, such as `'2026-09-01'`, also sort and compare correctly as plain text. Strings with different offsets do not, so parse them before you compare.
+
+### Aware and naive datetimes
+
+A datetime with `tzinfo` is **aware**: it is a precise moment. A datetime without it is **naive**: it means "10:00 somewhere". Python refuses to mix them:
+
+```python
+aware = datetime(2026, 9, 1, 10, tzinfo=timezone.utc)
+naive = datetime(2026, 9, 1, 10)
+
+print(aware == naive)                                # False -- no error, just never equal
+print(naive.replace(tzinfo=timezone.utc) == aware)   # True -- if you know it is UTC
+naive < aware   # TypeError: can't compare offset-naive and offset-aware datetimes
+aware - naive   # TypeError: can't subtract offset-naive and offset-aware datetimes
+```
+
+`<` and `-` fail loudly, but `==` quietly returns `False`, so a lookup by time can miss without an error. Make every value aware at the edge of your code: parse with an offset, or attach UTC with `replace(tzinfo=timezone.utc)` when you know the source is UTC. For "now", use `datetime.now(timezone.utc)`. `datetime.utcnow()` returns a naive value and is deprecated since Python 3.12.
+
+The local day can differ from the UTC day. 23:30 UTC on 30 September is already 1 October in Tokyo:
+
+```python
+from datetime import timedelta
+
+tokyo = timezone(timedelta(hours=9))             # a fixed offset: Tokyo has no daylight saving time
+late = datetime(2026, 9, 30, 23, 30, tzinfo=timezone.utc)
+print(late.astimezone(tokyo))                    # 2026-10-01 08:30:00+09:00
+```
+
+Store and compute in UTC. Convert to a local zone only to show a time or to group by the customer's local day, and only when the task asks for it. For zones with daylight saving time, use `zoneinfo.ZoneInfo("Europe/Berlin")` instead of a fixed offset. (In the browser editor on this site, `zoneinfo` has no time zone data, so try it in a local Python.)
+
+## Practice
+
+<Drill id="y-months">
+
+`timedelta` has no months. Compute the year and the month with `//` and `%` from a zero-based month, and clamp the day to `calendar.monthrange(year, month)[1]`. The same code works for a negative `n`, because `//` rounds down. Renewals are computed from the original date, not from the previous renewal, or the 31st drifts to the 28th for good.
+
+</Drill>
+
+<Drill id="y-iso">
+
+`datetime.fromisoformat` parses ISO 8601, and since Python 3.11 it reads the `Z` suffix as UTC, so the plain call is enough. On an older Python, replace the suffix first: `s.replace("Z", "+00:00")`. The difference of two datetimes is a `timedelta`, and `.days` gives whole days rounded down: two hours is 0 days, as in the third check. `total_seconds() // 86400` gives the same number as a float, `1.0`, and the checks expect an `int`. Never mix aware and naive datetimes: subtracting them raises `TypeError`.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Dates hide assumptions. Ask about each one out loud, and let the answer change the code:
+
+- *"Are all timestamps in UTC?"* If yes, make every value aware where it enters, and never compare it with a naive one.
+- *"Do renewals count from the original date or from the last one?"* The answer decides what happens to the 31st.
+- *"Is the end of the period included?"* Then say which comparison you use, for example `<` for an excluded end.
+
+If a month comes up, one sentence covers it: *"timedelta has no months, so I compute the year and the month myself and clamp the day to the end of the month."* Time zones need one more: *"I keep UTC inside and convert with zoneinfo only to show a time or to group by a local day."*
+</Aside>
+
+## Further reading
+
+- [timedelta objects](https://docs.python.org/3/library/datetime.html#timedelta-objects) — what a duration stores, and how `.days` and `total_seconds()` work.
+- [datetime.fromisoformat](https://docs.python.org/3/library/datetime.html#datetime.datetime.fromisoformat) — the accepted formats and the 3.11 change.
+- [Aware and naive objects](https://docs.python.org/3/library/datetime.html#aware-and-naive-objects) — the two kinds of datetime.
+- [strftime() and strptime() format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes) — `%Y`, `%m`, `%d` and the rest.
+- [calendar.monthrange](https://docs.python.org/3/library/calendar.html#calendar.monthrange) — the weekday of the first day and the number of days in a month.
+- [zoneinfo](https://docs.python.org/3/library/zoneinfo.html) — IANA time zones such as `Europe/Berlin`, with daylight saving time.
+
+## Related topics
+
+- [Intervals](/python/intervals/) — half-open periods, overlaps and merging.
+- [Time windows](/python/time-windows/) — "the last N seconds" with a `deque`.
+- [Filters and dates](/sql/filters-and-dates/) — half-open date ranges and months in SQL.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — every day, even empty, and "active at a moment".
+- [Events and time](/python-tasks/events-and-time/) — renewal dates from ISO durations as a full task.

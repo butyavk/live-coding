@@ -1,0 +1,25 @@
+-- Q12. Reconcile channel payouts with expected proceeds
+-- Level: hard. Target time: 30 min.
+--
+-- TASK
+--   The partner marketplaces pay merchants once a month. Compare what each channel should have paid (from our transactions) with what it really paid (channel_payouts), for January–August 2026, and list every problem.
+--   Expected proceeds of a (merchant, channel, month): only north_market and south_market. Each sale adds charged_usd * (1 - fee_rate) in the month of start_time; each refund subtracts the same amount in the month of refunded_at. Round the sum to 2 decimals.
+--   Paid: the sum of the payout rows of that (merchant, channel, period_month).
+--   Status, the first rule that applies: 'duplicate_payout' (more than one payout row); 'unexpected_payout' (paid, nothing expected); 'not_due_yet' (no payout, and today, 2026-09-30, is before the due date: the first day of the next month + 32 days for north_market, + 14 days for south_market); 'missing_payout' (no payout, and it is due); 'matched' (|expected - paid| <= 1.00, FX rounding); otherwise 'mismatch'. Show every row that is not 'matched'.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Test purchases?
+--   A: Excluded.
+--   Q: Expected proceeds of 0 or less, when refunds are bigger than sales?
+--   A: Ignore those: nothing is expected for that month.
+--   Q: Only one side exists. What goes in expected_usd or paid_usd?
+--   A: NULL, not 0: it shows which side is missing.
+--   Q: Two payout rows and nothing expected?
+--   A: 'duplicate_payout': the first rule that applies wins.
+--
+-- OUTPUT COLUMNS: merchant_id, channel, period_month (DATE), expected_usd, paid_usd, status
+-- ORDER BY: merchant_id, channel, period_month
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q12.sql   Check: pytest -k q12
+
+-- your query below

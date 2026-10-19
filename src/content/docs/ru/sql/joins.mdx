@@ -1,0 +1,157 @@
+---
+title: Соединения (JOIN)
+description: JOIN в запросах на интервью. Первичные и внешние ключи, путь от транзакции к продукту и продавцу, ON или USING и что соединение делает с числом строк.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Числа для отчёта часто лежат в разных таблицах: выручка — в `transactions`, название продавца (merchant) — в `merchants`. Соединение (`JOIN`) склеивает строки по ключу. Прежде чем его писать, нужно знать, какая колонка связывает какие таблицы и что соединение сделает с числом строк.
+
+<Aside type="tip" title="Коротко">
+- Первичный ключ определяет строку (`merchants.id`), внешний ключ на него указывает (`products.merchant_id`).
+- Транзакция доходит до продавца через `products`: `JOIN products p ON p.id = t.product_id JOIN merchants m ON m.id = p.merchant_id`.
+- `ON` — когда имена колонок разные; `USING (col)` — только когда обе стороны называют одно и то же одним именем.
+- Соединение со стороной «один» сохраняет число строк, со стороной «много» — умножает. Считайте строки до и после.
+- Группируйте по ключу (`m.id`), а не только по имени.
+</Aside>
+
+## Ключи и связи таблиц
+
+Первичный ключ (primary key) — колонка, значение которой уникально и не бывает NULL: одно значение — одна строка. `merchants.id` и `products.id` — первичные ключи. Внешний ключ (foreign key) — колонка, которая указывает на первичный ключ другой таблицы: `products.merchant_id` указывает на `merchants.id`. Направление говорит о связи. У одного продавца много продуктов, у одного продукта один продавец.
+
+| Колонка | Указывает на | Связь |
+|---|---|---|
+| `products.merchant_id` | `merchants.id` | у продавца много продуктов |
+| `transactions.product_id` | `products.id` | у продукта много транзакций |
+| `webhook_events.product_id` | `products.id` | у продукта много событий |
+| `channel_payouts.merchant_id` | `merchants.id` | у продавца много выплат |
+| `advances.merchant_id` | `merchants.id` | у продавца много авансов |
+| `ledger_entries.merchant_id` | `merchants.id` | у продавца много проводок |
+| `ledger_entries.advance_id` | `advances.advance_id` | у аванса несколько проводок |
+
+`merchants` и `products` называют свой ключ `id`, остальные таблицы — `merchant_id` или `product_id`. В `transactions` нет колонки продавца. Транзакция доходит до продавца только через `products`.
+
+## Соединение, которое сохраняет одну строку на транзакцию
+
+```sql
+FROM transactions t
+JOIN products p  ON p.id = t.product_id
+JOIN merchants m ON m.id = p.merchant_id
+```
+
+У каждой транзакции ровно один продукт, у каждого продукта ровно один продавец. Каждый шаг соединяет со стороной «один», поэтому соединение добавляет колонки и сохраняет строки. Проверьте это, а не предполагайте:
+
+```sql
+SELECT (SELECT COUNT(*) FROM transactions) AS transactions,
+       COUNT(*)                            AS after_join
+FROM transactions t
+JOIN products p  ON p.id = t.product_id
+JOIN merchants m ON m.id = p.merchant_id;
+```
+
+| transactions | after_join |
+|---|---|
+| 8294 | 8294 |
+
+`JOIN` (внутреннее соединение, inner join) оставляет только строки, у которых есть пара с обеих сторон. Здесь у каждой транзакции есть продукт, а у каждого продукта — продавец, поэтому ничего не теряется. Когда пары может не быть, внутреннее соединение молча выбрасывает строку: см. [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+
+## ON или USING
+
+`ON` принимает любое условие: `ON p.id = t.product_id`. `USING (col)` — короткая запись для «колонка с этим именем равна с обеих сторон». Колонка с таким именем нужна в обеих таблицах, и в результате остаётся одна объединённая колонка вместо двух.
+
+`ledger_entries.advance_id` и `advances.advance_id` называются одинаково, так что `USING` подходит:
+
+```sql
+SELECT advance_id, v.amount_usd, l.entry_type, l.amount_usd AS entry_usd
+FROM advances v
+JOIN ledger_entries l USING (advance_id)
+WHERE advance_id = 'adv_0001'
+ORDER BY l.entry_id;
+```
+
+| advance_id | amount_usd | entry_type | entry_usd |
+|---|---|---|---|
+| adv_0001 | 68.38 | advance | 68.38 |
+| adv_0001 | 68.38 | fee | 2.05 |
+| adv_0001 | 68.38 | repayment | -70.43 |
+
+У аванса на 68,38 три проводки: сам аванс, комиссия и погашение. Их сумма — 0, значит, аванс погашен полностью.
+
+Если имена разные, `USING` падает. Если имена совпадают, а смысл нет, — хуже:
+
+- `products p JOIN merchants m USING (merchant_id)` падает: `column "merchant_id" specified in USING clause does not exist in right table`.
+- `merchants m JOIN products p USING (id)` выполняется и возвращает 0 строк. Он сравнивает `mer_01` с `prd_01`: обе таблицы называют ключ `id`, но это разные ключи.
+- `NATURAL JOIN` соединяет по всем колонкам с одинаковыми именами. `advances NATURAL JOIN ledger_entries` сравнивает сразу `advance_id`, `merchant_id`, `amount_usd` и `created_at` и возвращает 38 строк вместо 104. На интервью его не используйте.
+
+## Что соединение делает с числом строк
+
+Посчитайте строки таблицы, которая задаёт гранулярность, а потом ещё раз после соединения. Соединение со стороной «много» повторяет каждую строку стороны «один»:
+
+```sql
+SELECT (SELECT COUNT(*) FROM advances)        AS advances,
+       (SELECT SUM(amount_usd) FROM advances) AS advanced_usd,
+       COUNT(*)                               AS rows_after_join,
+       SUM(v.amount_usd)                      AS advanced_after_join
+FROM advances v
+JOIN ledger_entries l ON l.advance_id = v.advance_id;
+```
+
+| advances | advanced_usd | rows_after_join | advanced_after_join |
+|---|---|---|---|
+| 38 | 4824.32 | 104 | 13129.33 |
+
+38 авансов превращаются в 104 строки, и сумма `v.amount_usd` после соединения почти втрое больше настоящей. Это размножение строк (fan-out). Обычное лечение — сначала свернуть сторону «много» до одной строки на ключ и только потом соединять. Приём подробно разобран в [размножении строк](/sql-patterns/row-multiplication/).
+
+| Соединение | Пример | Строк после |
+|---|---|---|
+| со стороной «один» | транзакция → продукт → продавец | столько же |
+| со стороной «много» | аванс → проводки | больше |
+| «много» с «много» | транзакции продавца × авансы того же продавца | произведение |
+
+## Группировать по ключу, показывать имя
+
+У двух продавцов может быть одно имя. `GROUP BY m.name` тогда слил бы их числа в одну строку. Группируйте по ключу и показывайте имя: `GROUP BY m.id, m.name`. Поскольку `m.id` — первичный ключ, PostgreSQL примет и один `GROUP BY m.id`.
+
+## Когда продавец продаёт в нескольких валютах
+
+За задачей с соединением часто идёт вопрос о схеме. В учебных данных все суммы уже в долларах США: `charged_usd`, `revenue_usd`. Настоящие продавцы обычно берут с клиента деньги в его валюте, и схема должна это выдержать.
+
+<Talk q="A merchant now sells the same plan in several currencies. How would you change the schema?">
+
+"I'd keep the amount and the currency code on each transaction, exactly as the customer was charged: for example 9.99 and EUR. Then I'd add an exchange-rate table with one rate per currency and day. A report in dollars joins each transaction to the rate of its own date and converts there. I'd never overwrite the original amount, because a refund must return what the customer paid. And amounts and rates are NUMERIC, not float."
+
+Короткий ответ «добавить колонку валюты» упускает главное — дату курса. По курсу на дату транзакции выручка прошлого месяца не меняется, когда меняется сегодняшний курс. Спросите, что делать в день без курса, например в выходной: обычно берут последний курс до этой даты.
+
+</Talk>
+
+## Практика
+
+<Drill id="s-join">
+
+Транзакция доходит до продавца только через `products`. У каждой транзакции ровно один продукт, у продукта — один продавец, поэтому строки не размножаются. `GROUP BY m.id, m.name` разводит двух продавцов с одинаковым названием.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Называйте путь по одному звену и заканчивайте числом строк: «transactions to products on product_id, products to merchants on merchant_id. Both steps go to the 'one' side, so I still have one row per transaction.» Если не уверены, выполните `COUNT(*)` до и после соединения — это несколько секунд.
+
+Возможный следующий вопрос: «What if some products had no merchant?» Короткий ответ: «Then the inner join drops their transactions. I'd switch to a LEFT JOIN and show them with a NULL name, or ask if they should count at all.»
+</Aside>
+
+## Что почитать
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — внутренние и внешние соединения, `ON`, `USING` и `NATURAL`.
+- [Joins between tables](https://www.postgresql.org/docs/current/tutorial-join.html) — глава учебника с небольшими примерами.
+- [Primary keys](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-PRIMARY-KEYS) и [foreign keys](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK) — ограничения, стоящие за «один» и «много».
+- [FROM clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-FROM) — полный синтаксис соединений в справке по `SELECT`.
+
+## Связанные темы
+
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — сохранить строки без пары.
+- [Размножение строк](/sql-patterns/row-multiplication/) — свернуть данные до соединения двух сторон «много».
+- [Учебные данные](/start/dataset/) — все таблицы и колонки из примеров.
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — свернуть данные в именованном шаге, потом соединить результат.
+- [Понятия баз данных](/sql-patterns/database-concepts/) — ключи и ограничения, когда разговор переходит к схеме.

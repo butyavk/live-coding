@@ -1,0 +1,202 @@
+---
+title: Размножение строк
+description: Почему соединение двух таблиц «многие» по одному ключу размножает строки и раздувает суммы, как заметить это по числу строк и как лечить агрегацией до JOIN.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Во многих задачах на отчёт два факта об одном ключе нужно поставить рядом: продукты и авансы по продавцу (merchant), выручку и выплаты по продавцу. Оба факта лежат в таблицах, где на ключ приходится много строк. Если соединить их напрямую, каждая строка одной стороны встанет в пару с каждой строкой другой. Запрос выполнится, суммы вырастут, и ничто об этом не предупредит.
+
+<Aside type="tip" title="Коротко">
+- Две таблицы, где на ключ много строк, соединённые по этому ключу, дают все пары строк: 2 продукта × 7 авансов = 14 строк.
+- Как заметить: посчитать строки до и после каждого соединения. Сумма, выросшая в два или в десять раз, — обычный признак.
+- Лечение: каждую сторону свернуть до одной строки на ключ в своём CTE, потом соединить CTE.
+- Проверка: итог результата равен простому `SUM` по исходной таблице, без всяких JOIN.
+- `COUNT(DISTINCT)` и `SUM(DISTINCT)` прячут симптом, но не лечат.
+</Aside>
+
+## Две стороны «многие» у одного ключа
+
+Соединение возвращает по строке на каждую пару строк, подходящую под условие. Соединение со стороной «один» безопасно: у каждой транзакции ровно один продукт, и число строк не меняется (проверка — на странице [Соединения (JOIN)](/sql/joins/)). Соединение со стороной «многие» повторяет строки, и часто именно это и нужно.
+
+Беда начинается, когда к одному ключу привязаны две таблицы «многие», не связанные между собой. У продавца несколько продуктов и несколько авансов. Аванс не принадлежит продукту. Поэтому соединение не может сопоставить их один к одному: оно сводит каждый продукт продавца с каждым его авансом.
+
+<Trap id="fanout" q="У mer_09 два продукта и семь авансов на 1122,81. Сколько строк и какую сумму вернёт запрос?">
+
+14 строк и 2245,62 — ровно вдвое больше настоящей суммы. Продукты и авансы между собой не связаны, и JOIN соединяет каждый продукт с каждым авансом: 2 × 7. Сначала сведите каждую таблицу к строке на продавца (в CTE или подзапросе), потом соединяйте.
+
+</Trap>
+
+## Симптом: часть чисел выглядит верно
+
+Та же ошибка для всех продавцов с авансами:
+
+```sql
+SELECT m.id AS merchant_id,
+       COUNT(p.id)       AS products,
+       SUM(v.amount_usd) AS advanced_usd
+FROM merchants m
+JOIN products p ON p.merchant_id = m.id
+JOIN advances v ON v.merchant_id = m.id
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+| merchant_id | products | advanced_usd |
+|---|---|---|
+| mer_01 | 6 | 359.72 |
+| mer_03 | 7 | 779.13 |
+| mer_04 | 6 | 934.77 |
+| mer_07 | 6 | 431.66 |
+| mer_09 | 14 | 2245.62 |
+| mer_11 | 12 | 2392.46 |
+
+У четырёх продавцов один продукт, и их суммы верны. Удвоились только суммы mer_09 и mer_11, у которых по два продукта. Поэтому ошибка и переживает беглый взгляд: первые строки выглядят нормально. А колонка `products` неверна везде: она считает пары, а не продукты.
+
+Два быстрых «исправления» делают только хуже, потому что прячут проблему:
+
+- `COUNT(DISTINCT p.id)` чинит колонку `products` (1, 1, 1, 1, 2, 2). Сумма у mer_09 остаётся 2245,62.
+- `SUM(DISTINCT v.amount_usd)` складывает каждую разную сумму один раз. У mer_09 два аванса по 95,14 и два по 124,88, и результат — 902,79 вместо 1122,81. Одинаковые суммы в денежных данных — обычное дело: два аванса по 124,88 — за июль и за август.
+
+## Как заметить
+
+Посчитайте строки до и после соединения. Если соединение должно было только добавить колонки, число строк не должно измениться:
+
+```sql
+SELECT (SELECT COUNT(*) FROM advances) AS advances,
+       COUNT(*)                        AS rows_after_join,
+       SUM(v.amount_usd)               AS advanced_usd
+FROM advances v
+JOIN products p ON p.merchant_id = v.merchant_id;
+```
+
+| advances | rows_after_join | advanced_usd |
+|---|---|---|
+| 38 | 51 | 7143.36 |
+
+38 авансов превратились в 51 строку, и итог вырос с 4824,32 до 7143,36. Перед каждым соединением задайте себе один вопрос: «Сколько строк справа подходит к одной строке слева?» Одна — безопасно. Много — сначала агрегировать.
+
+Чем больше стороны «многие», тем больше ошибка. Соединим в одном запросе сентябрьские транзакции и все авансы:
+
+```sql
+SELECT p.merchant_id,
+       SUM(t.revenue_usd) AS net_usd,
+       SUM(v.amount_usd)  AS advanced_usd,
+       COUNT(*)           AS joined_rows
+FROM transactions t
+JOIN products p ON p.id = t.product_id
+JOIN advances v ON v.merchant_id = p.merchant_id
+WHERE NOT t.is_test
+  AND t.start_time >= TIMESTAMP '2026-09-01'
+  AND t.start_time <  TIMESTAMP '2026-10-01'
+GROUP BY p.merchant_id
+ORDER BY p.merchant_id;
+```
+
+| merchant_id | net_usd | advanced_usd | joined_rows |
+|---|---|---|---|
+| mer_01 | 1588.86 | 7554.12 | 126 |
+| mer_03 | 2728.74 | 15582.60 | 140 |
+| mer_04 | 933.84 | 37390.80 | 240 |
+
+Это первые три строки из шести. У mer_01 21 транзакция и 6 авансов, отсюда 126 строк. Выручка умножилась на 6, авансы — на 21. Если число в десять раз больше ожидаемого, первым делом подозревайте размножение строк.
+
+## Лечение: свернуть каждую сторону, потом соединить
+
+Каждой таблице «многие» — свой CTE, который возвращает одну строку на ключ. Потом соединяются CTE. Теперь каждое соединение — один к одному, и размножаться нечему.
+
+```sql
+WITH revenue AS (
+    SELECT p.merchant_id, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY p.merchant_id
+),
+advanced AS (
+    SELECT merchant_id, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    GROUP BY merchant_id
+)
+SELECT v.merchant_id,
+       COALESCE(r.net_usd, 0) AS net_usd,
+       v.advanced_usd
+FROM advanced v
+LEFT JOIN revenue r ON r.merchant_id = v.merchant_id
+ORDER BY v.merchant_id;
+```
+
+| merchant_id | net_usd | advanced_usd |
+|---|---|---|
+| mer_01 | 264.81 | 359.72 |
+| mer_03 | 389.82 | 779.13 |
+| mer_04 | 155.64 | 934.77 |
+| mer_07 | 225.80 | 431.66 |
+| mer_09 | 569.73 | 1122.81 |
+| mer_11 | 359.53 | 1196.23 |
+
+Здесь важны две детали:
+
+- **Какая таблица стоит во `FROM`.** В задаче сказано «по продавцам с авансом», значит, строки задаёт `advanced`. Выручка присоединяется через `LEFT JOIN` и `COALESCE`, и продавец с авансами, но без продаж останется в результате с нулём. Подробнее — [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+- **Фильтры остаются внутри своего CTE.** Фильтр по сентябрю относится только к выручке. Авансы считаются за всё время.
+
+### Проверка без соединения
+
+Результат должен сходиться с исходными таблицами. Посчитайте итоги без соединения, которое могло бы размножить строки:
+
+```sql
+SELECT (SELECT SUM(amount_usd) FROM advances) AS advanced_usd,
+       (SELECT SUM(t.revenue_usd)
+        FROM transactions t
+        JOIN products p ON p.id = t.product_id
+        WHERE p.merchant_id IN (SELECT merchant_id FROM advances)
+          AND NOT t.is_test
+          AND t.start_time >= TIMESTAMP '2026-09-01'
+          AND t.start_time <  TIMESTAMP '2026-10-01') AS net_usd;
+```
+
+| advanced_usd | net_usd |
+|---|---|
+| 4824.32 | 1965.33 |
+
+Шесть строк выше дают в сумме те же 4824,32 и 1965,33. `IN (SELECT …)` только проверяет принадлежность и никогда не добавляет строк. `EXISTS` ведёт себя так же.
+
+<Talk q="Your totals are much higher than the finance dashboard. What do you check first?">
+
+"I check the joins first. I count the rows before and after each join, and I check one merchant with a separate simple query. If two tables have many rows per merchant, I aggregate each of them to one row per merchant and join after that."
+
+</Talk>
+
+## Практика
+
+<Drill id="s-fanout">
+
+Продукты и авансы не связаны, поэтому прямое соединение трёх таблиц даёт продукты × авансы, и сумма растёт. Сначала каждая сторона сворачивается до строки на продавца, потом два CTE соединяются. `LEFT JOIN` от авансов — страховка: строки задают авансы, и таблица `products` не должна выкинуть ни одной. В этих данных у каждого продавца есть хотя бы один продукт, поэтому обычный `JOIN` вернёт те же строки, и проверка их не различит. Скажите вслух, зачем `LEFT JOIN`: продавец с авансом, но пока без продуктов должен остаться в результате.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Назовите проблему до того, как писать второе соединение: «Products and advances both have many rows per merchant, so I aggregate each side first.» После запуска докажите одним числом: «The advances add up to 4824.32 in the result and in the table.»
+
+Если просят обойтись без CTE, те же агрегаты переезжают в подзапросы во `FROM`; правило остаётся «сначала агрегировать, потом соединять». Не чините одну колонку через `COUNT(DISTINCT)`: размноженная сумма останется на месте. Потренироваться находить эту ошибку в чужом запросе можно в задаче [Отладка отчёта](/sql-tasks/debug-a-report/).
+</Aside>
+
+## Что почитать
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — как соединение строит все подходящие пары строк.
+- [WITH queries](https://www.postgresql.org/docs/current/queries-with.html) — CTE, обычное место для агрегатов по ключу.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — `SUM`, `COUNT` и что делает `DISTINCT` внутри них.
+
+## Связанные темы
+
+- [Соединения (JOIN)](/sql/joins/) — стороны «один» и «многие» и проверка числа строк для одного соединения.
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — именованные шаги для агрегатов и `EXISTS` для «есть хотя бы одна».
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — сохранить каждый ключ, даже если у одной стороны нет строк.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — остатки и потоки, где размноженная сумма — настоящая денежная ошибка.
+- [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/) — два источника по ключу: сначала свернуть, потом сравнить.

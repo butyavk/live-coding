@@ -1,0 +1,203 @@
+---
+title: PostgreSQL dialect
+description: What breaks when a query comes from another database or from memory. Quotes, casts, ROUND on numeric, integer division, dates, DISTINCT ON and other extras.
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Trap from '~/components/practice/Trap.astro';
+
+Interview editors usually run real PostgreSQL. A query written from memory of MySQL, SQL Server, BigQuery or DuckDB often fails on small things: quotes, `ROUND`, a date function. Each error costs a minute or two, and a silent difference costs the answer.
+
+<Aside type="tip" title="TL;DR">
+- Strings go in single quotes; double quotes are names: `channel = 'web'`.
+- `ROUND(x, n)` takes `numeric` only: `ROUND(x::numeric, 2)`.
+- An integer divided by an integer is an integer: `1.0 * a / b`.
+- `date_trunc` returns a timestamp; `d + INTERVAL '30 days'` replaces `DATEADD`.
+- In the first two minutes, find out which database and version the editor runs: `SELECT version();` if you can run code, or ask.
+</Aside>
+
+## Quotes: strings and names
+
+In PostgreSQL, single quotes make a string, and double quotes make a name (an identifier). A word in double quotes is looked up as a column.
+
+<Trap id="dquote" q="What is wrong with this query?">
+
+It fails: `column "web" does not exist`. In PostgreSQL, double quotes mark a column name; strings go in single quotes: `channel = 'web'`.
+
+</Trap>
+
+Names without quotes are folded to lower case. Double quotes keep the case and allow spaces. A single quote inside a string is written twice:
+
+```sql
+SELECT 1 AS Total, 2 AS "Total", 'O''Brien' AS name;
+```
+
+| total | Total | name |
+|---|---|---|
+| 1 | 2 | O'Brien |
+
+Backticks around a name, as in MySQL and BigQuery, are not valid at all. The query fails with `syntax error at or near "FROM"`.
+
+## Casts: `::` and CAST
+
+`CAST(x AS numeric)` is standard SQL; `x::numeric` is the PostgreSQL short form. Both do the same. `::` binds tighter than arithmetic, so `7 / 2::numeric` casts only the 2, which is enough to make the division exact.
+
+Typed literals are casts too: `DATE '2026-09-01'`, `TIMESTAMP '2026-09-01'`, `INTERVAL '30 days'`. Next to a column, a plain quoted date works; in date arithmetic it needs the type (see [Filters and dates](/sql/filters-and-dates/)).
+
+## Numbers: integer division, ROUND and float
+
+```sql
+SELECT 7 / 2                     AS int_div,
+       7 / 2::numeric            AS cast_one,
+       ROUND(2.5)                AS round_numeric,
+       ROUND(2.5::float8)        AS round_float,
+       0.1::float8 + 0.2::float8 AS float_sum,
+       0.1 + 0.2                 AS numeric_sum;
+```
+
+| int_div | cast_one | round_numeric | round_float | float_sum | numeric_sum |
+|---|---|---|---|---|---|
+| 3 | 3.5000000000000000 | 3 | 2 | 0.30000000000000004 | 0.3 |
+
+- `7 / 2` is 3: integer division drops the fraction. One `numeric` side fixes it.
+- `ROUND` of a `numeric` rounds a half away from zero: 2.5 becomes 3. `ROUND` of a `double precision` usually rounds a half to the even number: here 2.5 becomes 2.
+- A `double precision` cannot hold 0.1 exactly. Money belongs in `numeric`.
+- `ROUND(x, n)` with decimal places exists only for `numeric`. `AVG` of a `numeric` column is `numeric`; `PERCENTILE_CONT` and anything cast to `float8` is not.
+
+<Trap id="round-double" q="It works in DuckDB. What about PostgreSQL?">
+
+It fails: `function round(double precision, integer) does not exist`. In PostgreSQL, `ROUND` with decimal places exists only for `numeric`: `ROUND(x::numeric, 2)`. DuckDB, which runs the offline exercises folder, is more forgiving here and shows no error.
+
+</Trap>
+
+Division by zero is an error in PostgreSQL: `SELECT 1 / 0` fails with `division by zero`. Guard the divisor with `NULLIF(b, 0)`.
+
+## Dates and intervals
+
+- `date_trunc` returns a timestamp, never a date. Cast it for a month column: `CAST(date_trunc('month', ts) AS DATE)`.
+- There is no `DATEADD`, `DATEDIFF` or `DATE_SUB`. Write `d + INTERVAL '30 days'`, and `date_b - date_a` for whole days. `DATEADD(day, 30, DATE '2026-09-01')` fails with `column "day" does not exist`: PostgreSQL reads `day` as a column name.
+- `generate_series` builds a calendar, one row per step:
+
+```sql
+SELECT CAST(d AS DATE) AS day
+FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-03', INTERVAL '1 day') AS g(d);
+```
+
+| day |
+|---|
+| 2026-09-01 |
+| 2026-09-02 |
+| 2026-09-03 |
+
+With plain strings, `generate_series('2026-09-01', '2026-09-03', INTERVAL '1 day')` also runs, but it returns `timestamp with time zone`. With `TIMESTAMP` literals it returns `timestamp without time zone`, the same type as the columns.
+
+## PostgreSQL extras
+
+Some tools exist only in PostgreSQL or in a few databases. They make a query shorter, and the interviewer may ask for the portable form.
+
+### DISTINCT ON
+
+`DISTINCT ON (key)` keeps the first row of each key, in the order of `ORDER BY`. The `ORDER BY` must start with the same key. The latest transaction of each product:
+
+```sql
+SELECT DISTINCT ON (product_id)
+       product_id, transaction_id, start_time
+FROM transactions
+WHERE NOT is_test
+ORDER BY product_id, start_time DESC
+LIMIT 3;
+```
+
+| product_id | transaction_id | start_time |
+|---|---|---|
+| prd_01 | t_000027 | 2026-09-28 06:30:16 |
+| prd_02 | t_001542 | 2026-09-24 20:07:27 |
+| prd_03 | t_004259 | 2026-09-25 13:07:30 |
+
+The portable form is `ROW_NUMBER()` in a CTE and `WHERE rn = 1` outside: see [Top N per group](/sql-patterns/top-n-per-group/).
+
+### FILTER
+
+`COUNT(*) FILTER (WHERE …)` works in PostgreSQL, DuckDB and SQLite. Elsewhere, write `SUM(CASE WHEN … THEN 1 ELSE 0 END)`. See [Conditional aggregation](/sql/conditional-aggregation/).
+
+### ILIKE
+
+`LIKE` is case-sensitive in PostgreSQL. `ILIKE` ignores case. `name LIKE '%LABS%'` finds nothing here, while `ILIKE` finds two merchants:
+
+```sql
+SELECT id, name
+FROM merchants
+WHERE name ILIKE '%LABS%';
+```
+
+| id | name |
+|---|---|
+| mer_02 | Lumen Labs |
+| mer_03 | Driftwood Labs |
+
+### string_agg
+
+`string_agg(x, ', ' ORDER BY x)` joins the values of a group into one string, like `GROUP_CONCAT` in MySQL. The products of merchants with more than two products:
+
+```sql
+SELECT p.merchant_id, string_agg(p.id, ', ' ORDER BY p.id) AS products
+FROM products p
+GROUP BY p.merchant_id
+HAVING COUNT(*) > 2
+ORDER BY p.merchant_id;
+```
+
+| merchant_id | products |
+|---|---|
+| mer_02 | prd_02, prd_13, prd_16 |
+| mer_12 | prd_12, prd_15, prd_19 |
+
+## From other databases to PostgreSQL
+
+| Written from memory | Error in PostgreSQL | PostgreSQL form |
+|---|---|---|
+| `channel = "web"` | `column "web" does not exist` | `channel = 'web'` |
+| `SELECT TOP 3 …` | `syntax error at or near "3"` | `… LIMIT 3` |
+| `DATEADD(day, 30, d)` | `column "day" does not exist` | `d + INTERVAL '30 days'` |
+| `IFNULL(x, y)`, `NVL(x, y)` | `function ifnull(…) does not exist` | `COALESCE(x, y)` |
+| `GROUP_CONCAT(name)` | `function group_concat(text) does not exist` | `string_agg(name, ', ')` |
+| `is_test = 1` | `operator does not exist: boolean = integer` | `is_test` or `NOT is_test` |
+| `ROUND(x::float8, 2)` | `function round(double precision, integer) does not exist` | `ROUND(x::numeric, 2)` |
+
+## Where DuckDB is more forgiving
+
+The offline exercises folder of this site runs the same tasks on DuckDB. DuckDB accepts most PostgreSQL syntax, and it also accepts some queries that PostgreSQL rejects. So a query that passes offline can still fail in the interview:
+
+| Query | DuckDB | PostgreSQL |
+|---|---|---|
+| `ROUND(x::float8, 2)` | rounds | error: no `round(double precision, integer)` |
+| a `SELECT` alias in `WHERE` or `HAVING` | works | `column "…" does not exist` |
+| `is_test = 1` | works | `operator does not exist: boolean = integer` |
+| `IFNULL(x, y)` | works | the function does not exist |
+| `1 / 0` | `inf` by default; NULL with `integer_division` | `division by zero` |
+| `7 / 2` | 3.5 by default | 3 |
+
+The exercises folder switches DuckDB to integer division (`SET integer_division = true`), so `7 / 2` is 3 there too, and `1 / 0` gives NULL instead of `inf`. Neither is an error, so a division without `NULLIF` passes offline. The other differences stay. Some mistakes fail in both engines: double quotes around a string, a quoted date minus an interval, and a column missing from `GROUP BY`. When a query passes offline, run it once more here, on PostgreSQL.
+
+<Aside type="note" title="In the interview">
+One question in the first two minutes saves several errors later: "Can I run code here, and can I use the docs?" If you can run code, `SELECT version();` shows the database and its version; if not, ask: "Is this PostgreSQL?" The answer decides the quotes, `ROUND` and the date functions.
+
+When you write something that only PostgreSQL needs, say why in a few words: "This is PostgreSQL, so I cast to numeric before ROUND. ROUND with decimal places only takes numeric here." The same goes for `DISTINCT ON`: name it, and offer the `ROW_NUMBER()` form if the team uses another database.
+</Aside>
+
+## Further reading
+
+- [Identifiers](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS) and [string constants](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-STRINGS) — double quotes for names, single quotes for strings.
+- [Type casts](https://www.postgresql.org/docs/current/sql-expressions.html#SQL-SYNTAX-TYPE-CASTS) — `CAST` and `::`.
+- [DISTINCT clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT) — `DISTINCT ON` and its rule for `ORDER BY`.
+- [`ILIKE`](https://www.postgresql.org/docs/current/functions-matching.html#FUNCTIONS-LIKE), [`generate_series`](https://www.postgresql.org/docs/current/functions-srf.html#FUNCTIONS-SRF-SERIES) and [`string_agg`](https://www.postgresql.org/docs/current/functions-aggregate.html) — the extras on this page.
+- [PostgreSQL compatibility](https://duckdb.org/docs/current/sql/dialect/postgresql_compatibility.html) — DuckDB's own list of differences.
+
+## Related topics
+
+- [Filters and dates](/sql/filters-and-dates/) — typed literals, intervals and `date_trunc`.
+- [Conditional aggregation](/sql/conditional-aggregation/) — `FILTER`, integer division and `NULLIF`.
+- [Top N per group](/sql-patterns/top-n-per-group/) — the portable form of `DISTINCT ON`.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — `generate_series` with `LEFT JOIN`.
+- [SQL cheat sheet](/reference/sql-cheatsheet/) — the syntax on one page.

@@ -1,0 +1,21 @@
+-- Q07. Current status of every customer
+-- Level: medium. Target time: 10 min.
+--
+-- TASK
+--   For each (customer, product) take the latest transaction and give the customer a status: 'trial', 'active' or 'expired'. Count customers per product and status.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Latest by what?
+--   A: start_time DESC, then transaction_id DESC.
+--   Q: Status rules at today = 2026-09-30 00:00?
+--   A: Only end_time and refunded_at decide, start_time does not. end_time > today and refunded_at IS NULL:
+--      'trial' if it is a trial, otherwise 'active'. Everything else is 'expired'.
+--   Q: Which transactions do we look at?
+--   A: Test and promo excluded.
+--
+-- OUTPUT COLUMNS: product_id, status, customers
+-- ORDER BY: product_id, status
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q07.sql   Check: pytest -k q07
+
+-- your query below

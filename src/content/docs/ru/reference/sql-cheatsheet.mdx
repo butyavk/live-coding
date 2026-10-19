@@ -1,0 +1,237 @@
+---
+title: Шпаргалка SQL
+description: PostgreSQL на одной странице для лайвкодинга. Порядок выполнения, семь вопросов к задаче, слова задачи и инструменты, проверки до «готово» и синтаксис.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Первая половина — метод, который стоит держать в голове: в каком порядке выполняется SQL, семь вопросов, которые превращают текст задачи в запрос, и проверки до слова «готово». Вторая — синтаксис по темам (даты, агрегаты, соединения, окна, NULL), туда заглядывают по необходимости. Каждый пункт синтаксиса полезно один раз найти в документации PostgreSQL, чтобы на интервью знать, где он лежит.
+
+<Aside type="tip" title="Коротко">
+- **FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT.** Поэтому в `WHERE` не видны псевдонимы и оконные функции.
+- Начинайте с **одной строки результата**. Она определяет `GROUP BY`, таблицу во `FROM` и то, нужен ли `LEFT JOIN`.
+- До «готово» проверьте четыре вещи: размножение строк при соединении, фильтр по правой таблице `LEFT JOIN`, полуоткрытые даты и фиксированное «сегодня», пустые суммы и целочисленное деление.
+- Литералы дат пишите с типом (`TIMESTAMP '2026-09-01'`), конец любого диапазона оставляйте открытым.
+- Скелет запроса ниже напишите по памяти, запустите и сравните с результатом на этой странице.
+</Aside>
+
+## Порядок выполнения
+
+**FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT (здесь считаются оконные функции) → ORDER BY → LIMIT**
+
+| Хочется… | Что получится | Как надо |
+|---|---|---|
+| Фильтровать по псевдониму из `SELECT` в `WHERE` | `column "…" does not exist`: `WHERE` выполняется раньше | Повторить выражение или посчитать его в CTE и фильтровать снаружи |
+| Использовать псевдоним в `HAVING` | В PostgreSQL та же ошибка | Написать сам агрегат: `HAVING COUNT(*) > 1000` |
+| Фильтровать по оконной функции | `window functions are not allowed in WHERE` | Посчитать её в CTE, снаружи `WHERE rn = 1` |
+| Сортировать по псевдониму | Работает: `ORDER BY` идёт после `SELECT` | `ORDER BY revenue DESC, m.id` |
+| Показать колонку, по которой нет группировки | `must appear in the GROUP BY clause` | Добавить её в `GROUP BY` или обернуть в агрегат |
+
+`GROUP BY 1, 2` и `GROUP BY` по псевдониму из `SELECT` в PostgreSQL работают.
+
+## Семь вопросов к любой задаче
+
+Задавайте их по порядку. Большинство неверных запросов пропускает первый.
+
+1. **Что такое одна строка результата?** Строка таблицы — простой `SELECT … WHERE`. Группа, например продавец (merchant) или месяц, — `GROUP BY` по ней.
+2. **Всё лежит в одной таблице?** Если нет — `JOIN` по ключу: транзакция → `products` → `merchants`.
+3. **Нужны все X, даже без данных?** Тогда `FROM x LEFT JOIN …` и `COALESCE(…, 0)`.
+4. **Нужен ли CTE и какой?** Если свойство считается по строкам группы, а потом такие группы считают уровнем выше («сколько авансов ещё не погашено»), — цепочка: `GROUP BY` по авансу, потом из этого CTE `GROUP BY` по продавцу. Если данные из двух разных таблиц — свернуть каждую до строки на ключ и соединить.
+5. **Нужна строка и что-то о её группе или соседе?** Это окно. `GROUP BY` схлопывает строки в одну, окно оставляет все строки и добавляет колонку.
+6. **Как оформить?** `ORDER BY` с `id` на случай равенства, `ROUND` в самом конце.
+7. **Как проверить?** Число строк, одна строка руками и каждый согласованный ответ, найденный в коде.
+
+## Слово в задаче → инструмент
+
+| Слова в задаче | Инструмент |
+|---|---|
+| *per X, by X* | `GROUP BY x` |
+| *for every X, including zero* | `FROM x LEFT JOIN …` + `COALESCE` |
+| *never, without, no …* | `NOT EXISTS` или `LEFT JOIN … WHERE b.id IS NULL` |
+| *how many of them are …* (несколько счётчиков) | `COUNT(*) FILTER (WHERE …)` |
+| *share of total* | `v / SUM(v) OVER ()` |
+| *share within X* | `v / SUM(v) OVER (PARTITION BY x)` |
+| *top N per X, latest, first, dedupe* | `ROW_NUMBER() OVER (PARTITION BY x ORDER BY … DESC, id)`, снаружи `WHERE rn = 1` |
+| *keep ties* | `RANK()` |
+| *previous, change vs last month* | `LAG(v) OVER (PARTITION BY x ORDER BY t)` |
+| *running total, cumulative* | `SUM(v) OVER (PARTITION BY x ORDER BY t)` |
+| *every day or month, even empty* | `generate_series` + `LEFT JOIN` |
+| *label, status, bucket* | `CASE WHEN … THEN … ELSE … END` |
+| *sales and refunds as one stream* | `UNION ALL` (не `UNION`) |
+| *compare two sources, missing on either side* | `FULL OUTER JOIN` + `COALESCE` ключей |
+
+## До слова «готово»
+
+- **Много строк на ключ с обеих сторон `JOIN`** — строки размножаются. Сначала сверните каждую сторону в своём CTE.
+- **Фильтр по правой таблице `LEFT JOIN`** — в `ON` или в CTE. В `WHERE` он превращает `LEFT JOIN` в обычное соединение.
+- **`GROUP BY` или `PARTITION BY` тем же ключом, что на прошлом шаге,** ничего не делает: в каждой группе одна строка.
+- **Даты — полуинтервал:** `>= '2026-08-01' AND < '2026-09-01'`. «Сегодня» — фиксированная дата, а не `NOW()`.
+- **Поток** (выручка за период) — с фильтром дат. **Остаток** (долг продавца, баланс счёта) — за всё время.
+- **`SUM` по пустому набору — `NULL`:** оберните в `COALESCE`. Целое, делённое на целое, — целое (`7 / 2 = 3`); делитель — `NULLIF(b, 0)`.
+- **`DESC` действует на одну колонку:** `ORDER BY paid_at DESC, payout_id DESC`.
+
+## Скелет — написать по памяти
+
+Выручка за август по продавцам, все продавцы, с долей от итога. Напишите его с пустого окна, не подглядывая, запустите и сравните.
+
+```sql
+WITH sales AS (                              -- 1. фильтр, потом свернуть до ключа
+  SELECT p.merchant_id, SUM(t.revenue_usd) AS revenue
+  FROM transactions t
+  JOIN products p ON p.id = t.product_id
+  WHERE NOT t.is_test
+    AND t.start_time >= TIMESTAMP '2026-08-01'
+    AND t.start_time <  TIMESTAMP '2026-09-01'
+  GROUP BY p.merchant_id
+)
+SELECT m.id AS merchant_id,
+       COALESCE(s.revenue, 0) AS revenue,                                 -- 2. все X
+       ROUND(100.0 * s.revenue / SUM(s.revenue) OVER (), 1) AS share_pct  -- 3. окно
+FROM merchants m
+LEFT JOIN sales s ON s.merchant_id = m.id
+ORDER BY revenue DESC, m.id;
+```
+
+12 строк; первые три:
+
+| merchant_id | revenue | share_pct |
+|---|---|---|
+| mer_06 | 1299.52 | 18.3 |
+| mer_12 | 902.36 | 12.7 |
+| mer_04 | 885.53 | 12.5 |
+
+**Почему `OVER ()`, а не `PARTITION BY`.** Окно считает по строкам, которые остались после `JOIN`, `WHERE` и `GROUP BY`. Здесь на продавца одна строка, поэтому `OVER (PARTITION BY m.id)` дал бы каждому 100 %. «Доля от итога» — одна общая группа на все строки, это `OVER ()`. `PARTITION BY` нужен, когда строк на группу несколько: строка на продукт, а доля — внутри его продавца.
+
+```sql
+SUM(revenue) OVER (PARTITION BY merchant_id)   -- доля каждого продукта внутри продавца
+```
+
+Для `mer_02` за август, строка на продукт:
+
+| product_id | revenue | share_in_merchant_pct |
+|---|---|---|
+| prd_16 | 362.68 | 45.2 |
+| prd_02 | 261.85 | 32.6 |
+| prd_13 | 177.83 | 22.2 |
+
+## Даты и время
+
+```sql
+TIMESTAMP '2026-09-01'                       -- литерал с типом
+ts::date  или  CAST(ts AS DATE)              -- дата из timestamp
+date_trunc('month', ts)                      -- начало месяца, всё ещё timestamp
+ts + INTERVAL '30 days'                      -- сдвиг; также '1 month', '1 week'
+date_a - date_b                              -- целое число дней (DATE - DATE — integer)
+EXTRACT(DOW FROM ts)                         -- день недели, 0 = воскресенье
+EXTRACT(EPOCH FROM ts2 - ts1)                -- секунды между двумя метками времени
+generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-30', INTERVAL '1 day') AS g(d)
+```
+
+- **Литерал — с типом.** Строка в кавычках сначала без типа и берёт тип у соседа. Рядом колонка — всё работает: `start_time >= '2026-08-01'`. Рядом интервал — нет: `'2026-09-30' - INTERVAL '30 days'` падает с `invalid input syntax for type interval`, а `TIMESTAMP '2026-09-30' - INTERVAL '30 days'` даёт `2026-08-31 00:00:00`. Со строками `generate_series` возвращает `timestamp with time zone`, с литералами `TIMESTAMP` — обычный `timestamp`, как у колонок.
+- **Полуоткрытый интервал:** `ts >= '2026-09-01' AND ts < '2026-10-01'`. `BETWEEN '2026-09-01' AND '2026-09-30'` теряет всё 30 сентября после 00:00.
+- **Месяц колонкой:** `CAST(date_trunc('month', ts) AS DATE)`. `date_trunc` всегда возвращает метку времени, а `EXTRACT(MONTH …)` склеивает разные годы.
+- **Активна в момент m:** `start_time <= m AND end_time > m`.
+- **Периоды `[a, b)` и `[c, d)` пересекаются,** когда `a < d AND c < b`.
+- **Дни без данных:** календарь через `generate_series`, потом `LEFT JOIN`.
+- **Часовые пояса.** Спросите, в каком поясе считается «день». Колонке `TIMESTAMP`, где хранится UTC, нужно два шага, колонке `timestamptz` — один. Один шаг на `TIMESTAMP` сдвигает в обратную сторону:
+
+```sql
+SELECT TIMESTAMP '2026-09-01 02:00' AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York' AS two_steps,
+       TIMESTAMP '2026-09-01 02:00' AT TIME ZONE 'America/New_York' AS one_step;
+```
+
+| two_steps | one_step |
+|---|---|
+| 2026-08-31 22:00:00 | 2026-09-01 06:00:00+00 |
+
+## Агрегаты
+
+```sql
+COUNT(*)                                     -- все строки
+COUNT(col)                                   -- строки, где col IS NOT NULL (после LEFT JOIN — только совпадения)
+COUNT(DISTINCT customer_id)                  -- разные значения
+COUNT(*) FILTER (WHERE is_trial)             -- условный подсчёт (PostgreSQL)
+SUM(CASE WHEN … THEN amount ELSE 0 END)      -- то же, переносимо
+COALESCE(SUM(x), 0)                          -- ноль вместо NULL
+```
+
+- **Целочисленное деление:** в PostgreSQL `3 / 4 = 0`. Пишите `1.0 * a / b` или `a::numeric / b`, а от деления на ноль — `NULLIF(b, 0)`.
+- **`AVG` и `ELSE 0`:** `AVG(CASE WHEN … THEN x END)` пропускает остальные строки, потому что `NULL` не участвует. `ELSE 0` добавляет нули и занижает среднее. Для доли `ELSE 0` как раз нужен: `AVG(CASE WHEN … THEN 1.0 ELSE 0 END)`.
+- **`ROUND(x, 2)`** есть только для `numeric`. Для `double precision` сначала приведите тип: `ROUND(x::numeric, 2)`.
+- **`WHERE` фильтрует строки до группировки, `HAVING` — группы после неё.**
+- **Дубли:** `COUNT(DISTINCT id)` убирает повторы только внутри своей группы. Если копия может попасть в другую группу (другой тип, другой день), сначала пронумеруйте копии `ROW_NUMBER() OVER (PARTITION BY id ORDER BY …)`, оставьте `rn = 1`, потом группируйте.
+- **Сортировка:** всегда второй ключ на случай равенства, `ORDER BY net_usd DESC, product_id`. Без него порядок и `LIMIT` случайны.
+
+## Соединения
+
+- **`LEFT JOIN t ON … AND t.flag`:** условие на правую таблицу — в `ON`. В `WHERE` строки с `NULL` справа выпадут, и соединение станет внутренним.
+- **Размножение строк:** соединение «один ко многим», потом `SUM` — и сумма умножится. Сначала агрегировать в CTE, потом соединять.
+- **Просто `JOIN` или CTE?** Просто соединение — когда к каждой строке приклеивается одна строка справа (транзакция → продукт → продавец). CTE — когда сначала нужно агрегировать (иначе размножение), когда следующий шаг фильтрует по агрегату или окну или когда шагов два и больше и с именами их легче читать.
+- **Сверка двух источников:** `FULL OUTER JOIN` и `COALESCE(a.key, b.key)`.
+- **Анти-соединение:** `LEFT JOIN … WHERE b.id IS NULL` или `NOT EXISTS (…)`. `NOT IN` с `NULL` в подзапросе не вернёт ничего.
+
+### Строки одна под другой: UNION ALL
+
+- Два набора строк с одинаковыми колонками, один под другим: продажи с `+` и возвраты с `−` одной лентой или события из двух таблиц.
+- **`UNION ALL`, а не `UNION`.** `UNION` убирает одинаковые строки: два платежа по 9,99 в один день схлопнутся в один, и сумма уменьшится.
+- Колонки сопоставляются по позиции: их число и типы должны совпадать, имена берутся из первого `SELECT`.
+
+## Оконные функции
+
+Первые две строки нужны в большинстве задач, остальное — справочно.
+
+```sql
+100.0 * x / SUM(x) OVER ()                                            -- доля от итога
+ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY start_time DESC) -- последняя строка: снаружи WHERE rn = 1
+DISTINCT ON (customer_id) … ORDER BY customer_id, start_time DESC     -- то же в PostgreSQL
+LAG(end_time) OVER (PARTITION BY customer_id ORDER BY start_time)     -- предыдущая строка
+SUM(amount) OVER (PARTITION BY merchant_id ORDER BY day)              -- нарастающий итог
+AVG(x) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)   -- скользящее среднее за 7 строк
+RANK() / DENSE_RANK()                                                 -- равные значения делят место
+```
+
+- Фильтровать по оконной функции в том же `SELECT` нельзя. Оберните запрос в CTE, потом `WHERE rn = 1`.
+- **Рамка по умолчанию.** С `ORDER BY` в окне рамка — `RANGE … CURRENT ROW`: строки с одинаковым значением `ORDER BY` складываются вместе. Для точного числа строк — `ROWS`:
+
+| day | amount | рамка по умолчанию | рамка ROWS |
+|---|---|---|---|
+| 2026-09-01 | 10 | 10 | 10 |
+| 2026-09-02 | 5 | 22 | 15 |
+| 2026-09-02 | 7 | 22 | 22 |
+| 2026-09-03 | 1 | 23 | 23 |
+
+- Скользящее «за последние 7 дней» через `ROWS` верно, только если каждый день есть одной строкой. Сначала постройте календарь.
+
+## NULL
+
+- **`NULL = NULL` — это `NULL`, а не true.** Проверка — `IS NULL`, а «не равно с учётом NULL» — `IS DISTINCT FROM`.
+- **`NOT (x = 1 AND …)`** при `x IS NULL` даёт `NULL`, и строка пропадает из `WHERE`. Защита — `COALESCE(x = 1, false)` или `x IS DISTINCT FROM 1`. Другой путь: посчитать статус в подзапросе, потом `WHERE status <> 'ok'`.
+- **`SUM` по пустому набору — `NULL`, а не 0.** То же у `SUM(x) FILTER (WHERE …)` для группы без совпадений; `COUNT` вернёт 0.
+- **`NOT IN` с `NULL` в списке** не вернёт ни одной строки. Используйте `NOT EXISTS`.
+
+## Деньги и идемпотентность — для разговора
+
+- **Дубли вебхуков:** `UNIQUE (event_id)` и `INSERT … ON CONFLICT (event_id) DO NOTHING`.
+- **Очередь задач с несколькими воркерами:** `SELECT … FOR UPDATE SKIP LOCKED`.
+- **Деньги:** `NUMERIC(12,2)`, никогда не `float`.
+
+<Aside type="note" title="На интервью">
+Назовите план одной фразой, прежде чем печатать: *"First I'll reduce each table to one row per merchant, then join both to the merchants table, then add the share with a window."* Когда запрос заработал, возьмите продавца с первой строки и проверьте его число маленьким отдельным запросом: *"Let me check mer_06 on its own before I trust the join."* Если разговор перешёл к масштабу, назовите индекс и способ проверить, что он работает: *"An index on start_time could help; I'd look at EXPLAIN ANALYZE to see if it's used."*
+</Aside>
+
+## Что почитать
+
+- [PostgreSQL: SELECT](https://www.postgresql.org/docs/current/sql-select.html) — все части запроса в том порядке, в котором их обрабатывает база.
+- [PostgreSQL: функции и операторы даты и времени](https://www.postgresql.org/docs/current/functions-datetime.html) — `date_trunc`, `EXTRACT`, `AT TIME ZONE`, интервалы.
+- [PostgreSQL: агрегатные функции](https://www.postgresql.org/docs/current/functions-aggregate.html) и [предложение FILTER](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES).
+- [PostgreSQL: оконные функции](https://www.postgresql.org/docs/current/functions-window.html) и [вызов оконных функций](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — рамки, `ROWS` и `RANGE`.
+- [PostgreSQL: INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT).
+
+## Связанные темы
+
+- [Приёмы на листок](/reference/recipes/) — те же идеи, по одной строке.
+- [Фильтры и даты](/sql/filters-and-dates/) — полуоткрытые интервалы, литералы с типом и «сегодня», с упражнениями.
+- [Размножение строк](/sql-patterns/row-multiplication/) — ловушка, из-за которой неверна большая часть сумм.
+- [Лучший в группе](/sql-patterns/top-n-per-group/) — `ROW_NUMBER`, `RANK` и `DISTINCT ON` на практике.
+- [Частые ошибки](/reference/common-mistakes/) — что ломается, когда эти проверки пропускают.

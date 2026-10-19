@@ -1,0 +1,286 @@
+---
+title: Индексы и EXPLAIN
+description: Какой индекс поможет запросу и будет ли PostgreSQL его использовать. B-tree, порядок колонок, частичные индексы и индексы по выражению, чтение планов EXPLAIN.
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Когда запрос заработал, интервьюер часто спрашивает: «А на таблице в миллиард строк?» Ответ — индекс и план: какой индекс поможет, будет ли база его использовать и как это проверить. Учебные данные маленькие (8 294 транзакции), но планы на них того же вида, что и на большой таблице. Каждый план ниже — настоящий `EXPLAIN` на этих данных, длинные имена типов сокращены до `…`.
+
+<Aside type="tip" title="Коротко">
+- Индекс B-tree находит строки по значению или по диапазону. Он окупается, когда запрос читает малую часть страниц таблицы: немного строк или больше строк, лежащих на диске рядом, как диапазон дат в таблице, записанной по времени.
+- В составном индексе колонки равенства идут первыми, колонка диапазона — последней: `(product_id, start_time)` для `product_id = … AND start_time >= …`.
+- Индекс не используется, когда колонку оборачивает функция (`CAST(start_time AS DATE) = …`) или когда запрос берёт бо́льшую часть таблицы. Где начинается «бо́льшая часть», зависит от физического порядка строк.
+- `EXPLAIN` читается снизу вверх. `Seq Scan` читает всю таблицу; `Index Scan`, `Index Only Scan` и `Bitmap Index Scan` используют индекс. `EXPLAIN ANALYZE` выполняет запрос и добавляет настоящие числа.
+- Каждый индекс замедляет запись и занимает место: заводите его под реальный запрос и проверяйте, что план его использует.
+</Aside>
+
+## Что такое индекс B-tree
+
+`CREATE INDEX` по умолчанию строит B-tree. Это отсортированное дерево значений колонки, и каждое значение указывает на свою строку в таблице. Чтобы найти диапазон, база спускается по дереву к первому значению и дальше читает значения по порядку, пока диапазон не кончится. B-tree обслуживает `=`, `<`, `>`, `BETWEEN`, полуоткрытые интервалы и `ORDER BY` по своим колонкам.
+
+PostgreSQL создаёт индекс для каждого ограничения `PRIMARY KEY`, `UNIQUE` и `EXCLUDE` — и больше ни для чего. У колонки внешнего ключа индекса нет, пока его не создать. В учебных данных индекс есть только у `merchants.id` и `products.id`; у `transactions` нет ни одного.
+
+## Как читать план
+
+Вопрос: сколько транзакций началось в сентябре 2026? Сначала без индекса:
+
+```sql
+EXPLAIN
+SELECT COUNT(*)
+FROM transactions
+WHERE start_time >= TIMESTAMP '2026-09-01'
+  AND start_time <  TIMESTAMP '2026-10-01';
+```
+
+```text
+Aggregate  (cost=325.57..325.58 rows=1 width=8)
+  ->  Seq Scan on transactions  (cost=0.00..324.41 rows=463 width=0)
+        Filter: ((start_time >= '2026-09-01 00:00:00'::timestamp …) AND (start_time < '2026-10-01 00:00:00'::timestamp …))
+```
+
+Потом после `CREATE INDEX tx_start_time_idx ON transactions (start_time);`:
+
+```text
+Aggregate  (cost=34.59..34.60 rows=1 width=8)
+  ->  Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..33.43 rows=464 width=0)
+        Index Cond: ((start_time >= '2026-09-01 00:00:00'::timestamp …) AND (start_time < '2026-10-01 00:00:00'::timestamp …))
+```
+
+Как читать:
+
+1. **Снизу вверх.** Самый вложенный узел выполняется первым и передаёт строки узлу выше. Здесь чтение таблицы кормит `Aggregate`, который считает.
+2. **Вид узла** говорит, как читаются строки:
+
+   | узел | что делает |
+   |---|---|
+   | `Seq Scan` | читает всю таблицу и проверяет каждую строку |
+   | `Index Scan` | находит строки в индексе, потом читает каждую из таблицы |
+   | `Index Only Scan` | всё, что нужно запросу, есть в индексе |
+   | `Bitmap Index Scan` + `Bitmap Heap Scan` | собирает совпадения из индекса, потом читает их страницы таблицы по порядку, каждую один раз |
+
+3. **`cost=старт..всего`** — оценка в условных единицах. Сравнивать можно только планы одного запроса: 325,58 против 34,60.
+4. **`rows=`** — оценка числа строк.
+5. **`Filter`** — проверка каждой прочитанной строки. **`Index Cond`** — условие, по которому искали в индексе.
+
+Если запросу нужна колонка, которой нет в индексе, — `SUM(revenue_usd)` вместо `COUNT(*)`, — план становится `Index Scan`: цену приходится читать из таблицы.
+
+### EXPLAIN ANALYZE
+
+`EXPLAIN` только строит план. `EXPLAIN ANALYZE` ещё и выполняет запрос и добавляет, что было на самом деле. Время меняется от запуска к запуску, числа строк — нет. С индексом, сокращённо:
+
+```text
+Aggregate  (cost=34.59..34.60 rows=1 width=8) (actual time=0.807..0.809 rows=1.00 loops=1)
+  ->  Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..33.43 rows=464 width=0) (actual time=0.106..0.538 rows=475.00 loops=1)
+        Heap Fetches: 475
+        Buffers: shared hit=12 read=1
+```
+
+И без него:
+
+```text
+  ->  Seq Scan on transactions  (cost=0.00..324.41 rows=463 width=0) (actual time=1.362..1.907 rows=475.00 loops=1)
+        Rows Removed by Filter: 7819
+        Buffers: shared hit=200
+```
+
+- **Оценка против реальности:** в плане 464 строки, нашлось 475, статистика в порядке. Если они расходятся в десятки раз, план выбран под неверные числа. Часто статистика устарела: выполните `ANALYZE transactions` и посмотрите снова. Если не помогло, условия могут зависеть друг от друга (см. ниже).
+- **`Rows Removed by Filter: 7819`**: полный проход прочитал каждую строку, чтобы оставить 475.
+- **`Buffers`**: 200 страниц по 8 кБ — это вся таблица; индекс прочитал 13.
+- **`Heap Fetches: 475`**: index-only scan всё равно проверил каждую строку в таблице, потому что страницы, которые можно пропускать, помечает только `VACUUM`.
+
+`EXPLAIN ANALYZE` на `UPDATE` или `DELETE` по-настоящему меняет данные. Запускайте его внутри `BEGIN; … ROLLBACK;`.
+
+Планировщик считает два условия независимыми и перемножает их доли. В учебных данных каждый тариф принадлежит одному продукту, поэтому для `product_id = 'prd_07' AND plan_id = 'prd_07.monthly'` оценка — 17 строк, а на деле их 343. Новый `ANALYZE` по-прежнему даёт 17. Расширенная статистика (extended statistics) сообщает планировщику, что колонки зависят друг от друга:
+
+```sql
+CREATE STATISTICS tx_product_plan (dependencies) ON product_id, plan_id FROM transactions;
+ANALYZE transactions;   -- теперь оценка — 343 строки, столько же, сколько на деле
+```
+
+## Составные индексы: порядок колонок
+
+Составной индекс отсортирован по первой колонке, а внутри каждого её значения — по второй, как телефонная книга по фамилии, а потом по имени. Найти «Петров Иван» быстро. Найти всех, кого зовут Иван, — значит заглянуть под каждую фамилию.
+
+Поэтому индекс `(product_id, start_time)` помогает трём видам запросов по-разному:
+
+| условие | как помогает индекс |
+|---|---|
+| `product_id = … AND` диапазон `start_time` | один поиск: обе колонки в `Index Cond` |
+| `product_id = …` | один поиск по первой колонке |
+| только диапазон `start_time` | по поиску на каждое значение `product_id` |
+
+Первый случай, prd_09 за сентябрь:
+
+```text
+Bitmap Heap Scan on transactions  (cost=4.53..63.29 rows=19 width=6)
+  Recheck Cond: ((product_id = 'prd_09'::text) AND (start_time >= …) AND (start_time < …))
+  ->  Bitmap Index Scan on tx_product_start_idx  (cost=0.00..4.52 rows=19 width=0)
+        Index Cond: ((product_id = 'prd_09'::text) AND (start_time >= …) AND (start_time < …))
+```
+
+Дорогой — третий случай. `SUM(revenue_usd)` по всем сентябрьским транзакциям, один и тот же запрос при трёх наборах индексов:
+
+| индексы | план | полная стоимость |
+|---|---|---|
+| нет индекса | `Seq Scan` | 325.58 |
+| индекс `(product_id, start_time)` | `Bitmap Index Scan`, `Index Searches: 21` | 260.33 |
+| индекс `(start_time)` | `Index Scan` | 34.60 |
+
+PostgreSQL 18 умеет использовать здесь составной индекс через *skip scan*: по поиску на каждый из 20 продуктов, что `EXPLAIN ANALYZE` показывает как `Index Searches: 21`. Это работает, только когда у первой колонки мало разных значений. Старые версии или первая колонка с множеством значений читают вместо этого весь индекс или всю таблицу.
+
+Правило: **колонки равенства — первыми, колонка диапазона — последней.** Если диапазон первым, `(start_time, product_id)`, индексу приходится прочитать все сентябрьские строки всех продуктов и проверить `product_id` у каждой.
+
+## Когда индекс не используется
+
+1. **Колонку оборачивает функция.** В индексе лежит `start_time`, а не `CAST(start_time AS DATE)`. С индексом по `start_time`:
+
+   ```text
+   -- WHERE CAST(start_time AS DATE) = DATE '2026-09-15'
+   Seq Scan on transactions  (cost=0.00..324.41 rows=41 width=0)
+     Filter: ((start_time)::date = '2026-09-15'::date)
+
+   -- WHERE start_time >= TIMESTAMP '2026-09-15' AND start_time < TIMESTAMP '2026-09-16'
+   Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..8.70 rows=17 width=0)
+   ```
+
+   `EXTRACT(MONTH FROM start_time) = 9` по той же причине даёт `Seq Scan`. Это ещё один довод писать даты полуоткрытым интервалом ([фильтры и даты](/sql/filters-and-dates/)).
+
+2. **Запрос берёт бо́льшую часть таблицы.** `start_time >= TIMESTAMP '2025-01-01'` подходит под все 8 294 строки, и план — `Seq Scan` даже с индексом. Это верный выбор: прочитать таблицу подряд дешевле, чем прыгать по индексу ради каждой строки. Где начинается «бо́льшая часть», зависит от физического порядка — ниже.
+3. **Таблица крошечная.** 12 строк `merchants` помещаются на одной странице в 8 кБ. Даже поиск по первичному ключу читает таблицу: `Seq Scan on merchants (cost=0.00..1.15 rows=1 width=30)`.
+
+### Физический порядок: корреляция
+
+`Index Scan` находит строки в индексе, а потом читает их страницы в таблице. Если строки лежат рядом, он читает несколько соседних страниц. Если разбросаны — по странице почти на каждую строку. `pg_stats` измеряет это как корреляцию (`correlation`) от -1 до 1: 1 значит, что значения растут в том же порядке, в каком строки лежат на диске.
+
+```sql
+SELECT attname, ROUND(correlation::numeric, 4) AS correlation
+FROM pg_stats
+WHERE tablename = 'transactions'
+  AND attname IN ('start_time', 'customer_id')
+ORDER BY attname;
+```
+
+| attname | correlation |
+|---|---|
+| customer_id | 0.0002 |
+| start_time | 0.9994 |
+
+Транзакции записываются по порядку времени, поэтому `start_time` идёт за диском, а `customer_id` — нет. С индексом на каждой колонке `SUM(revenue_usd)` примерно по 6 % строк:
+
+| фильтр | строк | план | полная стоимость |
+|---|---|---|---|
+| `start_time >= TIMESTAMP '2026-09-01'` | 475 | `Index Scan` | 33.44 |
+| `customer_id < 'cus_00131'` | 484 | `Bitmap Heap Scan` | 219.51 |
+| любой из них без индекса | | `Seq Scan` | около 305 |
+
+Доля строк почти одинаковая, а стоимости далеки друг от друга. Индекс по `start_time` планировщик держит даже для 65 % таблицы (`start_time >= TIMESTAMP '2025-10-08'`) и переходит на `Seq Scan` только примерно с двух третей. Так что правило — про страницы, а не про строки:
+
+- Таблица, куда только дописывают по порядку времени, сама держит диапазоны дат дешёвыми: транзакции, события вебхуков, журнал проводок. На этом же строится [индекс BRIN](/sql-patterns/database-concepts/).
+- Строки, загруженные не по порядку или часто обновляемые, этот порядок теряют. `CLUSTER transactions USING tx_start_time_idx` один раз переписывает таблицу в порядке индекса. На время работы он блокирует таблицу, а новые строки порядку не следуют.
+- `EXPLAIN` уже учитывает корреляцию. Проверяйте план, а не угадывайте долю.
+
+## Индексы по выражению и частичные индексы
+
+Если запрос обязан сохранить функцию, проиндексируйте само выражение. Выражение в запросе должно в точности совпадать с индексом:
+
+```sql
+CREATE INDEX tx_day_idx ON transactions (CAST(start_time AS DATE));
+```
+
+```text
+-- WHERE CAST(start_time AS DATE) = DATE '2026-09-15'
+Bitmap Heap Scan on transactions  (cost=4.60..107.53 rows=41 width=0)
+  ->  Bitmap Index Scan on tx_day_idx  (cost=0.00..4.59 rows=41 width=0)
+        Index Cond: ((start_time)::date = '2026-09-15'::date)
+```
+
+Частичный индекс хранит только строки, которые нужны запросу. Возврат есть только у 188 из 8 294 транзакций:
+
+```sql
+CREATE INDEX tx_refunded_idx ON transactions (refunded_at)
+WHERE refunded_at IS NOT NULL;
+```
+
+Запрос о возвратах за сентябрь его использует (`Index Only Scan using tx_refunded_idx`): `refunded_at >= …` может быть истинным, только когда `refunded_at` не NULL. Частичный индекс используется, только если `WHERE` запроса влечёт `WHERE` индекса.
+
+## Чего стоит индекс
+
+Каждый индекс замедляет запись, и в PostgreSQL цена зависит от вида записи:
+
+- **`INSERT`** добавляет запись в каждый индекс. Таблица с пятью индексами делает шесть записей на каждую новую строку.
+- **`UPDATE`** пишет новую версию строки. Если ни одна проиндексированная колонка не изменилась и новая версия помещается на ту же страницу, это HOT-обновление, и индексы не трогаются. Иначе новую запись получает каждый индекс, даже тот, чьи колонки не менялись.
+- **`DELETE`** только помечает строку удалённой. Её записи в индексах остаются, пока их не уберёт `VACUUM`, так что работа переходит к `VACUUM`: ему нужно почистить каждый индекс.
+
+Индексы ещё и занимают место:
+
+| объект | размер |
+|---|---|
+| `transactions` | 1600 kB |
+| `tx_start_time_idx` | 200 kB |
+| `tx_day_idx` | 88 kB |
+| `tx_refunded_idx` | 16 kB |
+
+Поэтому индекс заводят под реальный запрос и потом проверяют план. Индекс, которым не пользуется ни один запрос, только тормозит запись.
+
+## Вопросы вслух
+
+<Talk q="This query is slow on a big table. What would you do?">
+
+"First I would look at the plan with EXPLAIN ANALYZE. If it scans the whole table, I would add an index on the columns in the WHERE clause, for example (product_id, start_time), and then check the plan again."
+
+Ответ подлиннее — с устаревшей статистикой и сортировками, которые уходят на диск, — на странице [понятия баз данных](/sql-patterns/database-concepts/).
+
+</Talk>
+
+<Talk q="Does the order of columns in a composite index matter?">
+
+"Yes. An index on (product_id, start_time) helps `WHERE product_id = … AND start_time > …` and `WHERE product_id = …`, but not efficiently for `WHERE start_time > …` alone. Equality columns go first, the range column last."
+
+PostgreSQL 18 умеет skip scan по такому индексу, когда у первой колонки мало значений (`Index Searches: 21` выше), но строить на этом дизайн не стоит.
+
+</Talk>
+
+<Talk q="Why not index every column?">
+
+"Every index slows down writes and takes space. I add an index for a real query, and I check that the planner uses it."
+
+</Talk>
+
+<Talk q="When is an index not used?">
+
+"When a function wraps the column, like `date(start_time) = …`. Then I compare with a range instead, or create an expression index. Also when the query returns a large part of the table: a full scan is cheaper then. How large depends on the order of the rows on disk: a date range in a table written in time order stays cheap for much longer."
+
+</Talk>
+
+## Практика
+
+<Drill id="s-explain">
+
+Проверять здесь нечего: сравнивайте планы сами. Каждый запуск откатывается, поэтому индекс живёт только в том запуске, который его создал. Сначала выполните `EXPLAIN` без строки `CREATE INDEX` — будет `Seq Scan`; с индексом — `Index Only Scan`, и стоимость упадёт примерно с 325 до 35. Потом меняйте по одной вещи. `SUM(revenue_usd)` вместо `COUNT(*)` даёт `Index Scan`. `EXTRACT(MONTH FROM start_time) = 9` снова даёт `Seq Scan`. Когда диапазон покрывает бо́льшую часть таблицы, `Seq Scan` — верный выбор планировщика, а не сбой.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Пересказывайте план снизу вверх, с числами: «The bottom node is a sequential scan over all 8,294 rows. With an index on start_time it becomes an index-only scan, and the cost drops from about 325 to 35.»
+
+На вопрос «А база его использует?» нет ответа «да» или «нет», поэтому назовите условие и проверку: «If the range is a small part of the table, yes. If it covers most of the table, a full scan is cheaper. Where that line is depends on the physical order: transactions are written in time order, so a date range reads neighbouring pages. I'd confirm it with EXPLAIN ANALYZE.»
+</Aside>
+
+## Что почитать
+
+- [Indexes](https://www.postgresql.org/docs/current/indexes.html) — вся глава: типы индексов, составные, частичные и по выражению.
+- [Multicolumn indexes](https://www.postgresql.org/docs/current/indexes-multicolumn.html) — почему важны первые колонки, и skip scan.
+- [Partial indexes](https://www.postgresql.org/docs/current/indexes-partial.html) — и когда планировщик может их использовать.
+- [Indexes on expressions](https://www.postgresql.org/docs/current/indexes-expressional.html) — индекс по `lower(email)` или по приведению к дате.
+- [Using EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html) — виды узлов, стоимость и `EXPLAIN ANALYZE` с примерами.
+
+## Связанные темы
+
+- [Фильтры и даты](/sql/filters-and-dates/) — полуоткрытый интервал оставляет колонку голой, и индекс работает.
+- [Понятия баз данных](/sql-patterns/database-concepts/) — вопросы-продолжения после задачи: миллиард строк, медленный запрос, BRIN.
+- [Топ-N в группе](/sql-patterns/top-n-per-group/) — `ROW_NUMBER` по группам; индекс в порядке окна помогает для одной группы, а не для прохода по всей таблице.
+- [Отчёты о выручке](/sql-tasks/revenue-reports/) — каждый разбор называет индекс, который обслужит запрос.

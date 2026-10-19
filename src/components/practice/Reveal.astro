@@ -1,0 +1,23 @@
+---
+// A block hidden until the reader opens it: a walkthrough, a hint, a long answer. The body is left
+// out of the site search (data-pagefind-ignore), so a search does not show a hidden answer. After a
+// <Task>, the first <Reveal> is its walkthrough: client.ts soft-locks it like the solution.
+//   <Reveal title="Walkthrough" try>…Markdown…</Reveal>
+import { localeOf } from './lib/data';
+import { strings } from './lib/i18n';
+import './practice.css';
+
+interface Props {
+  title: string;
+  /** Adds a "try the task first" note. */
+  try?: boolean;
+}
+const { title, try: tryFirst = false } = Astro.props;
+const T = strings(localeOf(Astro));
+---
+<details class="lcp-reveal">
+  <summary class="not-content"><span class="lcp-reveal-title">{title}</span>{tryFirst && <span class="lcp-try">{T.tryFirst}</span>}</summary>
+  <div class="lcp-reveal-body" data-pagefind-ignore>
+    <slot />
+  </div>
+</details>

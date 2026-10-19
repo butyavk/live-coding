@@ -1,0 +1,265 @@
+---
+title: Декораторы
+description: "Функции как значения, замыкания, декоратор с functools.wraps, состояние на обёртке и декоратор с параметром вроде retry(times) — всё на примерах."
+sidebar:
+  order: 9
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Задачи на декораторы на Python-интервью встречаются часто: посчитать вызовы, залогировать или замерить функцию, повторить ненадёжный вызов, закэшировать медленный. Каждая — строк десять, но только если ясны три идеи. Функция — это значение. Внутренняя функция помнит переменные внешней. Обёртка подменяет исходную функцию.
+
+<Aside type="tip" title="Коротко">
+- `@deco` над `def f` означает `f = deco(f)`: функция, которая принимает функцию и возвращает новую.
+- Обёртка принимает `*args, **kwargs`, вызывает `func` и **возвращает** её результат.
+- `@functools.wraps(func)` ставится на обёртку. Он сохраняет `__name__` и `__doc__` и добавляет `__wrapped__`.
+- `calls += 1` внутри обёртки падает с `UnboundLocalError`. Нужен `nonlocal` или состояние в атрибуте обёртки.
+- Декоратор с параметром, `@retry(times=3)`, — это ещё один уровень: функция, которая возвращает декоратор.
+</Aside>
+
+## Функции — это значения
+
+Функция — такой же объект, как остальные. Её можно положить в dict, передать аргументом и вернуть из другой функции. Обработчик событий часто выбирает функцию из dict по типу события:
+
+```python
+def on_purchase(event):
+    return f"new subscription for {event['customer_id']}"
+
+
+def on_refund(event):
+    return f"refund for {event['customer_id']}"
+
+
+handlers = {"purchase": on_purchase, "refund": on_refund}
+
+event = {"type": "refund", "customer_id": "cus_02564"}
+print(handlers[event["type"]](event))
+```
+
+```text
+refund for cus_02564
+```
+
+На той же идее работает `sorted(rows, key=...)`: вы передаёте функцию, а `sorted` вызывает её для каждой строки.
+
+## Замыкания
+
+Функция, объявленная внутри другой функции, может читать переменные внешней — даже после того, как внешняя вернула результат. Это замыкание (closure).
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def make_fee(rate):
+    def fee(amount):
+        return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return fee
+
+
+market_fee = make_fee(Decimal("0.15"))
+print(market_fee(Decimal("9.99")))
+```
+
+```text
+1.50
+```
+
+`market_fee` помнит `rate`. Читать внешнюю переменную можно свободно. Присваивать — нельзя: присваивание делает имя локальным для внутренней функции, а у локального имени ещё нет значения.
+
+```python
+def count_calls(func):
+    calls = 0
+
+    def wrapper(*args, **kwargs):
+        calls += 1
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@count_calls
+def fee(amount):
+    return amount * 2
+
+
+fee(10)
+```
+
+```text
+UnboundLocalError: cannot access local variable 'calls' where it is not associated with a value
+```
+
+Выхода два:
+
+- **`nonlocal calls`** в обёртке. Работает, но счётчик живёт внутри замыкания, и снаружи его не прочитать: `fee.calls` бросает `AttributeError: 'function' object has no attribute 'calls'`.
+- **Атрибут на обёртке.** После `@count_calls` имя `fee` — это и есть обёртка, поэтому `fee.calls` видно снаружи. Атрибут задаётся один раз, после `def wrapper`, и меняется внутри. Ровно это просит упражнение ниже.
+
+## Декоратор с functools.wraps
+
+```python
+import functools
+
+
+def log_calls(func):
+    @functools.wraps(func)          # без этой строки — см. второй вывод
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        print(f"{func.__name__}{args} -> {result!r}")
+        return result
+    return wrapper
+
+
+@log_calls
+def normalise_channel(name):
+    """Название канала в нижнем регистре, без пробелов."""
+    return name.strip().lower()
+
+
+normalise_channel(" North_Market ")
+print(normalise_channel.__name__, "|", normalise_channel.__doc__)
+print(normalise_channel.__wrapped__(" South_Market "))
+```
+
+```text
+normalise_channel(' North_Market ',) -> 'north_market'
+normalise_channel | Название канала в нижнем регистре, без пробелов.
+south_market
+```
+
+Тот же код без строки с `wraps`:
+
+```text
+normalise_channel(' North_Market ',) -> 'north_market'
+wrapper | None
+AttributeError: 'function' object has no attribute '__wrapped__'
+```
+
+Без `wraps` логи, трейсбеки и инструменты видят каждую задекорированную функцию как `wrapper`, а docstring теряется. С ним имя, docstring и сигнатура, которую показывает `help()`, берутся от исходной функции. `__wrapped__` даёт саму исходную функцию — например, чтобы протестировать её без декоратора.
+
+Ещё две детали:
+
+- Самая частая ошибка — нет `return` в обёртке. Тогда задекорированная функция возвращает `None`.
+- Несколько декораторов применяются снизу вверх: `@a` над `@b` над `def f` означает `f = a(b(f))`.
+
+<Talk q="What does functools.wraps do, and where do you put it?">
+
+"It goes on the inner wrapper, because the wrapper replaces the original function. It copies the name, the docstring and the module of the original onto the wrapper, and it sets `__wrapped__` to the original. So logs and tracebacks show the real name, `help()` and `inspect.signature` follow `__wrapped__` to the real signature, and tests can call the original."
+
+Типичная оплошность — поставить `@functools.wraps` над внешней функцией. Его место — прямо над `def wrapper`.
+
+</Talk>
+
+## Декоратор с параметром
+
+`@retry(times=3)` сначала вызывает `retry(times=3)`. Этот вызов возвращает настоящий декоратор, и уже он получает функцию. Поэтому уровней на один больше:
+
+```python
+import functools
+
+
+def retry(times, exceptions=(TimeoutError,)):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(1, times + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions:
+                    print(f"attempt {attempt} failed")
+                    if attempt == times:
+                        raise
+        return wrapper
+    return decorator
+
+
+answers = iter([TimeoutError("slow"), TimeoutError("slow"), "1.08"])
+
+
+@retry(times=3)
+def fetch_rate():
+    answer = next(answers)
+    if isinstance(answer, Exception):
+        raise answer
+    return answer
+
+
+print(fetch_rate())
+print(fetch_rate.__name__)
+```
+
+```text
+attempt 1 failed
+attempt 2 failed
+1.08
+fetch_rate
+```
+
+`raise` без аргументов после последней попытки заново бросает последнюю ошибку с её исходным трейсбеком. Настоящий retry ещё и ждёт между попытками и повторяет только временные ошибки — см. [Ошибки и проверка ввода](/python/errors-and-validation/).
+
+Обычная ошибка — `@retry` без скобок. Тогда `retry` получает функцию в качестве `times`, и первый же вызов падает:
+
+```text
+TypeError: retry.<locals>.decorator() missing 1 required positional argument: 'func'
+```
+
+## Готовые декораторы
+
+Если результат не устаревает, кэш писать не нужно:
+
+```python
+import functools
+
+
+@functools.lru_cache(maxsize=128)
+def exchange_rate(currency):
+    print(f"calling the rates API for {currency}")
+    return {"EUR": "1.08", "GBP": "1.27"}[currency]
+
+
+exchange_rate("EUR")
+exchange_rate("EUR")
+exchange_rate("GBP")
+print(exchange_rate.cache_info())
+```
+
+```text
+calling the rates API for EUR
+calling the rates API for GBP
+CacheInfo(hits=1, misses=2, maxsize=128, currsize=2)
+```
+
+`functools.cache` — то же самое без ограничения размера. Ни один из них не забывает запись со временем. Поэтому они не подходят для данных, которые меняются, например для курса валют, который обновляется каждый час. Кэш со сроком жизни (TTL) — поэтому отдельная задача на странице [Кэш и лимиты](/python-tasks/caching-and-rate-limits/). `@property`, `@staticmethod`, `@classmethod` и `@dataclass` — тоже декораторы: см. [Классы и состояние](/python/classes-and-state/).
+
+## Практика
+
+<Drill id="y-decorator">
+
+Обёртка подменяет функцию, поэтому счётчик живёт на ней: `wrapper.calls = 0` после определения, `wrapper.calls += 1` внутри. `functools.wraps` — тоже на обёртке: он копирует `__name__` и `__doc__` и даёт `__wrapped__`. Декоратор с параметром, например `retry(times)`, — на уровень вложенности больше.
+
+</Drill>
+
+<Drill id="y-retry">
+
+Три уровня: `retry(times, exceptions)` проверяет аргументы и возвращает декоратор, декоратор получает функцию, а обёртка делает попытки. `except exceptions` принимает кортеж, поэтому повторяются только перечисленные ошибки: `ValueError` в третьей проверке уходит наверх после первого же вызова. На последней попытке голый `raise` бросает заново ту ошибку, которая сейчас обрабатывается, — последнюю, вместе с её трейсбеком. Если сохранить и бросить первую ошибку, то, что случилось в конце, останется скрытым, а вторая проверка ждёт `try 3`. С `range(1, times + 1)` число `times` — это всего вызовов, а не повторов после первого; на интервью уточните, что имеется в виду. Настоящий retry ещё и ждёт между попытками, с растущими паузами и jitter: см. [Ошибки и проверка ввода](/python/errors-and-validation/).
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Запишите, что значит строка с `@`, комментарием над функцией — тогда вы с интервьюером читаете одно и то же: `# charge = count_calls(charge)`. С параметром это `# fetch_rate = retry(times=3)(fetch_rate)`, и лишний уровень вложенности объясняет себя сам.
+
+Дальше устройство описывает одна фраза: *"The wrapper replaces the function, so wraps goes on the wrapper, and the counter is an attribute of the wrapper."* Если спросят, безопасен ли счётчик для потоков: *"No, += 1 is read, add, write. A threading.Lock around it fixes that"* (про потоки — на странице [Python и SQL](/python/python-and-sql/)).
+</Aside>
+
+## Что почитать
+
+- [functools.wraps](https://docs.python.org/3/library/functools.html#functools.wraps) — что он копирует и `update_wrapper` под ним.
+- [functools.lru_cache](https://docs.python.org/3/library/functools.html#functools.lru_cache) — встроенный кэш и `cache_info()`.
+- [Function definitions](https://docs.python.org/3/reference/compound_stmts.html#function-definitions) — синтаксис декоратора и чему он равносилен.
+- [The nonlocal statement](https://docs.python.org/3/reference/simple_stmts.html#the-nonlocal-statement) — присваивание переменной внешней функции.
+
+## Связанные темы
+
+- [Классы и состояние](/python/classes-and-state/) — когда состояния становится много, небольшой класс читается лучше атрибутов на функции.
+- [Кэш и лимиты](/python-tasks/caching-and-rate-limits/) — кэш с TTL в виде декоратора с параметрами и счётчиками.
+- [Ошибки и проверка ввода](/python/errors-and-validation/) — какие ошибки ловить в декораторе retry и сколько ждать.
+- [Окна по времени](/python/time-windows/) — ещё одно состояние, которым тесты управляют через часы снаружи.

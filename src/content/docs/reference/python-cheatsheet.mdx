@@ -1,0 +1,195 @@
+---
+title: Python cheat sheet
+description: The standard-library Python a live-coding task needs, on one page. Idioms, what to use when, dates, money, a decorator, complexity, traps, pytest and the docs.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Live-coding tasks in Python rarely need a library. They need `dict`, `set`, `sorted`, `Decimal`, `datetime` and a few modules from the standard library, typed quickly and without mistakes. The first block is what to have in your fingers; the rest is for looking up and for the questions that come after the code works.
+
+<Aside type="tip" title="TL;DR">
+- Group with `defaultdict`, count with `Counter`, "seen before" with a `set`, a sliding window with a `deque`, top-k with `heapq`.
+- Sort by several keys with a tuple key: `key=lambda r: (-r["amount"], r["id"])`.
+- Money is `Decimal` from strings, rounded with `quantize`. `round()` on a `Decimal` is banker's rounding.
+- Months are not `timedelta`: compute the year and the month, then cap the day with `calendar.monthrange`.
+- Forgot a signature? `help(heapq.nsmallest)` in the editor, or the module page on docs.python.org. Neither is AI.
+</Aside>
+
+## In your fingers
+
+```python
+from collections import defaultdict, Counter, deque, OrderedDict
+from datetime import datetime, date, timedelta, time, timezone
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+from dataclasses import dataclass, field
+import heapq, bisect, calendar, functools, itertools, re
+
+d = defaultdict(list); d[key].append(x)
+c = Counter(items); c.most_common(3)
+q = deque(maxlen=100); q.append(x); q.popleft()
+od = OrderedDict(); od.move_to_end(k); od.popitem(last=False)      # LRU: drop the oldest
+
+sorted(rows, key=lambda r: (r["date"], r["id"]))                    # several keys
+sorted(rows, key=lambda r: (-r["amount"], r["id"]))                 # amount descending, then id
+min(cands, key=lambda c: (abs(c.diff), c.id))                       # the best one, with a tie-breaker
+heapq.nsmallest(5, rows, key=...)                                   # top N without a full sort
+bisect.bisect_left(sorted_list, x)                                  # search in a sorted list
+
+for a, b in zip(xs, xs[1:]): ...                                    # neighbouring pairs
+for i, x in enumerate(xs, 1): ...                                   # numbered from 1
+itertools.groupby(sorted_rows, key=...)                             # only on sorted input!
+```
+
+## What to use when
+
+- Group and sum → `defaultdict(Decimal)`; a list per key → `defaultdict(list)`.
+- Count things → `Counter`.
+- "Have I seen it?", duplicates → a `set` called `seen`.
+- The latest record per key → a `dict`, overwritten only when the new record is newer.
+- Top k → `heapq.nsmallest(k, rows, key=lambda r: (-r.amount, r.id))`.
+- A sliding time window, a rate limit → a `deque`, old items dropped from the left.
+- Search in a sorted list → `bisect`.
+- Overlapping periods → sort by start, then one pass.
+- Allocate an amount to debts → one loop: `pay = min(left, due)`, `if pay > 0`, `break` when `left == 0`.
+- Data from a database → filter and `GROUP BY` in SQL; bring only a small result into Python.
+
+The order of work for any function: a small input and output by hand, the rule in one sentence, the edge cases as a comment, the code, a `print` of the example, then the edge cases.
+
+## Dates
+
+```python
+datetime(2026, 9, 30) + timedelta(days=30)      # 2026-10-30 00:00:00
+calendar.monthrange(2026, 2)[1]                 # 28: days in the month
+dt.replace(day=1)                               # start of the month
+(d2 - d1).days                                  # difference in days
+datetime.combine(d, time())                     # midnight of a date
+datetime.fromisoformat("2026-09-30 10:00:00")   # parse an ISO string
+```
+
+You cannot add months with `timedelta`. Compute the year and the month with `//` and `%`, and cap the day with `calendar.monthrange`: 31 January plus one month is 28 February 2026. A datetime with a time zone (aware) and one without (naive) cannot be compared: Python raises `TypeError`.
+
+## Money
+
+```python
+Decimal("0.1") + Decimal("0.2") == Decimal("0.3")          # True; with float it is False
+amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)   # 0.125 -> 0.13
+amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)      # down: 23.9976 -> 23.99
+round(amount, 2)                                           # still a Decimal, but banker's: 0.125 -> 0.12
+Decimal(str(0.1))                                          # from a float, only through str
+```
+
+`Decimal(0.1)` without `str` keeps the binary error of the float: `0.1000000000000000055511151231257827021181583404541015625`.
+
+## A decorator
+
+A decorator with a parameter has three levels: the factory takes the parameter, the decorator takes the function, the wrapper takes the call.
+
+```python
+import functools
+
+
+def retry(times: int):
+    """Call the function again after a ConnectionError, at most `times` attempts in total."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(1, times + 1):
+                try:
+                    return func(*args, **kwargs)
+                except ConnectionError:
+                    if attempt == times:
+                        raise
+        return wrapper
+    return decorator
+
+
+@retry(times=3)
+def fetch_payout(payout_id: str) -> str:
+    """Ask the marketplace API for one payout."""
+    ...
+```
+
+Thanks to `functools.wraps`, `fetch_payout.__name__` is still `"fetch_payout"` and the docstring survives. Without it, both belong to `wrapper`.
+
+## Complexity to name
+
+- `dict` and `set` lookup: `O(1)` on average. `x in list`: `O(n)`. Sorting: `O(n log n)`. A heap push or pop: `O(log n)`.
+- Two nested loops over n items are `O(n²)`: on 100,000 rows that is already slow.
+- Top k with a heap: `O(n log k)` time and `O(k)` memory.
+- Sweep line: turn periods into +1 and −1 events, sort them, then one pass. `O(n log n)`.
+
+## Traps interviewers ask about
+
+- **A mutable default argument** (`def f(x, seen=set())`, `_cache={}`) lives between calls. Default to `None` and create the object inside.
+- **Money in `float`:** `0.1 + 0.2 != 0.3`. Use `Decimal` from strings. `round()` on a `Decimal` is banker's rounding; for half-up or down, use `quantize`.
+- **Division:** `int / int` gives a `float`, `Decimal / Decimal` gives a `Decimal` (divide money this way). `//` on an `int` rounds down (`-7 // 2 == -4`), on a `Decimal` towards zero (`Decimal(-7) // 2 == -3`).
+- **`x in list` is `O(n)`**, so inside a loop it is `O(n²)`. Use a `set` or a `dict`.
+- **Changing a `dict` while you loop over it** raises `RuntimeError: dictionary changed size during iteration`; a `list` silently skips items. Loop over a copy: `for k in list(d)`.
+- **`defaultdict` creates a key on read:** `d["missing"]` adds it. Return `dict(d)`, and test with `k in d` or `d.get(k)`.
+- **`sorted` is stable:** items with equal keys keep their order. For "amount descending, then id", use the tuple key `(-amount, id)`.
+- **`is` or `==`:** `is` checks that it is the same object, `==` compares values. Use `is` only for `None`.
+- **"What if many threads call it?"** (a cache, a rate limiter) → a `threading.Lock` around read–change–write. Between processes or servers → Redis, or a unique key in the database.
+
+## The database from Python
+
+```python
+# sqlite3, DuckDB and the Python tasks on this site: ? placeholders
+rows = con.execute(
+    "SELECT product_id, start_time FROM transactions WHERE product_id = ? AND start_time >= ?",
+    [product_id, since],
+).fetchall()
+
+# SQLAlchemy, common in online interview editors: :name placeholders
+rows = conn.execute(
+    sa.text("SELECT product_id, start_time FROM transactions WHERE product_id = :product"),
+    {"product": product_id},
+).mappings().all()
+```
+
+Pass values only as parameters, never with an f-string: that is SQL injection, and parameters also handle types and quotes. Do the heavy work (filters, `GROUP BY`) in SQL, and bring a small result into Python.
+
+## pytest
+
+```bash
+pytest -k merge        # only the tests whose name contains "merge"
+pytest -x              # stop at the first failure
+pytest -k merge -vv    # verbose: every test and the full diff
+```
+
+## Looking things up without AI
+
+The fastest help is in the editor itself. It works in most interview editors and is not AI:
+
+```python
+help(heapq.nsmallest)            # signature and description: "Equivalent to: sorted(iterable, key=key)[:n]"
+dir(itertools)                   # what the module has: accumulate, groupby, pairwise, …
+print(Decimal.quantize.__doc__)  # the docstring of one method
+```
+
+The documentation is usually allowed in the interview:
+
+- A module page is `docs.python.org/3/library/<module>.html`: `heapq`, `itertools`, `collections`, `datetime`, `decimal`, `bisect`, `functools`. Search the page for the function name; the end of the page often has examples and recipes.
+- The Sorting HOWTO covers `key`, several keys and stability.
+- The `decimal` page has a FAQ: search for `quantize` or "two decimal places".
+- The `datetime` page has a table of format codes for `strftime()` and `strptime()`.
+
+<Aside type="note" title="In the interview">
+Looking up a signature is normal. Say so, then look: *"Let me quickly check the docs for the exact signature."* A correct call beats a confident guess. Once the tests pass, give the cost before anyone asks: *"It's O(n log n) because of the sort, and the memory is O(n)."* Read your loops once more first: an `x in list` inside a loop makes the whole thing quadratic.
+</Aside>
+
+## Further reading
+
+- [Python: collections](https://docs.python.org/3/library/collections.html) — `defaultdict`, `Counter`, `deque`, `OrderedDict`.
+- [Python: Sorting HOWTO](https://docs.python.org/3/howto/sorting.html) — key functions, several keys, stability.
+- [Python: decimal](https://docs.python.org/3/library/decimal.html) — `quantize`, rounding modes and the FAQ.
+- [Python: datetime](https://docs.python.org/3/library/datetime.html) — aware and naive objects, `fromisoformat`, format codes.
+- [Python: heapq](https://docs.python.org/3/library/heapq.html) and [functools.wraps](https://docs.python.org/3/library/functools.html#functools.wraps).
+
+## Related topics
+
+- [Recipes for a sheet of paper](/reference/recipes/) — the Python recipes, one line each.
+- [dict and Counter](/python/dicts-and-counting/) — grouping and counting, with drills.
+- [Money and Decimal](/python/money-and-decimal/) — rounding, splitting and allocating money.
+- [Testing and complexity](/python/testing-and-complexity/) — what to say once the code works.
+- [Python and SQL](/python/python-and-sql/) — parameters and where the work should happen.

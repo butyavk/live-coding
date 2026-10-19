@@ -1,0 +1,202 @@
+---
+title: Money tasks
+description: "Six Python tasks about money: an advance, matching payments, a safe payout, MRR, a messy partner payout file, and the tests for a payout split."
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Six tasks handle money: how much the advances program can pay a merchant, which payment paid which invoice, how to send a payout without paying twice, MRR, a partner's payout file full of bad rows, and the tests for a function that splits a payout. They test `Decimal` with the right rounding, validation before any calculation, matching rules applied in a fixed order, retries that are safe for money, and tests that would notice a lost cent. They build on [Money and Decimal](/python/money-and-decimal/), [Errors and validation](/python/errors-and-validation/), [Sets and duplicates](/python/sets-and-duplicates/), [Iteration and generators](/python/iteration-and-generators/) and [Testing and complexity](/python/testing-and-complexity/).
+
+<Aside type="tip" title="How to practise">
+Before you write the function, say the type and the rounding of every money value: *"Decimal everywhere; the amount rounds down, the fee rounds half up."* Most failures here are a rounding rule in the wrong place or a check that runs too late.
+
+One test of P10 compares your function with SQL on the practice database. Calling the database from Python needs a recent Chrome or Edge (WebAssembly JSPI). In other browsers that test is skipped with a message, and the other tests run as usual.
+</Aside>
+
+## P06. How much can we advance?
+
+<Task id="p06" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The advances program pays a merchant part of a future marketplace payout today. The amount is the smallest of three limits: 70% of the expected proceeds after a refund reserve, the merchant's risk limit, and what is left of the total budget.
+
+**Steps.** Validate the input; compute the three numbers; take `min`; round down to cents; below 1.00 return `(0.00, 0.00)`; otherwise the fee is 3% of the amount, rounded half up.
+
+**Traps.**
+
+- Only `quantize(Decimal("0.01"), rounding=ROUND_DOWN)` rounds down. `round()` on a `Decimal` rounds to the nearest value. A test uses 0.70 × 33.33 × 0.9 = 20.99790: `round()` gives `21.00`, while `quantize` with `ROUND_DOWN` gives `20.99`.
+- `round()` is wrong for the fee too: on a `Decimal` it rounds an exact half to the even cent. A test has a fee of 3% × 1.50 = 0.045: `round()` gives `0.04`, while `quantize` with `ROUND_HALF_UP` gives `0.05`.
+- Validate before you compute. A negative budget must be an error, not a negative advance.
+- Money is `Decimal` only, created from strings or integers. A float cannot store cents exactly: `0.1 + 0.2` is `0.30000000000000004`.
+- The fee is computed from the rounded amount, the amount that is actually paid.
+
+**Check.** The example from the task: 0.70 × 1000 × 0.95 = 665.00, and the fee is 19.95.
+
+**Complexity.** Constant time. The interesting part is the rounding rules, so state them before you code them.
+
+</Reveal>
+
+## P07. Match payments to invoices
+
+<Task id="p07" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Accounting matches incoming payments to invoices. A reference in the payment is a reliable signal. For payments without one there is a heuristic by counterparty, amount and date.
+
+**Steps.**
+
+1. Sort the payments by (date, id) once. Both passes go through them in this order.
+2. Pass 1: payments whose reference is an open invoice. Match them and remove the invoice from the open ones. If two payments refer to the same invoice, the earlier one gets it, and the other one goes to pass 2.
+3. Index the remaining open invoices by `(counterparty, amount)`.
+4. Pass 2: the other payments, still in order. The candidates are open invoices with the same key and at most 3 days between the payment date and the due date. The best one is `min` by (difference in days, invoice id). Remove it from the open invoices.
+
+**Traps.**
+
+- All references first, then the heuristic. Otherwise the heuristic can "steal" an invoice that another payment refers to.
+- A reference to an invoice that is already matched counts as no reference: the payment goes to pass 2.
+- Sort before pass 1, not only before pass 2. Otherwise, when two payments refer to the same invoice, the one that happens to come first in the input wins.
+- A reference to another counterparty's invoice is still trusted. Do not add a counterparty check to pass 1.
+- Use `abs()` for the date difference: a payment can come before the due date.
+- Sort all three lists of the result.
+
+**Complexity.** With the index by `(counterparty, amount)`, each payment looks only at real candidates, not at every invoice. The rest is the sorts: `O(n log n)`.
+
+**Follow-up.** Partial payments, a tolerance on the amount, several currencies. Name them as extensions and say where each one would change the code.
+
+</Reveal>
+
+## P09. Pay out safely with retries
+
+<Task id="p09" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A payout through a bank must never leave twice, even when a request hangs.
+
+**Steps.**
+
+1. One idempotency key for every attempt: `f"payout:{payout_id}"`.
+2. A loop over attempts 1 … `max_attempts`. Before retry k, wait `base_delay * 2 ** (k - 1)`.
+3. `TransientError` → remember it and retry.
+4. `TimeoutError` → first ask `bank.get_payment(key)`. A payment id → return it; `None` → retry.
+5. After the loop, `raise PayoutFailed(...) from last_error`.
+
+**Traps.**
+
+- A blind retry after a timeout can pay twice. That is the whole point of the task.
+- A new key on each attempt defeats the idempotency key.
+- Catch only `TransientError` and `TimeoutError`. Any other error goes up at once.
+- No wait before the first attempt, and no wait after the last one.
+- `from last_error` keeps the cause, so the log shows why the payout failed.
+
+**Check.** Two `TransientError`s, then success: `pay` is called 3 times, and the waits are 0.5 and 1.0.
+
+**Follow-up.** "The last attempt times out, and `get_payment` still finds nothing. Did the payout fail?" Not for sure: the outcome is unknown, and the bank may still process it. The exercise raises `PayoutFailed` to keep the rule simple. In production, raise a separate "unknown outcome" error, or park the payout for a reconciliation job, so the caller does not retry blindly.
+
+**In production.** Save the payout and its status before calling the bank. Then a crash in the middle, or an unknown outcome, can be resolved later by asking the bank with the same key.
+
+</Reveal>
+
+## P10. MRR by plan
+
+<Task id="p10" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** MRR is how much money per month the subscriptions that are active right now bring in. A yearly plan at 120 gives 10 per month; a weekly one gives the price × 52 / 12. It is a headline number of any subscription business.
+
+**Steps.**
+
+1. A separate function for "active and paid at `as_of`": the same filters as in SQL Q03.
+2. A factor by `plan_period`.
+3. A sum per `plan_id` in `Decimal`, at full precision.
+4. One rounding per plan at the end, half up to cents.
+
+**Traps.**
+
+- Rounding each transaction makes the cents drift.
+- A refund in the future does not count yet: `refunded_at is None or refunded_at > as_of`.
+- The factor 52 / 12 must be `Decimal(52) / Decimal(12)`, not a float.
+- An unknown duration is a `ValueError`, not a silent zero.
+
+**Check.** On the practice data at 30 September, 45 plans have active subscriptions, and prd_03.monthly has an MRR of 69.86. A test compares every plan, to the cent, with an exact calculation in SQL. Three plans land exactly on half a cent (prd_01.annual is 99.975), so the rounding rule decides their last cent.
+
+**Complexity.** One pass, `O(n)`, and memory for one total per plan.
+
+</Reveal>
+
+## P12. Import a partner payout file
+
+<Task id="p12" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A partner's export is where outside data enters our books. A bad row must not stop the import, and it must not slip in either. The total on the last line is the partner's own check that we read every number right.
+
+**Steps.**
+
+1. Take the header with `next(rows, None)`; nothing there → `ImportFailed`. Remove the BOM with `lstrip("\ufeff")`, then normalise each name: `"_".join(name.strip().lower().split())`. Map the four names to their positions; a missing one → `ImportFailed`.
+2. Loop with `enumerate(rows, start=2)`: the header is line 1, and blank lines keep their numbers. Skip a blank line only after it has its number.
+3. A line whose first field is `TOTAL` gives the total. Any non-blank line after it → `ImportFailed`.
+4. One small function checks a row in the order of the codes and returns the first problem, or a `Payout`. The amount is checked against a strict pattern, `-?\d+(,\d{1,2})?`, before `Decimal`; the date is parsed with `strptime("%Y-%m-%d")`.
+5. The payout id joins the set of imported ids only after the row is good.
+6. At the end: no total → `ImportFailed`; the sum of the good amounts differs from the total → `ImportFailed`. Otherwise return both lists.
+
+**Traps.**
+
+- `strip()` does not remove a BOM: it is not whitespace. The first column is then called `\ufeffpayout_id`, and the import fails on a missing column.
+- `Decimal(text.replace(",", "."))` accepts `12.50`. In a file with decimal commas a dot means the row is in another format, and `12.50` could be 1250. A strict pattern turns it into `bad_amount`.
+- An id marked as seen before the checks: the corrected copy of a bad row is then reported as a duplicate. It is the same mistake as in [D03](/python-tasks/debugging/): mark only after success.
+- `amount <= 0` rejects a valid zero payout.
+- Counting only non-blank lines, or counting from 0. Support opens the file in an editor, so the numbers must match the editor's.
+- `lines[0]` and `len(lines)` fail on an open file or a generator. `list(lines)` works here but reads the whole file into memory.
+- Floats for the amounts: the total check then fails on a cent.
+
+**Check.** In the example from the task, the good rows add up to 1234.50 + 87.10 = 1321.60, the total on the last line.
+
+**Complexity.** One pass, `O(n)`. Memory: the records you return, plus one id per imported payout.
+
+**Follow-up.** "The file is 20 GB. What changes?" The input already streams; the output does not, because the list of records grows with the file. Write the records in batches to a staging table, and keep only the ids (or a unique key in that table) and the running sum. Commit after the total matches, and roll everything back if it does not. A generator that yields rows before the total is checked is the trap: the caller has already used rows of a file that turns out to be wrong.
+
+**In production.** Keep the raw file, its checksum and the error report next to the import, so a dispute with the partner can be replayed. A unique key on `(channel, payout_id)` makes a second import of the same file harmless.
+
+</Reveal>
+
+## P14. Write the tests for a payout split
+
+<Task id="p14" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Some rounds give you working code and ask for its tests. The interviewer watches what you choose to test, not how much you type. Check here works like a mutation testing tool: it breaks the code on purpose and asks whether your tests notice.
+
+**Steps.**
+
+1. Read the docstring as a list of promises: parts rounded down first, the spare cents to the largest remainders, ties by position in `shares`, the result in the order of `shares`, an exact sum, zero is valid, and four kinds of `ValueError`.
+2. For each promise, name the most likely wrong code, and pick an input where its answer differs from the right one. Work out the expected value by hand.
+3. Write the exact-value tests first. Then add one parametrised test for properties (the sum, and the distance to the exact share) and one parametrised test for the errors.
+4. Say in one sentence what each test is for.
+
+**Traps.**
+
+- Merchant ids in alphabetical order. "First in `shares`" and "first by id" then give the same answer, so a wrong tie-break or a sorted result survives. Use `{"mer_08": 1, "mer_01": 1}`.
+- Comparing `dict(result)` hides the order of the result.
+- Only equal shares. With 1:1:1 the spare cent goes to the first merchant whether or not the code looks at the remainders. Use 1:2, where the larger remainder belongs to the second merchant.
+- Only the sum. A sum test passes when the cent goes to the wrong merchant.
+- Only invalid input. A zero amount and a zero weight are valid, and a check that is too strict is a bug too.
+- An expected value copied from the function's own output tests nothing. Compute it by hand.
+
+**Check.** Run your tests once on the code as it is. Then break the function yourself, for example replace `sorted(shares, key=…)` with `list(shares)`, and see which test fails. Check does exactly that, with six different bugs.
+
+**Follow-up.**
+
+- "Which test would you write first?" The one for the promise that is the most expensive to break: the parts add up exactly. A lost cent shows up in every reconciliation.
+- "How would you test it on random data?" A property test, for example with the hypothesis library: for random amounts and weights, the parts add up, each part is less than a cent from its exact share, and the order follows `shares`.
+- "What does mutation testing tell you that coverage does not?" Coverage says that a line ran. A planted bug shows whether any test would notice that line being wrong.
+
+</Reveal>

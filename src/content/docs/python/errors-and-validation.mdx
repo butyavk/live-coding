@@ -1,0 +1,310 @@
+---
+title: Errors and validation
+description: "Check input where it enters, raise a clear ValueError, turn InvalidOperation into ValueError, stop NaN, chain errors, and retry only temporary failures."
+sidebar:
+  order: 10
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Money tasks read amounts from strings, files and other services. Sooner or later the interviewer asks: *"What if the amount is empty, or 'abc', or negative?"* A function that quietly returns 0 is worse than one that crashes, because a payout of 0 looks valid.
+
+<Aside type="tip" title="TL;DR">
+- Check input once, where it enters (a request, a file, a database row). Inside, the code works with clean types.
+- Raise `ValueError` with a message that shows the bad value: `f"not an amount: {s!r}"`.
+- `Decimal("abc")` raises `InvalidOperation`, which is **not** a `ValueError`. Catch it and raise `ValueError(...) from e`. `Decimal("NaN")` is accepted: reject it with `is_finite()`.
+- Catch the narrowest exception, around the one line that can fail. Never a bare `except:`.
+- Retry only temporary errors (timeouts, 5xx, 429 after `Retry-After`), with growing pauses and a limit. The call must be idempotent.
+</Aside>
+
+## Validate at the boundary
+
+The boundary is the place where outside data becomes your data: an API handler, a CSV reader, a webhook. Check everything there once. Then the inner functions can trust their arguments and stay short. A webhook payload with the fields of `webhook_events`:
+
+```python
+from datetime import datetime
+
+EVENT_TYPES = {"purchase", "renewal", "expiration", "refund"}
+
+
+def parse_event(raw: dict) -> dict:
+    missing = {"event_id", "type", "occurred_at"} - raw.keys()
+    if missing:
+        raise ValueError(f"missing fields: {sorted(missing)}")
+    if raw["type"] not in EVENT_TYPES:
+        raise ValueError(f"unknown event type: {raw['type']!r}")
+    return {
+        "event_id": raw["event_id"],
+        "type": raw["type"],
+        "at": datetime.fromisoformat(raw["occurred_at"]),
+    }
+
+
+for raw in [
+    {"event_id": "e1", "type": "renewal", "occurred_at": "2026-09-01T10:00:00"},
+    {"event_id": "e2", "type": "renewal"},
+    {"event_id": "e3", "type": "RENEWAL", "occurred_at": "2026-09-01T10:00:00"},
+    {"event_id": "e4", "type": "refund", "occurred_at": "2026-09-31T10:00:00"},
+]:
+    try:
+        print(parse_event(raw))
+    except ValueError as e:
+        print("ValueError:", e)
+```
+
+```text
+{'event_id': 'e1', 'type': 'renewal', 'at': datetime.datetime(2026, 9, 1, 10, 0)}
+ValueError: missing fields: ['occurred_at']
+ValueError: unknown event type: 'RENEWAL'
+ValueError: day 31 must be in range 1..30 for month 9 in year 2026
+```
+
+The first three messages say what is wrong and show the value. The last one comes from `datetime` and does not say which event or which field. At the boundary, add that context with `raise ... from e` (below). `ValueError` is the right type for "the type is fine, the value is not". `TypeError` is for a wrong type, such as `None` where a string was expected.
+
+## What Decimal accepts
+
+Amounts come as strings, and `Decimal(s)` is the usual parser. It accepts more than you might expect:
+
+```python
+from decimal import Decimal
+
+for s in ["12.5", " 12.5 ", "1e3", "-1", "NaN", "Infinity", "abc", "", "1,5", None]:
+    try:
+        print(f"{s!r:12} -> {Decimal(s)!r}")
+    except Exception as e:
+        print(f"{s!r:12} -> {type(e).__name__}")
+```
+
+```text
+'12.5'       -> Decimal('12.5')
+' 12.5 '     -> Decimal('12.5')
+'1e3'        -> Decimal('1E+3')
+'-1'         -> Decimal('-1')
+'NaN'        -> Decimal('NaN')
+'Infinity'   -> Decimal('Infinity')
+'abc'        -> InvalidOperation
+''           -> InvalidOperation
+'1,5'        -> InvalidOperation
+None         -> TypeError
+```
+
+| Input | What to do |
+|---|---|
+| `'12.5'`, `' 12.5 '` | accept; `quantize` to 12.50 |
+| `'abc'`, `''`, `'1,5'` | turn `InvalidOperation` into `ValueError` |
+| `'NaN'`, `'Infinity'` | reject with `is_finite()` |
+| `'-1'` | reject if negative amounts are not allowed |
+| `'1e3'` | ask whether exponent notation is valid input |
+| `None` | check the type first, or catch the `TypeError` |
+
+Two details make this tricky:
+
+```python
+from decimal import Decimal, InvalidOperation
+
+print(issubclass(InvalidOperation, ValueError), issubclass(InvalidOperation, ArithmeticError))
+print(Decimal("NaN").is_finite(), Decimal("Infinity").is_finite(), Decimal("12.5").is_finite())
+print(Decimal("Infinity") > 0)
+print(Decimal("NaN") < 0)
+```
+
+```text
+False True
+False False True
+True
+Traceback (most recent call last):
+  ...
+decimal.InvalidOperation: [<class 'decimal.InvalidOperation'>]
+```
+
+- `InvalidOperation` is an `ArithmeticError`, not a `ValueError`. So `except ValueError` does not catch it.
+- `Infinity` passes a check like `amount > 0`. A comparison with `NaN` raises `InvalidOperation` itself. So call `is_finite()` first and compare after it.
+
+## raise … from e
+
+Turn a low-level error into one the caller understands, and keep the original as the cause:
+
+```python
+from decimal import Decimal, InvalidOperation
+
+
+def to_decimal(s):
+    try:
+        return Decimal(s)
+    except InvalidOperation as e:
+        raise ValueError(f"not an amount: {s!r}") from e
+
+
+to_decimal("12,50")
+```
+
+```text
+Traceback (most recent call last):
+  ...
+decimal.InvalidOperation: [<class 'decimal.ConversionSyntax'>]
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  ...
+ValueError: not an amount: '12,50'
+```
+
+The caller catches one type, `ValueError`, and reads a clear message. The log still shows the original error, and the code can reach it as `err.__cause__`. Three variants:
+
+| Code | Traceback says | Use |
+|---|---|---|
+| `raise ValueError(...) from e` | "The above exception was the direct cause…" | you translate the error on purpose |
+| `raise ValueError(...)` inside `except` | "During handling of the above exception, another exception occurred" | looks like a second bug |
+| `raise ValueError(...) from None` | only the new error | the original adds nothing |
+
+## Catch narrow
+
+A broad `except` turns bugs into wrong answers:
+
+```python
+from decimal import Decimal
+
+
+def parse_amount_bad(s):
+    try:
+        return Decimal(s.strp())        # typo: strp instead of strip
+    except Exception:
+        return Decimal("0")
+
+
+print(parse_amount_bad("12.50"))
+```
+
+```text
+0
+```
+
+The typo raises `AttributeError`, the `except` swallows it, and every amount becomes 0. No test with valid input fails loudly. Rules:
+
+- Catch the exact type you expect: `InvalidOperation`, `KeyError`, `TimeoutError`.
+- Keep the `try` block small: only the line that can fail.
+- A bare `except:` also catches `KeyboardInterrupt` and `SystemExit`. Do not write it.
+- If you must catch everything (at the top of a worker loop), log the error with its traceback and re-raise or count it. Never hide it.
+
+## Custom exceptions
+
+Define your own exception when the caller must react to it in a special way. Inherit from a built-in one when it fits, so callers that catch the built-in still work:
+
+```python
+class PayoutError(Exception):
+    """Base class: everything that can go wrong with a payout."""
+
+
+class InvalidAmount(PayoutError, ValueError):
+    """Bad input: retrying will not help."""
+
+
+class BankUnavailable(PayoutError):
+    """The bank did not process the request: safe to retry."""
+
+
+def handle(exc):
+    try:
+        raise exc
+    except BankUnavailable:
+        return "retry later"
+    except ValueError as e:          # InvalidAmount is a ValueError too
+        return f"reject: {e}"
+
+
+print(handle(BankUnavailable("503 from the bank")))
+print(handle(InvalidAmount("amount must be positive, got -5")))
+```
+
+```text
+retry later
+reject: amount must be positive, got -5
+```
+
+The name of the class carries the decision: `BankUnavailable` means "try again", `InvalidAmount` means "do not". One base class (`PayoutError`) lets a caller catch the whole family. Put the more specific `except` first: Python takes the first one that matches.
+
+## Which errors to retry
+
+A retry helps only when the next attempt can succeed. Repeating a bad request just sends it again.
+
+| Failure | Retry? | Why |
+|---|---|---|
+| Timeout | yes, but check first | the request may have gone through |
+| Connection refused before sending | yes | nothing was processed |
+| HTTP 500, 502, 503, 504 | yes, with pauses | the server side is temporarily broken |
+| HTTP 429 Too Many Requests | yes, after `Retry-After` | you are over the limit |
+| HTTP 400, 401, 403, 404, 422 | no | the same request fails again |
+| Our own `ValueError` | no | a bug or bad input |
+
+Wait longer before each retry (exponential backoff), add randomness (jitter), and stop after a fixed number of attempts:
+
+```python
+import random
+
+base_delay = 0.5
+delays = [base_delay * 2 ** (k - 1) for k in range(1, 6)]   # before retry 1, 2, 3, ...
+print(delays)
+
+rng = random.Random(7)                                       # seeded, so a test is repeatable
+print([round(rng.uniform(0, d), 2) for d in delays])         # full jitter
+```
+
+```text
+[0.5, 1.0, 2.0, 4.0, 8.0]
+[0.16, 0.15, 1.3, 0.29, 4.29]
+```
+
+Jitter spreads the retries of many clients over time, so they do not all hit a recovering server at the same moment. After the last attempt, raise your own error with the last failure as the cause: `raise PayoutFailed(...) from last_error`. Pass `sleep` in as a parameter, so tests do not wait. The full exercise, a payout where a timeout may have paid already, is in [Money tasks](/python-tasks/money/).
+
+<Talk q="A call to an external API sometimes fails. How do you retry it safely?">
+
+"Retry only errors that are temporary — timeouts and 5xx, not 4xx, except 429 after Retry-After — with exponential backoff and jitter, and a limit on attempts. And the call must be idempotent: for money I send an idempotency key, so a retry after a timeout does not charge twice."
+
+A timeout is the hard case: the request may have reached the other side. Before you repeat a payment, ask whether it exists, using the same idempotency key.
+
+</Talk>
+
+## Practice
+
+<Drill id="y-validate">
+
+`Decimal('abc')` raises `InvalidOperation`. Turn it into `ValueError`, the error the caller expects, with `from e`, so the traceback shows the translation was on purpose. A value that is not a string is a wrong type, so the reference checks `isinstance` and raises `TypeError` instead of catching an `AttributeError` from `.strip()`. `quantize` with `ROUND_HALF_UP` rounds the way accountants do; `round()` on a `Decimal` rounds half to even (0.125 becomes 0.12). `Decimal('NaN')` is a valid `Decimal` too, so reject it with `is_finite()`, before the check for a negative value. That check is `is_signed()`: `value < 0` lets `'-0'` through, and it comes out as `Decimal('-0.00')`. `quantize` can fail as well: `'1e30'` needs more digits than the context allows, so that call is wrapped too. The checks compare the decimal places: `Decimal('12.5')` does not pass for `Decimal('12.50')`.
+
+</Drill>
+
+<Drill id="y-parse-csv">
+
+`csv.DictReader` takes the header as the keys and gives each row as a dict. A short row does not fail: its missing columns come as `None`. So `not row.get(f)` catches an absent field and an empty one, and it runs first: otherwise `Decimal('')` on line 3 would report a bad amount. `reader.line_num` is the number of lines read so far, with the header as line 1. `enumerate(reader, start=2)` gives the same numbers here, but not when a quoted field spans two lines or a blank line is skipped. `Decimal('n/a')` raises `InvalidOperation`, while `Decimal('NaN')` parses, so line 6 needs `is_finite()`. `date.fromisoformat` rejects 31 September with `ValueError`. Collect the bad rows instead of stopping at the first one: the good rows still load, and the sender can fix the whole file at once. Ask first: *"Should one bad row reject the whole file?"*
+
+</Drill>
+
+<Drill id="y-webhook-json">
+
+`json.loads` raises `json.JSONDecodeError` for broken JSON. It is a subclass of `ValueError`, so the second check needs no extra code. Valid JSON can still have the wrong shape: a list instead of an object, or a string where `transaction` should be an object. Check with `isinstance(..., dict)` before you index, and read the fields with `.get()`: `payload["transaction"]` raises `KeyError` and `"t_002200"["id"]` raises `TypeError`, and neither says which field is wrong. The error from `fromisoformat` names the day and the month, but not the field, so catch it and raise a `ValueError` that names `occurred_at`, with `from e`. The amount arrives as a string and goes straight into `Decimal`; a JSON number would already be a float, and `json.loads(body, parse_float=Decimal)` avoids that. The frozen dataclass is the record that the rest of the code can trust.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+State the contract for bad input before the happy path, so the interviewer can agree or correct it: *"Empty, non-numeric and negative strings raise ValueError with the value in the message. NaN and Infinity too. Should '1e3' count as valid input?"* The tests then follow from that sentence.
+
+Each time you write `try`, say what it catches and why the rest must pass through: *"I catch only InvalidOperation here, so a typo in my own code still fails loudly."*
+</Aside>
+
+## Further reading
+
+- [Errors and Exceptions](https://docs.python.org/3/tutorial/errors.html#exception-chaining) — the tutorial section on exception chaining and `from`.
+- [Exception hierarchy](https://docs.python.org/3/builtins/exceptions.html#exception-hierarchy) — which built-in error inherits from which.
+- [decimal: Signals](https://docs.python.org/3/library/decimal.html#signals) — `InvalidOperation` and the other conditions `Decimal` raises.
+- [Decimal.is_finite](https://docs.python.org/3/library/decimal.html#decimal.Decimal.is_finite) — true for every value except infinities and NaN.
+- [csv.DictReader](https://docs.python.org/3/library/csv.html#csv.DictReader) — rows as dicts, `None` for missing columns, and [line_num](https://docs.python.org/3/library/csv.html#csv.csvreader.line_num).
+- [json.loads](https://docs.python.org/3/library/json.html#json.loads) — `JSONDecodeError` and the `parse_float` argument.
+
+## Related topics
+
+- [Money and Decimal](/python/money-and-decimal/) — `quantize`, rounding modes and why money is never a float.
+- [Money tasks](/python-tasks/money/) — an advance calculation and a payout with retries and an idempotency key.
+- [Decorators](/python/decorators/) — the same retry logic as a reusable `@retry(times)`.
+- [Testing and complexity](/python/testing-and-complexity/) — `pytest.raises` to check that bad input fails.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — why a retried write must not create a second row.

@@ -1,0 +1,255 @@
+---
+title: Дубли и идемпотентность
+description: Доставка «хотя бы один раз», доставки и события, первая копия через ROW_NUMBER и лечение при записи — UNIQUE и INSERT … ON CONFLICT.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Вебхуки, выплаты и повторённые вызовы API могут доставить один и тот же факт дважды. Отчёт должен считать события, а не доставки. Система должна хранить каждый факт один раз, даже если два воркера получили его в одну и ту же секунду. Первое — приём в запросе, второе — ограничение в таблице. Задача часто просит сначала запрос, а потом ограничение.
+
+<Aside type="tip" title="Коротко">
+- Доставка «хотя бы один раз» (at-least-once): одно событие может прийти несколько раз. У дубля тот же `event_id`.
+- Доставок — `COUNT(*)`, событий — `COUNT(DISTINCT event_id)`, дублей — разница.
+- Если копии могут попасть в разные группы, до группировки оставьте первую копию: `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY received_at)`, потом `rn = 1`.
+- Настоящее лечение — при записи: `PRIMARY KEY` или `UNIQUE` на ключе и `INSERT … ON CONFLICT (key) DO NOTHING`.
+- Upsert: `ON CONFLICT (key) DO UPDATE SET v = t.v + EXCLUDED.v`. Без `t.v +` значение перезапишется.
+</Aside>
+
+## Почему одно событие приходит дважды
+
+Отправитель вебхуков повторяет запрос, пока не получит ответ об успехе. Если получатель событие обработал, а ответ потерялся, отправитель об этом не узнает и пришлёт событие снова. Это **доставка «хотя бы один раз»** (at-least-once delivery): ничего не теряется, но часть событий приходит дважды. Рассчитывать на доставку «ровно один раз» по сети нельзя. Построить можно другое: доставку «хотя бы один раз» плюс обработку, при которой повтор ничего не меняет. Это свойство и есть **идемпотентность**.
+
+В учебных данных `webhook_events` хранит каждую доставку. Дубль — точная копия события, отличается только `received_at`:
+
+```sql
+SELECT event_id, type, occurred_at, received_at
+FROM webhook_events
+WHERE event_id IN ('evt_000029', 'evt_000032')
+ORDER BY event_id, received_at;
+```
+
+| event_id | type | occurred_at | received_at |
+|---|---|---|---|
+| evt_000029 | expiration | 2026-09-26 10:57:18 | 2026-09-26 10:58:16 |
+| evt_000029 | expiration | 2026-09-26 10:57:18 | 2026-09-26 11:04:49 |
+| evt_000032 | expiration | 2026-08-01 17:02:23 | 2026-08-01 17:03:15 |
+| evt_000032 | expiration | 2026-08-01 17:02:23 | 2026-08-01 17:12:19 |
+
+Чтобы получить все повторённые id, сгруппируйте по ключу: `GROUP BY event_id HAVING COUNT(*) > 1`.
+
+## Доставки и события
+
+Одна доставка — одна строка. Одно событие — один `event_id`. Посчитайте и то и другое, разница — число повторов:
+
+```sql
+SELECT COUNT(*)                            AS deliveries,
+       COUNT(DISTINCT event_id)            AS events,
+       COUNT(*) - COUNT(DISTINCT event_id) AS duplicates
+FROM webhook_events
+WHERE occurred_at >= TIMESTAMP '2026-08-01'
+  AND occurred_at <  TIMESTAMP '2026-09-01';
+```
+
+| deliveries | events | duplicates |
+|---|---|---|
+| 680 | 646 | 34 |
+
+Спросите, что нужно задаче: «Do you want deliveries, or unique events?» Отчёту о нагрузке нужны доставки. Бизнес-отчёту — события.
+
+## Оставить первую копию
+
+`COUNT(DISTINCT event_id)` убирает повторы только внутри своей группы. Если две копии одного события попали в разные группы, событие посчитается в обеих. Копии evt_000210 пришли 7 августа в 12:54 и в 13:04, поэтому отчёт по часам `received_at` увидит это событие в двух часах. За август набегает:
+
+```sql
+WITH per_hour AS (
+    SELECT date_trunc('hour', received_at) AS hour, COUNT(DISTINCT event_id) AS events
+    FROM webhook_events
+    WHERE occurred_at >= TIMESTAMP '2026-08-01'
+      AND occurred_at <  TIMESTAMP '2026-09-01'
+    GROUP BY 1
+)
+SELECT COUNT(*) AS hours, SUM(events) AS events
+FROM per_hour;
+```
+
+| hours | events |
+|---|---|
+| 420 | 651 |
+
+651 вместо 646: пять событий, среди них evt_000210, посчитаны дважды. Лечение — убрать копии до группировки. Пронумеровать копии каждого события по времени прихода и оставить номер 1, как на странице [Топ-N в группе](/sql-patterns/top-n-per-group/):
+
+```sql
+WITH first_copy AS (
+    SELECT event_id, received_at,
+           ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY received_at) AS rn
+    FROM webhook_events
+    WHERE occurred_at >= TIMESTAMP '2026-08-01'
+      AND occurred_at <  TIMESTAMP '2026-09-01'
+),
+per_hour AS (
+    SELECT date_trunc('hour', received_at) AS hour, COUNT(*) AS events
+    FROM first_copy
+    WHERE rn = 1
+    GROUP BY 1
+)
+SELECT COUNT(*) AS hours, SUM(events) AS events
+FROM per_hour;
+```
+
+| hours | events |
+|---|---|
+| 420 | 646 |
+
+`rn = 1` — событие, `rn > 1` — дубли. Правило: если все колонки группировки одинаковы во всех копиях (`type`, `occurred_at`), хватает `COUNT(DISTINCT event_id)`. Если группировка идёт по тому, что у копий различается, например по `received_at`, сначала оставьте первую копию.
+
+## Настоящее лечение: одна строка на факт
+
+Отчёт, который выкидывает дубли, — обходной путь. Лечение — таблица, в которой дублей быть не может. Проверка в коде не работает: два воркера спрашивают «а это событие уже записано?», оба ничего не находят, и оба вставляют. Уникальный ключ в базе пропустит только одну из двух вставок, как бы воркеры ни чередовались.
+
+### Ограничения
+
+Таблица заявок на аванс со всеми частыми ограничениями:
+
+```sql
+CREATE TABLE advance_requests (
+    advance_id      TEXT PRIMARY KEY,
+    merchant_id     TEXT NOT NULL REFERENCES merchants (id),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    amount_usd      NUMERIC(12, 2) NOT NULL CHECK (amount_usd > 0)
+);
+```
+
+После одной правильной строки (`'a1', 'mer_01', 'mer_01:north_market:2026-09-01', 120.00`) каждая плохая вставка падает со своей ошибкой:
+
+| Ограничение | Что не пускает | Ошибка |
+|---|---|---|
+| `PRIMARY KEY` | повтор id и NULL | `duplicate key value violates unique constraint "advance_requests_pkey"` |
+| `UNIQUE` | повтор значения; NULL можно, даже дважды | `… unique constraint "advance_requests_idempotency_key_key"` |
+| `NOT NULL` | пустое значение | `null value in column "amount_usd" … violates not-null constraint` |
+| `CHECK (amount_usd > 0)` | строку, где условие ложно | `… violates check constraint "advance_requests_amount_usd_check"` |
+| `REFERENCES merchants (id)` | ссылку на несуществующую строку | `… violates foreign key constraint "advance_requests_merchant_id_fkey"` |
+
+Ограничения держат данные верными, даже когда в коде ошибка. С деньгами пусть плохие строки отвергает база. Каждый запуск на этом сайте откатывается, поэтому создавайте таблицу, вставляйте и выбирайте в одном запуске.
+
+### INSERT … ON CONFLICT DO NOTHING
+
+Ошибка на повторе безопасна, но шумна. `ON CONFLICT (key) DO NOTHING` превращает повтор в тихую пустую операцию. `RETURNING` показывает, вставилась ли строка:
+
+```sql
+CREATE TEMP TABLE webhook_inbox (
+    event_id    TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    received_at TIMESTAMP NOT NULL
+);
+INSERT INTO webhook_inbox VALUES ('evt_000029', 'expiration', TIMESTAMP '2026-09-26 10:58:16')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;
+INSERT INTO webhook_inbox VALUES ('evt_000029', 'expiration', TIMESTAMP '2026-09-26 11:04:49')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;
+```
+
+| event_id |
+|---|
+| evt_000029 |
+
+Первая вставка возвращает id. Вторая — 0 строк: событие уже было. В коде обработчика это сигнал пропустить побочные действия: письмо, движение денег. Если пропустить через ту же таблицу все 680 августовских доставок, в ней останется 646 строк, по одной на событие.
+
+У цели конфликта должно быть уникальное ограничение или индекс. `ON CONFLICT (k)` на колонке без него падает: `there is no unique or exclusion constraint matching the ON CONFLICT specification`.
+
+Выбирайте ключ, который определяет факт, а не строку. Повторная заявка на аванс может получить новый `advance_id`, но несёт тот же ключ идемпотентности (`merchant:channel:month`). Поэтому цель — `ON CONFLICT (idempotency_key) DO NOTHING`, и вторая заявка с новым id ничего не вставит.
+
+### Upsert: ON CONFLICT DO UPDATE
+
+`DO UPDATE` вставляет новый ключ или меняет существующую строку. `EXCLUDED` — строка, которую пытались вставить. Здесь две пачки доставок вебхуков прибавляются к дневному счётчику:
+
+```sql
+CREATE TEMP TABLE daily_deliveries (
+    day        DATE PRIMARY KEY,
+    deliveries INT  NOT NULL
+);
+INSERT INTO daily_deliveries
+SELECT CAST(received_at AS DATE), COUNT(*)
+FROM webhook_events
+WHERE received_at >= TIMESTAMP '2026-09-01 00:00' AND received_at < TIMESTAMP '2026-09-01 12:00'
+GROUP BY 1
+ON CONFLICT (day) DO UPDATE SET deliveries = daily_deliveries.deliveries + EXCLUDED.deliveries
+RETURNING day, deliveries;
+INSERT INTO daily_deliveries
+SELECT CAST(received_at AS DATE), COUNT(*)
+FROM webhook_events
+WHERE received_at >= TIMESTAMP '2026-09-01 12:00' AND received_at < TIMESTAMP '2026-09-02 00:00'
+GROUP BY 1
+ON CONFLICT (day) DO UPDATE SET deliveries = daily_deliveries.deliveries + EXCLUDED.deliveries
+RETURNING day, deliveries;
+```
+
+| day | deliveries |
+|---|---|
+| 2026-09-01 | 15 |
+
+| day | deliveries |
+|---|---|
+| 2026-09-01 | 29 |
+
+Первая пачка вставляет 15. Вторая находит этот день и прибавляет 14, и счётчик становится 29 — столько доставок пришло за день. Три детали:
+
+- `SET deliveries = EXCLUDED.deliveries` без `daily_deliveries.deliveries +` перезаписывает: счётчик закончил бы на 14.
+- Одна команда не может обновить одну строку дважды. Пачка с двумя строками на один день падает: `ON CONFLICT DO UPDATE command cannot affect row a second time`. Сначала сверните пачку до строки на ключ, как `GROUP BY` выше.
+- Прибавляющий upsert сам по себе не идемпотентен: одна и та же пачка, применённая дважды, прибавит дважды. Записывайте id событий через `DO NOTHING` в той же транзакции и прибавляйте только для тех id, что вставились.
+
+<Talk q="Two workers receive the same webhook at the same time. What happens?">
+
+"Both try to insert the event id, and the unique key lets only one insert succeed. With ON CONFLICT DO NOTHING the other one simply inserts nothing and gets no row back, so it skips the side effects. A check in code, select first and then insert, would race: both selects can see nothing."
+
+</Talk>
+
+## Практика
+
+<Drill id="s-dedupe">
+
+Дубль — тот же `event_id`. Доставок — `COUNT(*)`, событий — `COUNT(DISTINCT event_id)`, разница — повторы. Копии точные, у всех копий события один и тот же тип, поэтому `COUNT(DISTINCT)` внутри типа достаточно. Настоящее лечение — уникальный ключ на `event_id` и `ON CONFLICT DO NOTHING` при приёме вебхука.
+
+</Drill>
+
+<Drill id="s-ddl">
+
+Гарантию держит база: `PRIMARY KEY` (или `UNIQUE`) плюс `INSERT … ON CONFLICT DO NOTHING`. Проверка в коде «а нет ли уже?» не переживает гонки двух воркеров. `CHECK (amount_usd >= 0)` не пустит отрицательную сумму: попробуйте вставить -1 и прочитайте ошибку.
+
+</Drill>
+
+<Drill id="s-upsert">
+
+Upsert: `ON CONFLICT (merchant_id) DO UPDATE`, новая сумма — в `EXCLUDED`. Баланс меняется одной атомарной командой, без «прочитать — посчитать — записать» в коде: 100,00 + 2,50 − 102,50 = 0,00. В программе авансов это выполняется в той же транзакции, что и запись в журнал проводок.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Сначала короткий ответ — и остановитесь: «A unique key on event_id and INSERT … ON CONFLICT DO NOTHING. The database keeps the guarantee even with two workers; a check in code would race.»
+
+Дальше дождитесь следующего вопроса. На каждый хватит одной строки:
+
+- «Which copy is the real one?» — «Usually the first by received_at, but I'd like to confirm that.»
+- «How long do you keep the ids?» — «Longer than the sender's retry window.»
+- «How do you make a payment retry safe?» — «The client sends an idempotency key. The server stores it under a unique constraint and returns the stored result on a repeat.»
+
+Если убираете дубли через `DISTINCT` в отчёте, назовите это обходным путём, а не лечением. Полная задача — [Q11 на странице «Деньги и сверка»](/sql-tasks/money-and-reconciliation/).
+</Aside>
+
+## Что почитать
+
+- [INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT) — `DO NOTHING`, `DO UPDATE`, `EXCLUDED` и цель конфликта.
+- [Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — `CHECK`, `NOT NULL`, `UNIQUE`, первичные и внешние ключи.
+- [Returning data from modified rows](https://www.postgresql.org/docs/current/dml-returning.html) — `RETURNING` у `INSERT`, `UPDATE` и `DELETE`.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `ROW_NUMBER` для первой копии.
+
+## Связанные темы
+
+- [Топ-N в группе](/sql-patterns/top-n-per-group/) — `ROW_NUMBER` и `rn = 1`, которые оставляют первую копию.
+- [Группировка и подсчёт](/sql/grouping-and-counting/) — `COUNT(*)`, `COUNT(column)` и `COUNT(DISTINCT)`.
+- [Понятия баз данных](/sql-patterns/database-concepts/) — транзакции, изоляция и ограничения для разговора после задачи.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — ключ идемпотентности, который не даст выдать второй аванс.
+- [Множества и дубли](/python/sets-and-duplicates/) — «уже видели?» на Python, через множество.

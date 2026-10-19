@@ -1,0 +1,244 @@
+---
+title: dict, defaultdict и Counter
+description: Группировка, суммы и подсчёт за один проход через dict, defaultdict(Decimal) и Counter, порядок при равенстве, последняя запись по ключу и ключи с нулём.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Большинство задач на Python в лайвкодинге начинается одинаково: есть список строк, и нужно получить сумму, количество или последнее значение по ключу. Выручка по покупателю, события по подписке, остаток по каждому товару. Словарь (dict) находит ключ в среднем за O(1), поэтому хватает одного прохода по входу. Без него в коде появляется вложенный цикл, теряются ключи с нулём или выбирается не та строка, если вход пришёл не по порядку.
+
+<Aside type="tip" title="Коротко">
+- Сгруппировать и сложить: `totals = defaultdict(Decimal)`, `totals[key] += amount`, потом `return dict(totals)`.
+- Посчитать: `Counter(items)`. Для «при равенстве — по алфавиту» сортировать с `key=lambda kv: (-kv[1], kv[0])`: `most_common` сохраняет порядок первого появления.
+- Последняя запись по ключу: держать в словаре лучшую строку на сейчас и сравнивать время, а не порядок прихода.
+- Каждый X, даже с нулём: цикл по X, а не по строкам, чтение через `.get(key, 0)`.
+- Два уровня: `defaultdict(lambda: defaultdict(int))` или один словарь с ключом-кортежем.
+</Aside>
+
+## Три способа прочитать ключ
+
+```python
+from decimal import Decimal
+
+prices = {"prd_03.monthly": Decimal("4.99"), "prd_03.annual": Decimal("79.99")}
+
+print(prices["prd_03.monthly"])                   # 4.99
+print(prices.get("prd_03.weekly"))                # None
+print(prices.get("prd_03.weekly", Decimal("0")))  # 0
+print("prd_03.weekly" in prices)                  # False
+print(prices["prd_03.weekly"])                    # KeyError: 'prd_03.weekly'
+```
+
+| Выражение | Ключ есть | Ключа нет |
+|---|---|---|
+| `d[k]` | значение | `KeyError` |
+| `d.get(k)` | значение | `None` |
+| `d.get(k, default)` | значение | `default` |
+| `k in d` | `True` | `False` |
+
+`d[k]` — когда отсутствие ключа означает ошибку и код должен упасть сразу. `.get()` или `in` — когда отсутствие ключа — нормальный случай. Все четыре в среднем работают за O(1): словарь — это хеш-таблица.
+
+## Группировка и сумма через defaultdict
+
+С обычным словарём перед каждым обновлением нужна проверка: `if channel not in totals: totals[channel] = Decimal("0")`. `defaultdict` делает это сам. Для нового ключа он вызывает фабрику: `Decimal()` возвращает `Decimal('0')`, `int()` — `0`, `list()` — `[]`.
+
+```python
+from collections import defaultdict
+from decimal import Decimal
+
+sales = [
+    ("north_market", Decimal("7.99")),
+    ("south_market", Decimal("49.99")),
+    ("north_market", Decimal("7.99")),
+    ("web", Decimal("2.99")),
+]
+
+totals = defaultdict(Decimal)          # новый ключ начинается с Decimal('0')
+for channel, amount in sales:
+    totals[channel] += amount
+
+print(dict(totals))
+# {'north_market': Decimal('15.98'), 'south_market': Decimal('49.99'), 'web': Decimal('2.99')}
+```
+
+Деньги остаются в `Decimal` от первой строки до результата. Почему — на странице [Деньги и Decimal](/python/money-and-decimal/).
+
+### Чтение отсутствующего ключа его добавляет
+
+`defaultdict` создаёт ключ при любом чтении через `[]`, а не только при `+=`:
+
+```python
+totals = defaultdict(Decimal)
+totals["north_market"] += Decimal("7.99")
+
+print(totals["promo"])   # 0 -- прочитали отсутствующий ключ...
+print(dict(totals))      # {'north_market': Decimal('7.99'), 'promo': Decimal('0')}
+```
+
+В отчёте должен быть один канал продаж, а теперь их два. Поэтому наружу отдают `dict(totals)`: вызывающий код получает обычный словарь, и ошибка в ключе даёт `KeyError`, а не молчаливый ноль. Внутри своего кода проверяйте через `k in totals` или `totals.get(k)`: ни то, ни другое ключ не добавляет.
+
+### Список на ключ и порядок ключей
+
+`defaultdict(list)` собирает строки каждого ключа:
+
+```python
+by_product = defaultdict(list)
+for product_id, tx_id in [("prd_03", "t1"), ("prd_09", "t2"), ("prd_03", "t3")]:
+    by_product[product_id].append(tx_id)
+print(dict(by_product))   # {'prd_03': ['t1', 't3'], 'prd_09': ['t2']}
+```
+
+Словарь хранит ключи в порядке вставки. Если результат должен быть отсортирован, отсортируйте пары до того, как собирать его:
+
+```python
+from datetime import datetime
+
+rows = [(datetime(2026, 9, 2), Decimal("9.99")), (datetime(2026, 8, 31, 23, 59), Decimal("4.99"))]
+
+totals = defaultdict(Decimal)
+for start, amount in rows:
+    totals[start.strftime("%Y-%m")] += amount
+
+print(dict(totals))                  # {'2026-09': Decimal('9.99'), '2026-08': Decimal('4.99')}
+print(dict(sorted(totals.items())))  # {'2026-08': Decimal('4.99'), '2026-09': Decimal('9.99')}
+```
+
+## Группировка в два уровня
+
+```python
+events = [("prd_03", "2026-09-01"), ("prd_03", "2026-09-01"), ("prd_09", "2026-09-01"), ("prd_03", "2026-09-02")]
+
+per_day = defaultdict(lambda: defaultdict(int))   # product_id -> день -> количество
+for product_id, day in events:
+    per_day[product_id][day] += 1
+print({product_id: dict(days) for product_id, days in per_day.items()})
+# {'prd_03': {'2026-09-01': 2, '2026-09-02': 1}, 'prd_09': {'2026-09-01': 1}}
+
+flat = defaultdict(int)                           # то же с ключом-кортежем
+for product_id, day in events:
+    flat[(product_id, day)] += 1
+print(dict(flat))
+# {('prd_03', '2026-09-01'): 2, ('prd_09', '2026-09-01'): 1, ('prd_03', '2026-09-02'): 1}
+```
+
+Аргумент `defaultdict` — функция, которая создаёт значение по умолчанию. `defaultdict(defaultdict(int))` передаёт вместо неё словарь и падает с `TypeError: first argument must be callable or None`. `lambda: defaultdict(int)` — функция, поэтому каждый новый продукт получает свой внутренний словарь.
+
+Ключ-кортеж часто проще: один уровень, и `sorted(flat.items())` упорядочит строки по продукту, потом по дню.
+
+## Counter и равные счётчики
+
+```python
+from collections import Counter
+
+c = Counter(["south_market", "web", "north_market", "web", "north_market", "south_market"])
+print(c)                                                      # Counter({'south_market': 2, 'web': 2, 'north_market': 2})
+print(c.most_common(2))                                       # [('south_market', 2), ('web', 2)]
+print(sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[:2])  # [('north_market', 2), ('south_market', 2)]
+print(c["promo"], "promo" in c)                               # 0 False
+```
+
+`Counter` — словарь, который считает. `most_common(k)` сортирует по счётчику, а при равных счётчиках сохраняет порядок, в котором ключи появились впервые. Здесь первым был `south_market`, поэтому `north_market` не попал в ответ. Это не алфавит, а порядок во входных данных редко бывает частью условия. Если в условии сказано, как разрешать равенство, сортируйте с ключом-кортежем: минус счётчик (по убыванию), потом имя. О ключах-кортежах — на странице [Сортировка и топ-k](/python/sorting-and-top-k/).
+
+В отличие от `defaultdict`, `Counter` возвращает `0` для отсутствующего ключа и не добавляет его.
+
+## Последняя запись по ключу: сравнивать время
+
+События часто приходят не по порядку. Тогда последняя строка в списке — не последнее событие:
+
+```python
+from datetime import datetime as dt
+
+events = [
+    ("s1", dt(2026, 9, 1), "active"),
+    ("s1", dt(2026, 9, 5), "expired"),
+    ("s1", dt(2026, 9, 3), "billing_issue"),   # пришло с опозданием
+]
+
+last_arrived = {}
+for sub_id, ts, status in events:
+    last_arrived[sub_id] = status
+print(last_arrived)                                # {'s1': 'billing_issue'}
+
+latest = {}                                        # sub_id -> (ts, status)
+for sub_id, ts, status in events:
+    if sub_id not in latest or ts > latest[sub_id][0]:
+        latest[sub_id] = (ts, status)
+print({k: status for k, (ts, status) in latest.items()})   # {'s1': 'expired'}
+```
+
+Правило — «лучшее на сейчас»: словарь от ключа к паре `(время, значение)`. Значение заменяется, только если новое время позже. Знак сравнения решает судьбу равных: при `>` остаётся первая из двух записей с одинаковым временем, при `>=` побеждает более поздняя в списке. Уточните у интервьюера, какая нужна.
+
+Это один проход, O(n). Сортировка по времени тоже сработает, но стоит O(n log n). В SQL та же задача решается через `ROW_NUMBER` или `DISTINCT ON`, см. [Лучший в группе](/sql-patterns/top-n-per-group/).
+
+## Каждый ключ, даже с нулём
+
+Цикл по строкам может создать только те ключи, которые в строках есть. Если в задаче сказано «каждый продукт» или «каждый канал, даже без продаж», идите циклом по этой стороне:
+
+```python
+from collections import Counter
+
+products = ["prd_03", "prd_09", "prd_12"]
+purchases = ["prd_03", "prd_09", "prd_03"]
+
+counts = Counter(purchases)
+print(dict(counts))                               # {'prd_03': 2, 'prd_09': 1} -- prd_12 нет
+print({p: counts.get(p, 0) for p in products})   # {'prd_03': 2, 'prd_09': 1, 'prd_12': 0}
+```
+
+Это `LEFT JOIN` с `COALESCE(…, 0)`, написанный на Python, см. [LEFT JOIN и нули](/sql/left-join-and-zeros/). В таком цикле читайте через `.get()`: у `defaultdict` выражение `counts[p]` добавило бы пустую запись для каждого продукта без данных.
+
+## Практика
+
+<Drill id="y-group-sum">
+
+`defaultdict(Decimal)` начинает каждого нового клиента с `Decimal('0')`, поэтому в цикле не нужен `if`. Наружу — `dict(totals)`: тогда чтение отсутствующего клиента даёт `KeyError` или `None` из `.get()`, и результат не разрастается. Деньги — `Decimal`, не `float`.
+
+</Drill>
+
+<Drill id="y-by-month">
+
+Ключ месяца — `start.strftime("%Y-%m")`; если формат не задан, подойдёт и `(start.year, start.month)`. Словарь хранит порядок вставки, поэтому пары сортируют до того, как собрать результат. Это тот же `GROUP BY date_trunc('month', …)`, только на Python. Строка 31 августа в 23:59 относится к августу.
+
+</Drill>
+
+<Drill id="y-counter">
+
+`Counter` считает, а порядок задаёт ключ-кортеж `(-count, name)`: по убыванию счётчика, потом по имени канала. На первой проверке `most_common(2)` возвращает `[('south', 2), ('north', 2)]`: `south` раньше появляется во входе, поэтому проверка не проходит. Срез `[:k]` работает и тогда, когда `k` больше числа каналов, как во второй проверке.
+
+</Drill>
+
+<Drill id="y-latest">
+
+Один проход и словарь «лучшее на сейчас». События идут не по порядку (у `s1` событие 5 сентября стоит раньше события 3 сентября), поэтому сравниваем время, а не берём последнюю строку. `>=` — чтобы при равном времени победила более поздняя запись в списке, как требует условие: это случай `s2`.
+
+</Drill>
+
+<Drill id="y-stock-on-hand">
+
+Цикл идёт по товарам, а не по движениям: у степлера движений нет, но строка `(4, 'Stapler', 0, Decimal('0.00'))` ему нужна — это `LEFT JOIN`, написанный на Python. Остаток считают по `id`, а не по имени: два товара называются Pen, и группировка по имени дала бы один Pen с 25 штуками. Каждое движение сверяют с известными id до фильтра по дате, поэтому ошибочное движение даёт `ValueError` при любой дате. Граница не входит (`moved_at < cutoff`): движение товара 3 от 2026-10-01 приходится на саму границу и не считается. ISO-даты в одном формате правильно сравниваются как строки. `unit_cost * 0` уже равно `Decimal('0.00')`, так что нулевым строкам особый код не нужен.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Большинство граничных случаев на этой странице решают два вопроса, поэтому задайте их до первой строки: *"How should I order the result, and how do I break ties?"* и *"Should a key with no rows appear with zero?"*
+
+Когда код заработал, назовите стоимость одной фразой: *"One pass with a defaultdict, so it is O(n) time and O(k) memory for k keys."* Если вход перестанет помещаться в память, тот же цикл читает поток, или группировку делает база: см. [Итерация и генераторы](/python/iteration-and-generators/) и [Python и SQL](/python/python-and-sql/).
+</Aside>
+
+## Что почитать
+
+- [collections.defaultdict](https://docs.python.org/3/library/collections.html#collections.defaultdict) — аргумент-фабрика и примеры с `list` и `int`.
+- [collections.Counter](https://docs.python.org/3/library/collections.html#collections.Counter) — подсчёт, `most_common` и порядок равных счётчиков.
+- [Mapping types — dict](https://docs.python.org/3/builtins/stdtypes.html#typesmapping) — `get`, `in`, `setdefault` и порядок вставки.
+- [strftime() and strptime() format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes) — `%Y-%m` и другие ключи из дат.
+
+## Связанные темы
+
+- [Множества и дубли](/python/sets-and-duplicates/) — та же хеш-таблица для вопроса «этот id уже был?».
+- [Сортировка и топ-k](/python/sorting-and-top-k/) — ключи-кортежи для равенства и топ-k без полной сортировки.
+- [Деньги и Decimal](/python/money-and-decimal/) — почему суммы в `Decimal`.
+- [Группировка и подсчёт](/sql/grouping-and-counting/) — те же задачи через `GROUP BY`.
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — «каждый X, даже с нулём» в SQL.
+- [Итерация и генераторы](/python/iteration-and-generators/) — когда строки не помещаются в память.

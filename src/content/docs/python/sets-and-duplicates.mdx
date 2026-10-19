@@ -1,0 +1,178 @@
+---
+title: Sets and duplicates
+description: Check "seen before?" in O(1) with a set, keep the first delivery of each id in arrival order, find the first repeat and compare two collections by keys.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Webhooks arrive at least once, so the same event can come twice. In the practice dataset, `webhook_events` holds 1,285 deliveries of 1,226 events. Tasks then ask you to keep one copy of each event, to find the first repeat, or to compare what was expected with what arrived. A set answers "have I seen this?" in O(1). A list answers it in O(n), and inside a loop that becomes O(n²).
+
+<Aside type="tip" title="TL;DR">
+- "Seen before?": `seen = set()`, then `if x in seen: continue` and `seen.add(x)`.
+- `x in list` scans the whole list. Inside a loop over n items, that is O(n²).
+- `set(items)` loses the order. To keep the first copy in arrival order, loop once, or use `list(dict.fromkeys(ids))`.
+- Compare two dicts by keys: `a.keys() - b.keys()`, `b.keys() - a.keys()`, `a.keys() & b.keys()`, then `sorted(…)`.
+- In production the database keeps an id unique: a `UNIQUE` key and `ON CONFLICT DO NOTHING`.
+</Aside>
+
+## `in` on a set and on a list
+
+The two functions below give the same result. The only difference is where they look for the id.
+
+```python
+import time
+
+def dedupe_list(ids):
+    out = []
+    for x in ids:
+        if x not in out:          # scans the list: O(n)
+            out.append(x)
+    return out
+
+def dedupe_set(ids):
+    seen, out = set(), []
+    for x in ids:
+        if x not in seen:         # one hash lookup: O(1)
+            seen.add(x)
+            out.append(x)
+    return out
+
+for n in (5_000, 10_000, 20_000):
+    ids = [f"evt_{i}" for i in range(n)]
+    for f in (dedupe_list, dedupe_set):
+        t = time.perf_counter()
+        f(ids)
+        print(f"{n:>6} {f.__name__:<11} {time.perf_counter() - t:.3f} s")
+```
+
+One run:
+
+| n | `dedupe_list` | `dedupe_set` |
+|---|---|---|
+| 5,000 | 0.081 s | 0.001 s |
+| 10,000 | 0.386 s | 0.001 s |
+| 20,000 | 1.167 s | 0.003 s |
+
+The times depend on the machine, but the shape does not. When n doubles, an O(n²) loop should take four times longer and an O(n) loop twice as long; the list column is close to that. The set version stays at a few milliseconds. With 100,000 ids the list version took about a minute on the same machine.
+
+A set can hold only hashable values: strings, numbers, tuples, frozen dataclasses. A dict or a list cannot be a set element: `seen.add(event)` with a dict fails with a `TypeError` that says `unhashable type: 'dict'`. Put the id in the set, or a tuple of the fields that make the key, such as `(e["product_id"], e["event_id"])`.
+
+## First delivery of each id
+
+The pattern is one loop: skip the id if it is in `seen`, otherwise add it to `seen` and keep the row. The output keeps the arrival order, because the loop walks the input once and appends in that order.
+
+`set(ids)` also removes duplicates, but it does not keep any order you can rely on. For strings the order changes from run to run:
+
+```python
+ids = ["evt_7", "evt_2", "evt_7", "evt_5", "evt_2"]
+
+print(set(ids))                  # one run: {'evt_5', 'evt_7', 'evt_2'}, another: {'evt_2', 'evt_5', 'evt_7'}
+print(list(dict.fromkeys(ids)))  # ['evt_7', 'evt_2', 'evt_5'] -- first occurrence order
+```
+
+`dict.fromkeys` works because a dict keeps its keys in insertion order and ignores a repeated key. It is fine for plain ids. For rows (dicts) the loop with `seen` is clearer.
+
+When the task wants the last delivery instead, overwrite in a dict. The value becomes the last copy, but the key keeps the position of its first insertion:
+
+```python
+deliveries = [("evt_7", "10:00"), ("evt_2", "10:01"), ("evt_7", "10:05")]
+
+last = {}
+for event_id, received_at in deliveries:
+    last[event_id] = received_at       # a repeat overwrites the value...
+print(last)                            # {'evt_7': '10:05', 'evt_2': '10:01'} -- ...the key keeps its place
+```
+
+Which copy to keep is a question for the interviewer: *"Can the same id come twice? Which copy should I keep?"*
+
+## The first repeat
+
+"The first id that appears for the second time" and "the first id that has a duplicate" sound alike. They are different questions:
+
+```python
+from collections import Counter
+
+ids = ["a", "b", "c", "b", "a"]
+
+seen = set()
+for x in ids:
+    if x in seen:
+        print("first repeat:", x)          # first repeat: b
+        break
+    seen.add(x)
+
+counts = Counter(ids)
+print("first id with a copy:", next(x for x in ids if counts[x] > 1))   # first id with a copy: a
+```
+
+The first loop stops at position 4, where `b` comes back. The second one needs the whole list first, because it cannot know about the second `a` before the end. Say the answer for the example out loud before you write code, so the interviewer can correct you early.
+
+## Comparing two collections by keys
+
+Reconciliation compares two sources by key: what we expected to be paid and what was paid. `dict.keys()` supports set operations directly:
+
+```python
+from decimal import Decimal
+
+expected = {"po_1": Decimal("10.00"), "po_2": Decimal("5.00"), "po_3": Decimal("7.50")}
+paid     = {"po_2": Decimal("5.00"), "po_3": Decimal("7.55"), "po_4": Decimal("1.00")}
+
+print(sorted(expected.keys() - paid.keys()))   # ['po_1'] -- expected, not paid
+print(sorted(paid.keys() - expected.keys()))   # ['po_4'] -- paid, not expected
+print(sorted(expected.keys() & paid.keys()))   # ['po_2', 'po_3'] -- in both: compare the amounts
+print(sorted(expected.keys() | paid.keys()))   # ['po_1', 'po_2', 'po_3', 'po_4'] -- all keys
+print(sorted(expected.keys() ^ paid.keys()))   # ['po_1', 'po_4'] -- on one side only
+```
+
+| Expression | Means | In a reconciliation |
+|---|---|---|
+| `a.keys() - b.keys()` | in `a`, not in `b` | missing: expected, not paid |
+| `b.keys() - a.keys()` | in `b`, not in `a` | unexpected: paid, not expected |
+| `a.keys() & b.keys()` | in both | compare the amounts |
+
+Each result is a set, and a set has no order, so wrap it in `sorted()`. For the keys in both, compare the amounts with a tolerance in `Decimal`: `abs(a[k] - b[k]) > Decimal("0.01")`. This is the `FULL OUTER JOIN` of [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/), written in Python.
+
+## Practice
+
+<Drill id="y-dedupe">
+
+"Seen before?" is a set: each check is O(1). `in` on the output list is O(n), so the loop becomes O(n²). The order is kept because the code walks the input once. In production a unique key in the database drops the repeat, see [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/).
+
+</Drill>
+
+<Drill id="y-first-dup">
+
+One pass with a set: O(n) time and O(n) memory. Two nested loops are O(n²). "The first id that appears for the second time" is not "the first id that has a duplicate": here the answer is `b`, although `a` comes earlier.
+
+</Drill>
+
+<Drill id="y-reconcile">
+
+Reconciling two sources is three key sets: only on the left, only on the right, and in both with a difference above the tolerance. This is a `FULL OUTER JOIN` written in Python. The tolerance is a `Decimal`, not a float. `mer_01/north/07` differs by exactly `0.01`, so it is a match; `mer_02/north/07` differs by `2.00` and is a mismatch.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Before the code, say the output for a small input, so the order is agreed: *"For a, b, a, c, b I return a, b, c, in arrival order."* After the code, the talk often goes like this:
+
+- You: *"I keep the ids I have seen in a set, so each check is O(1) and the pass is O(n)."*
+- Interviewer: *"Two workers get the same webhook at the same moment. Does the set help?"*
+- You: *"No, the set lives in one process. The database has to refuse the second row: a unique key on event_id and INSERT … ON CONFLICT DO NOTHING."*
+</Aside>
+
+## Further reading
+
+- [Set types — set, frozenset](https://docs.python.org/3/builtins/stdtypes.html#set-types-set-frozenset) — operations, and which values can be set elements.
+- [Dictionary view objects](https://docs.python.org/3/builtins/stdtypes.html#dict-views) — why `keys()` supports `-`, `&`, `|` and `^`.
+- [dict.fromkeys](https://docs.python.org/3/builtins/stdtypes.html#dict.fromkeys) — a dict from an iterable of keys.
+- [TimeComplexity](https://wiki.python.org/moin/TimeComplexity) — the Python wiki table of costs for list, dict and set operations.
+
+## Related topics
+
+- [dict, defaultdict and Counter](/python/dicts-and-counting/) — the same hash table, with a value per key.
+- [Testing and complexity](/python/testing-and-complexity/) — how to name the complexity and test the edge cases.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — duplicates in SQL, and the unique key that stops them.
+- [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/) — the same comparison with `FULL OUTER JOIN`.
+- [Events and time](/python-tasks/events-and-time/) — an idempotent webhook processor as a full task.

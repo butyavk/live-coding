@@ -1,0 +1,244 @@
+---
+title: Top N per group
+description: Window functions from zero, then the best or latest row in each group with ROW_NUMBER, ties with RANK and DENSE_RANK, and DISTINCT ON in PostgreSQL.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+"The best product of each merchant", "the latest subscription of each customer", "the top three in every country". `GROUP BY` cannot answer these: `MAX` gives the best value, not the row it came from. A window function numbers the rows inside each group and keeps them all, so the next step can pick the rows it needs. This often arrives as a follow-up, after the base query already works.
+
+<Aside type="tip" title="TL;DR">
+- A window function computes over a group of rows and keeps every row: `OVER (PARTITION BY group ORDER BY x)`.
+- Best or latest per group: `ROW_NUMBER() OVER (PARTITION BY g ORDER BY x DESC, id)` in a CTE, then `WHERE rn = 1` outside. Top N: `rn <= N`.
+- Always add a second sort key. `DESC` applies to one column only: `paid_at DESC, payout_id DESC`.
+- When ties must stay: `RANK()` (1, 1, 3) or `DENSE_RANK()` (1, 1, 2).
+- PostgreSQL shortcut for one row per group: `DISTINCT ON (g) … ORDER BY g, x DESC`.
+</Aside>
+
+## Window functions from zero
+
+`GROUP BY` collapses each group into one row. A window function does a calculation over a group too, but every input row stays in the output, with the result next to it. Here each payout of two merchants gets a number inside its merchant and the merchant's payout count:
+
+```sql
+SELECT merchant_id, payout_id, channel, amount_usd, paid_at,
+       ROW_NUMBER() OVER (PARTITION BY merchant_id
+                          ORDER BY paid_at DESC, payout_id DESC) AS rn,
+       COUNT(*) OVER (PARTITION BY merchant_id) AS payouts
+FROM channel_payouts
+WHERE merchant_id IN ('mer_01', 'mer_02')
+ORDER BY merchant_id, rn;
+```
+
+| merchant_id | payout_id | channel | amount_usd | paid_at | rn | payouts |
+|---|---|---|---|---|---|---|
+| mer_01 | po_0007 | north_market | 69.64 | 2026-09-02 09:00:00 | 1 | 14 |
+| mer_01 | po_0014 | south_market | 137.62 | 2026-08-15 09:00:00 | 2 | 14 |
+| mer_01 | po_0006 | north_market | 97.69 | 2026-08-02 09:00:00 | 3 | 14 |
+| mer_02 | po_0026 | south_market | 154.57 | 2026-09-15 09:00:00 | 1 | 13 |
+| mer_02 | po_0019 | north_market | 426.77 | 2026-09-02 09:00:00 | 2 | 13 |
+| mer_02 | po_0173 | north_market | 363.75 | 2026-08-02 09:00:00 | 3 | 13 |
+
+The query returns all 27 payouts; these are the first three of each merchant. The parts of the window:
+
+- **`OVER (…)`** turns a function into a window function. An empty `OVER ()` means "all rows of the result".
+- **`PARTITION BY merchant_id`** splits the rows into groups. The numbering starts again at 1 in each group. It is like `GROUP BY`, but the rows do not collapse.
+- **`ORDER BY` inside `OVER`** sets the order in which rows are numbered. It does not sort the output: the last `ORDER BY` of the query does that.
+
+`ROW_NUMBER()` needs an `ORDER BY` to mean anything. `COUNT(*)` and `SUM()` work without one and give the group total on every row. That is the base of [shares and running totals](/sql-patterns/running-totals-and-shares/).
+
+## Best or latest per group
+
+The recipe has three steps:
+
+1. If the ranking is on an aggregate (revenue per product), first `GROUP BY` down to one row per (group, item) in a CTE.
+2. In the next step, number the rows: `ROW_NUMBER() OVER (PARTITION BY group ORDER BY …)`.
+3. Outside, keep `rn = 1`, or `rn <= N` for the top N.
+
+The latest payout of every merchant needs no aggregation, so it starts at step 2:
+
+```sql
+WITH ranked AS (
+    SELECT merchant_id, channel, period_month, amount_usd, paid_at,
+           ROW_NUMBER() OVER (PARTITION BY merchant_id
+                              ORDER BY paid_at DESC, payout_id DESC) AS rn
+    FROM channel_payouts
+)
+SELECT merchant_id, channel, period_month, amount_usd, paid_at
+FROM ranked
+WHERE rn = 1
+ORDER BY merchant_id;
+```
+
+| merchant_id | channel | period_month | amount_usd | paid_at |
+|---|---|---|---|---|
+| mer_01 | north_market | 2026-07-01 | 69.64 | 2026-09-02 09:00:00 |
+| mer_02 | south_market | 2026-08-01 | 154.57 | 2026-09-15 09:00:00 |
+| mer_03 | south_market | 2026-08-01 | 89.20 | 2026-09-15 09:00:00 |
+
+12 rows, one per merchant; the first three are shown. Check one group by hand: mer_01's row is the one numbered 1 in the table above.
+
+When the ranking is on an aggregate, the shape grows by one CTE. Keep the query that already works and add steps on top of it:
+
+```sql
+WITH base AS (
+    -- the query that already works: one row per (merchant, product)
+),
+ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY merchant_id
+                                 ORDER BY net_usd DESC, product_id) AS rn
+    FROM base
+)
+SELECT merchant_id, product_id, net_usd
+FROM ranked
+WHERE rn = 1;
+```
+
+### Why the filter needs its own step
+
+PostgreSQL computes a query in a fixed logical order: `FROM` and joins, `WHERE`, `GROUP BY`, `HAVING`, then window functions, then the `SELECT` list, `DISTINCT`, `ORDER BY` and `LIMIT`. Window functions run after `WHERE` and `HAVING`, so neither of them can see `rn`. The filter goes into the next query, which reads the CTE.
+
+<Trap id="window-where" q="The first transaction of every customer. Will this query run?">
+
+No: `window functions are not allowed in WHERE`. Window functions are computed after `WHERE`. Compute `ROW_NUMBER` in a CTE and filter `WHERE rn = 1` outside it, or use `DISTINCT ON`.
+
+</Trap>
+
+## Ties
+
+### Add a second sort key
+
+If two payouts of a merchant have the same `paid_at`, `ORDER BY paid_at DESC` alone does not decide which one is number 1. PostgreSQL picks one, and the next run may pick the other. A second key, such as `payout_id DESC`, makes the result the same every time. Say it: "I add a tie-breaker so the result is deterministic."
+
+### DESC applies to one column
+
+`ORDER BY paid_at DESC, payout_id` sorts `paid_at` from new to old and `payout_id` from small to large. `DESC` belongs to the column just before it. If the rule is "then the larger id", write `DESC` again: `ORDER BY paid_at DESC, payout_id DESC`. The same holds for the final `ORDER BY`.
+
+### ROW_NUMBER, RANK and DENSE_RANK
+
+The three numbering functions differ only on ties. Rank all products by September transactions, test purchases excluded:
+
+```sql
+WITH per_product AS (
+    SELECT product_id, COUNT(*) AS transactions
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY product_id
+)
+SELECT product_id, transactions,
+       ROW_NUMBER() OVER (ORDER BY transactions DESC, product_id) AS row_number,
+       RANK()       OVER (ORDER BY transactions DESC)             AS rank,
+       DENSE_RANK() OVER (ORDER BY transactions DESC)             AS dense_rank
+FROM per_product
+ORDER BY transactions DESC, product_id;
+```
+
+| product_id | transactions | row_number | rank | dense_rank |
+|---|---|---|---|---|
+| prd_13 | 22 | 7 | 7 | 7 |
+| prd_01 | 21 | 8 | 8 | 8 |
+| prd_05 | 21 | 9 | 8 | 8 |
+| prd_07 | 21 | 10 | 8 | 8 |
+| prd_11 | 21 | 11 | 8 | 8 |
+| prd_18 | 21 | 12 | 8 | 8 |
+| prd_03 | 20 | 13 | 13 | 9 |
+| prd_14 | 20 | 14 | 13 | 9 |
+
+These are rows 7–14 of 20. Five products have 21 transactions:
+
+- `ROW_NUMBER` gives them 8, 9, 10, 11, 12. The numbers are always unique, so it keeps one row per number.
+- `RANK` gives all five 8, and the next product gets 13: the places they took are skipped.
+- `DENSE_RANK` gives all five 8, and the next product gets 9: no gaps.
+
+So "the top 10 products" has two answers. `row_number <= 10` returns 10 rows and cuts the group of 21 in the middle. `rank <= 10` returns 12 rows. Ask before you choose: "If two rows tie, do you want both of them or just one?"
+
+## DISTINCT ON in PostgreSQL
+
+`DISTINCT ON (g)` keeps the first row of each group `g`, in the order of `ORDER BY`. The latest payout per merchant becomes one short query, with the same 12 rows:
+
+```sql
+SELECT DISTINCT ON (merchant_id)
+       merchant_id, channel, period_month, amount_usd, paid_at
+FROM channel_payouts
+ORDER BY merchant_id, paid_at DESC, payout_id DESC;
+```
+
+Three rules. `ORDER BY` must start with the `DISTINCT ON` columns, then give the order inside the group. It keeps exactly one row per group, so it cannot do the top 3 or keep ties. And it is PostgreSQL only: in an interview, say that `ROW_NUMBER` is the portable version.
+
+<Trap id="distinct-on-order" q="The latest transaction of every customer with DISTINCT ON; on a tie, the larger transaction_id. What is wrong?">
+
+An error: `SELECT DISTINCT ON expressions must match initial ORDER BY expressions`. The correct order is `ORDER BY customer_id, start_time DESC, transaction_id DESC`: first the `DISTINCT ON` columns, then the order inside the group. The last key settles ties: a customer can have two transactions with the same `start_time`, and without it PostgreSQL may keep either one. Check's hidden data has such ties.
+
+</Trap>
+
+## Without a window function
+
+Find `MAX(paid_at)` per merchant in a CTE and join it back to the table on `merchant_id` and `paid_at`. This works, but on a tie it returns both rows. Sometimes that is what the task wants, but it is a different answer from `ROW_NUMBER`.
+
+<Talk q="Can you do it without a window function?">
+
+"Yes. I find the maximum per merchant in a CTE and join it back on the merchant and that value. The difference is ties: if two rows share the maximum, the join returns both of them, while ROW_NUMBER keeps one."
+
+</Talk>
+
+## How it comes up in the interview
+
+The base task is a report: "Show net revenue per product for September, with the merchant." The query groups by merchant and product and returns 20 rows. mer_06 has two products: prd_18 with 313.80 and prd_06 with 239.90. Then the follow-up comes: "Now keep only the best product of each merchant."
+
+1. **Ask first:** "If two products of one merchant have the same revenue, do you want both, or just one?" Suppose the answer is "just one, the smaller product id".
+2. **Plan out loud:** "I'll number the products inside each merchant by revenue and keep number one. I can't filter on a window in the same SELECT, so that's one more step."
+3. **Wrap, do not rewrite:** the working query becomes the first CTE, without its `ORDER BY`.
+4. **Check against the base:** "Twelve rows, one per merchant. For mer_06 it's prd_18, which matches the base query: 313.80 against 239.90."
+
+The first drill below is exactly this step. Top N overall is simpler: `ORDER BY net_usd DESC, product_id LIMIT 5`, as in [Q02 on Revenue reports](/sql-tasks/revenue-reports/). The window is needed only when the top is per group.
+
+## Practice
+
+<Drill id="s-top1">
+
+Best per group: aggregate to (merchant, product) first, then `ROW_NUMBER` inside each merchant, then `rn = 1` outside, because a window cannot be filtered in the `WHERE` of the same `SELECT`. `DESC` applies to `net_usd` only, so the second key `product_id` sorts ascending and the smaller id wins a tie. The hidden data has a merchant whose two best products tie, so the direction of that key matters.
+
+</Drill>
+
+<Drill id="s-rank">
+
+`RANK` gives equal counts the same place and skips the next places (1, 2, 2, 4). `DENSE_RANK` does not skip (1, 2, 2, 3). `ROW_NUMBER` always gives different numbers, so it cannot keep both tied rows. Here prd_15 and prd_16 tie at 25 transactions, so ranks 1–5 give six rows; `ROW_NUMBER` would drop one of them. This tie is in last place, so `DENSE_RANK` happens to return the same rows. The hidden data has a tie higher up, and there it does not. The filter `rnk <= 5` goes in the outer query, after the window is computed.
+
+</Drill>
+
+<Drill id="s-latest">
+
+The latest row per group: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY start_time DESC, transaction_id DESC)`, and `rn = 1` outside. Both keys need `DESC`, because the rule is "the larger id". In PostgreSQL the same is shorter: `SELECT DISTINCT ON (customer_id) … ORDER BY customer_id, start_time DESC, transaction_id DESC`.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Once the base query works, each follow-up is a small change to it. Name the change in one sentence before you type it:
+
+| Follow-up | What changes |
+|---|---|
+| "Top two per merchant?" | `rn <= 2` in the outer query |
+| "Keep both tied rows?" | `RANK()`, with no tie-breaker in its `ORDER BY` |
+| "Is it fast on a big table?" | Nothing. Say: "The window sorts twenty rows after the aggregation. The cost is reading transactions, so an index on start_time matters more." |
+</Aside>
+
+## Further reading
+
+- [Window functions tutorial](https://www.postgresql.org/docs/current/tutorial-window.html) — `OVER`, `PARTITION BY` and `ORDER BY` with short examples.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `ROW_NUMBER`, `RANK`, `DENSE_RANK` and the rest of the list.
+- [Window function processing](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-WINDOW) — why windows run after `WHERE`, `GROUP BY` and `HAVING`.
+- [DISTINCT ON](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT) — the rule about the leading `ORDER BY` columns.
+
+## Related topics
+
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — the named steps that hold the base query and the numbering.
+- [Grouping and counting](/sql/grouping-and-counting/) — the aggregation that comes before the ranking.
+- [Shares and running totals](/sql-patterns/running-totals-and-shares/) — the same `OVER`, with `SUM` instead of a number.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — the first copy of each event, with the same `ROW_NUMBER`.
+- [Subscriptions over time](/sql-tasks/subscriptions-over-time/) — Q07, the current status of every customer.
+- [Sorting and top-k](/python/sorting-and-top-k/) — the same task in Python, with sort keys and `heapq`.

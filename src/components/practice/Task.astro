@@ -1,0 +1,180 @@
+---
+// A full interview task: SQL (q01–q14, d01) or Python (p01–p14, d02, d03). Statement, the
+// questions to ask, notes about the data, a timer, the editor, Check against the reference
+// (SQL) or the real tests (Python), a hint and a soft-locked reference solution.
+// Hidden answers (the questions' answers, the hint, "Say it" and the solution) carry
+// data-pagefind-ignore, so the site search does not show them.
+//   <Task id="q01" />
+import { Code } from '@astrojs/starlight/components';
+import { getTask, hintFor, inline, localeOf, ruFor, schemaForEditor } from './lib/data';
+import { strings } from './lib/i18n';
+import ResultTable from './parts/ResultTable.astro';
+import Workbench from './parts/Workbench.astro';
+import './practice.css';
+
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+const locale = localeOf(Astro);
+const T = strings(locale);
+const x = getTask(id);
+const isSql = x.kind === 'sql';
+const target = x.task.target;
+// The column names the task asks for ("day (DATE), active_subscriptions" -> day, active_subscriptions).
+const specCols = isSql ? x.task.cols.split(',').map((c) => c.trim().split(/\s+/)[0]).filter(Boolean) : [];
+const cfg = isSql
+  ? { kind: 'task-sql', id, starter: x.task.template, target, ordered: !!x.task.order, expected: { cols: x.task.expected.cols, rows: x.task.expected.rows }, edge: x.task.expected.edge ?? null, specCols, schema: schemaForEditor() }
+  : { kind: 'task-py', id, starter: x.task.template, target, mod: x.task.mod, code: x.meta.code, db: x.task.db };
+// Difficulty, never the technique: a label like "windows" would give the solution away.
+const difficulty = T.diff[x.meta.difficulty] ?? x.meta.difficulty;
+const hint = hintFor(id, locale) || (!isSql ? x.task.hint : '');
+const hintLang = hintFor(id, locale) ? locale : 'en';
+const ru = ruFor(id, locale);
+---
+<section class="lcp lcp-task" id={id} data-lcp={cfg.kind} data-id={id}>
+  <script type="application/json" data-lcp-cfg set:html={JSON.stringify(cfg).replace(/</g, '\\u003c')} />
+  <header class="lcp-head lcp-task-head not-content">
+    <span class="lcp-badge">{isSql ? T.sql : T.python}</span>
+    <span class="lcp-kind"><strong>{id.toUpperCase()}</strong><span data-mock-hide> · {T.difficulty}: {difficulty} · {T.target(target)}</span></span>
+    <span class="lcp-solved" data-solved hidden>✓ {T.solved}</span>
+    <button type="button" class="lcp-btn lcp-btn-small lcp-btn-quiet" data-fresh title={T.startFreshTitle} hidden>↺ {T.startFresh}</button>
+    <span class="lcp-timer" data-timer hidden>
+      <span class="lcp-timer-label">{T.timer}</span>
+      <span class="lcp-timer-time" data-timer-display aria-live="off">00:00</span>
+      <button type="button" class="lcp-btn lcp-btn-small" data-timer="toggle">{T.start}</button>
+      <button type="button" class="lcp-btn lcp-btn-small lcp-btn-quiet" data-timer="reset" aria-label={T.reset}>↺</button>
+    </span>
+  </header>
+
+  {isSql && x.task.debug && (
+    <div class="lcp-statement" lang="en">
+      <p class="lcp-label not-content">{T.bugReport}</p>
+      <blockquote><p set:html={inline(x.task.bug)} /></blockquote>
+      <p class="lcp-label not-content">{T.shouldShow}</p>
+      <p set:html={inline(x.task.should)} />
+    </div>
+  )}
+  {isSql && !x.task.debug && <p class="lcp-q" lang="en" set:html={inline(x.task.task)} />}
+  {isSql && (
+    <p class="lcp-small not-content lcp-spec">
+      <span><strong>{T.outputCols}</strong> <code>{x.task.cols}</code></span>
+      {x.task.order && <span><strong>{T.orderBy}</strong> <code>ORDER BY {x.task.order}</code></span>}
+    </p>
+  )}
+  {!isSql && (
+    <div class="lcp-statement" lang="en">
+      {x.meta.brief.map((p) => <p set:html={inline(p)} />)}
+      <pre class="lcp-example not-content">{x.meta.example}</pre>
+      <details class="lcp-ctx not-content">
+        <summary>{T.fullStatement}</summary>
+        <pre class="lcp-doc">{x.task.body}</pre>
+      </details>
+    </div>
+  )}
+  {ru && (ru.task || ru.bug || ru.should || ru.brief || ru.example) && (
+    <details class="lcp-tr not-content">
+      <summary>{T.translation}</summary>
+      <div lang="ru">
+        {ru.bug && <p><strong>{T.bugReport}.</strong> <span set:html={inline(ru.bug)} /></p>}
+        {ru.should && <p><strong>{T.shouldShow}.</strong> <span set:html={inline(ru.should)} /></p>}
+        {ru.task && <p set:html={inline(ru.task)} />}
+        {ru.brief?.map((p) => <p set:html={inline(p)} />)}
+        {ru.example && <pre class="lcp-example">{ru.example}</pre>}
+      </div>
+    </details>
+  )}
+
+  {x.task.ask.length > 0 && (
+    <div class="lcp-ask not-content" data-ask>
+      <p class="lcp-label">{T.askFirst}</p>
+      <p class="lcp-small lcp-muted" data-ask-hint>{T.askHint}</p>
+      {/* Mock mode only (client.ts): the candidate types their own questions before seeing the list. */}
+      <div class="lcp-ask-mine" data-ask-mine hidden>
+        <label class="lcp-ask-yours" for={`lcp-asked-${id}`}>{T.askYours}</label>
+        <p class="lcp-small lcp-muted">{T.askMockHint}</p>
+        <textarea class="lcp-ask-notes" id={`lcp-asked-${id}`} rows="4" spellcheck="false" data-ask-notes></textarea>
+        <div class="lcp-bar">
+          <button type="button" class="lcp-btn lcp-btn-small" data-ask-show>{T.askShow}</button>
+          <span class="lcp-small" data-ask-score role="status" hidden></span>
+        </div>
+      </div>
+      <ol data-ask-list>
+        {x.task.ask.map((qa, i) => (
+          <li>
+            <details>
+              <summary>
+                <span lang="en" set:html={inline(qa.q)} />
+                {ru?.ask?.[i] && <span class="lcp-ask-tr" lang="ru" set:html={inline(ru.ask[i].q)} />}
+              </summary>
+              <div data-pagefind-ignore>
+                <p lang="en" set:html={inline(qa.a)} />
+                {ru?.ask?.[i] && (
+                  <p class="lcp-tr-inline lcp-small" lang="ru"><span class="lcp-muted">{T.translation}:</span> <span set:html={inline(ru.ask[i].a)} /></p>
+                )}
+              </div>
+            </details>
+          </li>
+        ))}
+      </ol>
+    </div>
+  )}
+
+  {isSql && (
+    <details class="lcp-ctx not-content" data-mock-hide>
+      <summary>{T.dataNotes}: {x.meta.tables.map((t, i) => <>{i > 0 && ', '}<code>{t}</code></>)}</summary>
+      <div class="lcp-ctx-body" lang="en">
+        <ul class="lcp-notes">{x.meta.notes.map((n) => <li set:html={inline(n)} />)}</ul>
+        {x.meta.example && x.task.example && (
+          <>
+            <p class="lcp-label" lang={locale}>{T.exampleRows}</p>
+            <Code code={x.meta.example} lang="sql" />
+            <ResultTable cols={x.task.example.cols} rows={x.task.example.rows} />
+          </>
+        )}
+        <p class="lcp-small lcp-muted" lang={locale}>{T.today}</p>
+      </div>
+    </details>
+  )}
+
+  <Workbench locale={locale} lang={isSql ? 'sql' : 'python'} code={x.task.template} check example={!isSql} note={isSql ? undefined : T.runNote} />
+
+  {hint && (
+    <details class="lcp-reveal lcp-hint" data-hint>
+      <summary class="not-content"><span class="lcp-reveal-title">{T.hintLabel}</span></summary>
+      <div class="lcp-reveal-body" data-pagefind-ignore><p lang={hintLang} set:html={inline(hint)} /></div>
+    </details>
+  )}
+
+  <p class="lcp-say not-content" data-say data-pagefind-ignore hidden><strong>{T.sayIt}</strong> <q lang="en">{x.meta.say}</q></p>
+
+  <div class="lcp-lock not-content" data-lock hidden>
+    <div class="lcp-banner lcp-info" role="status">
+      <span class="lcp-icon" aria-hidden="true">↻</span>
+      <div class="lcp-banner-body">
+        <strong>{T.lockedTitle}</strong>
+        <div>{T.lockedText}</div>
+        <div class="lcp-bar">
+          <button type="button" class="lcp-btn" data-lock-act="show">{T.showAnyway}</button>
+          <button type="button" class="lcp-btn lcp-btn-primary" data-lock-act="keep">{T.keepTrying}</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <details class="lcp-answer lcp-solution" data-solution>
+    <summary class="not-content">{T.solution}</summary>
+    <div class="lcp-answer-body" data-pagefind-ignore>
+      <Code code={x.task.solution.trimEnd()} lang={isSql ? 'sql' : 'python'} />
+      {isSql && (
+        <div class="not-content">
+          <p class="lcp-label">{T.expectedOutput}</p>
+          <ResultTable cols={x.task.expected.cols} rows={x.task.expected.sample} rowsLabel={`${T.rows(x.task.expected.n)}${x.task.expected.n > x.task.expected.sample.length ? ` (${T.shownFirst(x.task.expected.sample.length)})` : ''}`} />
+        </div>
+      )}
+    </div>
+  </details>
+</section>
+
+<script>
+  import './lib/client';
+</script>

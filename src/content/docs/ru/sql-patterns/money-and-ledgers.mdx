@@ -1,0 +1,230 @@
+---
+title: Деньги и журнал проводок
+description: Поток или остаток, журнал проводок, где остаток — это SUM, NUMERIC вместо float и округление один раз в конце. На данных программы авансов.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Денежные задачи выглядят как обычные суммы, а ломаются тихо: остаток, посчитанный в окне дат, float, который теряет центы, округление на каждой строке. Примеры здесь — на программе авансов из учебных данных: её журнал проводок (ledger) — одна таблица записей со знаком, и любой остаток — это `SUM` по ней.
+
+<Aside type="tip" title="Коротко">
+- **Поток** — сумма за период, у него есть окно дат. **Остаток** — состояние на момент: всё до этого момента, без нижней границы.
+- Журнал проводок только дописывается. Аванс и комиссия — плюс, погашение — минус, остаток — `SUM(amount_usd)`.
+- Деньги — `NUMERIC` (`NUMERIC(12, 2)` в таблице), никогда не float.
+- Округлять один раз, в конце: `ROUND(SUM(x), 2)`, а не `SUM(ROUND(x, 2))`.
+- `ROUND(x, 2)` требует numeric. Значение double сначала привести: `ROUND(CAST(x AS NUMERIC), 2)`.
+</Aside>
+
+## Программа авансов в данных
+
+Платформа платит продавцу (merchant) заранее, в счёт выплаты маркетплейса-партнёра, которая ещё не пришла. Аванс — не больше 70 % ожидаемой выручки за этот канал и месяц, а продавец платит комиссию 3 % от аванса. Когда выплата приходит, она гасит аванс и комиссию. Подробности — на [странице данных](/start/dataset/); здесь важны две таблицы:
+
+- `advances`: одна строка на аванс, с `amount_usd` и `fee_usd`.
+- `ledger_entries`: одна строка на каждое движение денег.
+
+| entry_type | знак | когда пишется |
+|---|---|---|
+| `advance` | + | платформа платит продавцу |
+| `fee` | + | в тот же момент, что и аванс |
+| `repayment` | − | когда приходит выплата канала продаж |
+
+Один аванс, adv_0001, в журнале:
+
+```sql
+SELECT entry_id, entry_type, amount_usd, created_at
+FROM ledger_entries
+WHERE advance_id = 'adv_0001'
+ORDER BY created_at, entry_id;
+```
+
+| entry_id | entry_type | amount_usd | created_at |
+|---|---|---|---|
+| le_00001 | advance | 68.38 | 2026-07-02 10:00:00 |
+| le_00002 | fee | 2.05 | 2026-07-02 10:00:00 |
+| le_00003 | repayment | -70.43 | 2026-08-02 09:00:00 |
+
+Записи в сумме дают 0, значит, аванс погашен. У всех 38 авансов `fee_usd` равен `ROUND(amount_usd * 0.03, 2)`.
+
+## Поток и остаток
+
+**Поток** — сумма за период: выручка за месяц, авансы, выданные в августе, комиссии за квартал. У него всегда есть окно: `created_at >= start AND created_at < end`.
+
+**Остаток** — состояние на момент: сколько должен продавец, сколько денег на счёте, сколько подписок активно сегодня. Это сумма всего, что было до этого момента. Верхняя граница у него есть, нижней нет.
+
+Для mer_01 — поток и остаток:
+
+```sql
+SELECT SUM(amount_usd) AS advanced_usd           -- поток: окно в один месяц
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND entry_type = 'advance'
+  AND created_at >= TIMESTAMP '2026-08-01'
+  AND created_at <  TIMESTAMP '2026-09-01';
+
+SELECT SUM(amount_usd) AS owed_usd               -- остаток: вся история до момента
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at < TIMESTAMP '2026-09-01';
+```
+
+| advanced_usd |
+|---|
+| 145.09 |
+
+| owed_usd |
+|---|
+| 50.21 |
+
+Частая ошибка — окно на остатке:
+
+```sql
+SELECT SUM(amount_usd) AS owed_usd               -- неверно: окно на остатке
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at >= TIMESTAMP '2026-09-01' - INTERVAL '30 days'
+  AND created_at <  TIMESTAMP '2026-09-01';
+```
+
+Ответ — −20,22. Окно отрезает авансы, выданные 2 июля, но оставляет погашение adv_0001 от 2 августа. Отрицательный долг — признак того, что окно неверное. Если условие неясно, спросите: *"Is this a total for a period, or a state at a moment?"*
+
+### Остаток после каждой записи
+
+Нарастающая сумма по журналу показывает, как меняется остаток. Это оконная функция, как на странице [доли и нарастающий итог](/sql-patterns/running-totals-and-shares/):
+
+```sql
+SELECT created_at, advance_id, entry_type, amount_usd,
+       SUM(amount_usd) OVER (ORDER BY created_at, entry_id) AS balance_usd
+FROM ledger_entries
+WHERE merchant_id = 'mer_01'
+  AND created_at < TIMESTAMP '2026-09-01'
+ORDER BY created_at, entry_id;
+```
+
+Строки с 6-й по 11-ю из 11:
+
+| created_at | advance_id | entry_type | amount_usd | balance_usd |
+|---|---|---|---|---|
+| 2026-08-02 09:00:00 | adv_0001 | repayment | -70.43 | 0.00 |
+| 2026-08-02 10:00:00 | adv_0002 | advance | 48.75 | 48.75 |
+| 2026-08-02 10:00:00 | adv_0002 | fee | 1.46 | 50.21 |
+| 2026-08-02 10:00:00 | adv_0005 | advance | 96.34 | 146.55 |
+| 2026-08-02 10:00:00 | adv_0005 | fee | 2.89 | 149.44 |
+| 2026-08-15 09:00:00 | adv_0005 | repayment | -99.23 | 50.21 |
+
+Остаток падает до 0,00, когда выплата за июнь гасит adv_0001. Последний остаток, 50,21, совпадает с запросом выше: это adv_0002, который ждёт июльскую выплату North Market. `entry_id` вторым ключом сортировки держит порядок стабильным, когда у записей одно время.
+
+## Почему только дописывать
+
+Журнал никогда не меняет строку. Каждое движение — новая строка, а исправление — новая запись с обратным знаком, а не `UPDATE`. Это даёт три вещи:
+
+- **История.** Остаток на любой прошлый момент — тот же запрос с другой датой.
+- **Аудит.** Каждый цент остатка можно проследить до строк, из которых он сложился.
+- **Безопасные повторы.** Повтор не должен записать второй аванс. `advances.idempotency_key` (`merchant:channel:month`) с уникальным индексом не пустит его на уровне базы: см. [дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/).
+
+Многие системы ещё хранят текущий остаток в отдельной колонке, чтобы быстро читать. Её обновляют в той же транзакции, что и новую запись, поэтому они не расходятся (см. [понятия баз данных](/sql-patterns/database-concepts/)).
+
+## NUMERIC, а не float
+
+`double precision` и `real` — двоичные дроби. У большинства десятичных сумм, например 0,1, нет точного двоичного представления, и ошибка проявляется в суммах:
+
+```sql
+SELECT 0.1::float8 + 0.2::float8 AS float_sum,
+       0.1::float8 + 0.2::float8 = 0.3::float8 AS float_equal,
+       0.1::numeric + 0.2::numeric AS numeric_sum,
+       0.1::numeric + 0.2::numeric = 0.3 AS numeric_equal;
+```
+
+| float_sum | float_equal | numeric_sum | numeric_equal |
+|---|---|---|---|
+| 0.30000000000000004 | false | 0.3 | true |
+
+Если сложить 0,1 тысячу раз, float даст `99.9999999999986`, а `NUMERIC` — `100.0`.
+
+`NUMERIC` хранит десятичные цифры точно. В таблице ему задают точность: `NUMERIC(12, 2)` — 12 цифр, из них 2 после запятой. Такая колонка округляет при вставке: 10,005 сохранится как 10,01, а 10,004 — как 10,00. Значение, которое не помещается, падает с `numeric field overflow`. В Python ту же роль играет `Decimal` (см. [деньги и Decimal](/python/money-and-decimal/)).
+
+## Округлять один раз, в конце
+
+Сколько продавец получает за продажу — `charged_usd * (1 - fee_rate)`. Продажа за 2,99 при комиссии 15 % даёт 2,5415. Если округлять каждую строку до центов, каждая такая строка теряет 0,0015:
+
+```sql
+SELECT channel,
+       COUNT(*) AS n,
+       ROUND(SUM(charged_usd * (1 - fee_rate)), 2) AS round_once,
+       SUM(ROUND(charged_usd * (1 - fee_rate), 2)) AS round_each_row
+FROM transactions
+WHERE NOT is_test
+  AND channel IN ('north_market', 'south_market', 'web')
+  AND start_time >= TIMESTAMP '2026-09-01'
+  AND start_time <  TIMESTAMP '2026-10-01'
+GROUP BY channel
+ORDER BY channel;
+```
+
+| channel | n | round_once | round_each_row |
+|---|---|---|---|
+| north_market | 254 | 2490.74 | 2490.32 |
+| south_market | 151 | 1858.89 | 1858.64 |
+| web | 55 | 732.84 | 732.83 |
+
+За один месяц итогу North Market не хватает 42 центов. Внутри запроса держите полную точность и округляйте только число, которое показываете. Если бизнес округляет каждую транзакцию, он об этом скажет; спросите.
+
+### ROUND требует NUMERIC
+
+`ROUND(x, 2)` существует только для `NUMERIC`. Со значением `double precision`, например из `PERCENTILE_CONT` или float-колонки, вызов падает: `function round(double precision, integer) does not exist`. Сначала приведите тип: `ROUND(CAST(x AS NUMERIC), 2)`.
+
+Половинки два типа тоже округляют по-разному:
+
+| выражение | результат |
+|---|---|
+| `ROUND(0.125, 2)` | 0.13 |
+| `ROUND(2.5)` | 3 |
+| `ROUND(2.5::float8)` | 2 |
+| `ROUND(CAST(0.125::float8 AS NUMERIC), 2)` | 0.13 |
+
+PostgreSQL округляет половинки `NUMERIC` от нуля. `round()` в Python у `Decimal` округляет половинки к чётному, поэтому `round(Decimal("0.125"), 2)` даёт `0.12`. Когда SQL и Python должны совпадать, в Python берите `quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`.
+
+## Практика
+
+<Drill id="s-ledger-fees">
+
+Это поток: сумма записей-комиссий по месяцам. Месяц берётся из даты записи, `CAST(date_trunc('month', created_at) AS DATE)`, и считаются только записи 2026 года до сегодняшнего дня. Остаток был бы другим вопросом: сумма всех записей, без месяца.
+
+</Drill>
+
+<Drill id="s-balance">
+
+Журнал только дописывается: аванс и комиссия — плюс, погашение — минус. Остаток — сумма всех записей до сегодняшнего дня. Это остаток, а не поток, поэтому окна в 30 дней здесь нет. `HAVING SUM(amount_usd) > 0` после группировки оставляет тех, кто ещё должен. Знак сохраняйте: `SUM(ABS(amount_usd))` посчитал бы каждое погашение новым долгом. `merchant_id` вторым ключом сортировки делает порядок стабильным.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+До первой строки кода разложите слова задачи на поток и остаток:
+
+| слова в задаче | это | значит, в запросе |
+|---|---|---|
+| «owes», «outstanding», «balance», «as of» | остаток | только верхняя граница |
+| «in August», «per month», «fees earned» | поток | полуоткрытое окно |
+
+Потом назовите выбор: «This is a balance, not a flow, so there is no date window: it is the sum of all ledger entries up to today.» Про типы — одной фразой: «NUMERIC in the database, Decimal in Python, one ROUND at the end.»
+
+Естественный следующий вопрос: «А если два воркера выдают аванс одновременно?» Короткий ответ: «I'd lock the merchant's row with SELECT … FOR UPDATE, then check the limit and insert in the same transaction.» Сама гонка разобрана на странице [понятия баз данных](/sql-patterns/database-concepts/).
+</Aside>
+
+## Что почитать
+
+- [Numeric types](https://www.postgresql.org/docs/current/datatype-numeric.html) — целые, `NUMERIC` и типы с плавающей точкой рядом.
+- [Arbitrary precision numbers](https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL) — точность и масштаб `NUMERIC(12, 2)`, округление при вставке и как округляются половинки.
+- [Mathematical functions](https://www.postgresql.org/docs/current/functions-math.html) — `round` и какие типы аргументов она принимает.
+- [Window functions](https://www.postgresql.org/docs/current/tutorial-window.html) — нарастающая сумма, на которой держится остаток после каждой записи.
+- [decimal](https://docs.python.org/3/library/decimal.html) — `Decimal`, `quantize` и режимы округления в Python.
+
+## Связанные темы
+
+- [Условная агрегация](/sql/conditional-aggregation/) — несколько сумм по типам записей в одном запросе, через `FILTER`.
+- [Размножение строк](/sql-patterns/row-multiplication/) — журнал, соединённый с авансами, размножает строки, если не свернуть заранее.
+- [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/) — оконная функция за остатком после каждой записи.
+- [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/) — авансы против выплат маркетплейсов, которые их гасят.
+- [Деньги и Decimal](/python/money-and-decimal/) — те же правила в Python.
+- [Деньги и сверка](/sql-tasks/money-and-reconciliation/) — Q14 строит остаток по продавцу и по открытым авансам.

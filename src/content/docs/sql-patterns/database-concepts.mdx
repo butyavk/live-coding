@@ -1,0 +1,322 @@
+---
+title: Database concepts
+description: Questions answered out loud after the query works. Constraints, transactions, isolation levels, row locks, data types, N+1, and follow-ups on scale and trust.
+sidebar:
+  order: 9
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+
+Besides the query, many interviews check "database concepts": why a constraint and not a check in code, what a transaction guarantees, what happens when two workers run at once, which index would serve the report. These questions are answered out loud, in two or three sentences, with an example from the task you just solved.
+
+<Aside type="tip" title="TL;DR">
+- Idempotency lives in the database: a unique key plus `INSERT … ON CONFLICT DO NOTHING`.
+- A transaction is all or nothing. Never call an external service inside one.
+- The PostgreSQL default is Read Committed: each statement sees a fresh snapshot. A check-then-write on money needs `SELECT … FOR UPDATE`, or Serializable with retries.
+- Money is `NUMERIC`, time is `timestamptz` in UTC, and "a day" depends on a time zone: ask which one.
+- After the task, expect "and on a billion rows?" and "can we trust last month's number?"
+</Aside>
+
+If time is short, these six come up most often: which index helps the report, what to do with a slow query, how to process a webhook once, what a transaction gives you, whether the last month can be trusted, and which type holds money.
+
+## Constraints and idempotency
+
+<Talk q="How do you make sure a webhook is processed only once?">
+
+"A unique constraint on event_id, and `INSERT … ON CONFLICT (event_id) DO NOTHING`. The database guarantees it even with two workers. A check in application code is not enough, because of races. The insert and the processing commit in one transaction, so a crash between them rolls back both."
+
+Two workers both ask "is this event already there?", both find nothing, and both insert. A unique key lets only one insert through. `RETURNING` tells the code whether the row was new:
+
+```sql
+CREATE TEMP TABLE processed_events (event_id TEXT PRIMARY KEY);
+INSERT INTO processed_events VALUES ('evt_000834')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;   -- first time: evt_000834; the repeat: 0 rows
+```
+
+The usual follow-up is "and if you crash after the insert?". If the insert commits on its own and the worker then crashes, the retry finds the event_id and skips an event that was never processed. So the insert and the database writes for the event go into one transaction: a crash rolls back both, and the retry starts again. An external call cannot join that transaction (see below).
+
+More on this in [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/).
+
+</Talk>
+
+<Talk q="Primary key, unique, foreign key, check: what are they for?">
+
+"They keep the data correct even when the code has a bug: no duplicates, no orphans, no negative amounts. For money I prefer to let the database reject bad data."
+
+`PRIMARY KEY` rejects a repeat and NULL, `UNIQUE` a repeat, `REFERENCES` a link to a row that does not exist, `CHECK (amount_usd >= 0)` a row where the condition is false. PostgreSQL creates an index for `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraints, but not for a foreign key column.
+
+</Talk>
+
+## Transactions
+
+<Talk q="What does a transaction give you?">
+
+"All or nothing: either every change is saved, or none. For example, an advance to a merchant and its ledger entries are written together, so the books never show one without the other. Also, other sessions don't see my changes until I commit, and once COMMIT returns, the changes survive a crash."
+
+</Talk>
+
+<Talk q="What would you never do inside a transaction?">
+
+"Call an external service, like a bank or a payment API. The transaction holds locks and a connection while we wait. If it rolls back after a timeout, the external request may already have been sent, and the two systems no longer agree."
+
+The usual fix is to commit first and call the service afterwards, with an idempotency key, so a retry after a timeout cannot pay twice.
+
+</Talk>
+
+## Isolation levels
+
+<Talk q="Which isolation levels do you know, and when do they matter?">
+
+"The default in PostgreSQL is Read Committed. Every statement sees a snapshot of the data that was committed before that statement started, never uncommitted changes. So two SELECTs in one transaction can return different results if another transaction commits between them.
+
+Repeatable Read takes one snapshot for the whole transaction, so every statement sees the same data. If I try to update a row that another transaction has already changed, PostgreSQL raises an error and I retry the transaction.
+
+Serializable is the strictest: the result is as if the transactions ran one after another. When PostgreSQL cannot guarantee that, one transaction fails with a serialization error, and the application must retry it.
+
+For money, for example checking the debt before a new advance, I lock the merchant's row with `SELECT … FOR UPDATE`, so a second worker waits until the first one commits. Or I use Serializable and retry on errors."
+
+A snapshot is a picture of the committed data at one moment. The steps below show it.
+
+</Talk>
+
+### Snapshots, step by step
+
+In Read Committed, every statement takes a new snapshot:
+
+| step | transaction A | transaction B |
+|---|---|---|
+| 1 | `BEGIN; SELECT balance` → 100 | |
+| 2 | | `BEGIN; UPDATE … SET balance = 50`, not committed yet |
+| 3 | `SELECT balance` → 100: uncommitted data is never visible | |
+| 4 | | `COMMIT` |
+| 5 | `SELECT balance` → **50**: a new statement, a new snapshot | |
+
+In Repeatable Read, step 5 returns 100 again: there is one snapshot for the whole transaction.
+
+### Why they ask: a race on a debt limit
+
+A merchant owes 700, and the debt limit is 1,000. Two workers issue an advance of 250 at the same moment:
+
+| step | transaction A | transaction B |
+|---|---|---|
+| 1 | `SELECT SUM(amount_usd) …` → 700 | |
+| 2 | | the same `SELECT` → 700 |
+| 3 | 700 + 250 ≤ 1,000 → `INSERT` the advance, `COMMIT` | |
+| 4 | | 700 + 250 ≤ 1,000 → `INSERT` the advance, `COMMIT` |
+
+The debt is now 1,200. The limit is broken, although both checks were honest. Repeatable Read does not help here: the two transactions insert different rows, so there is no write conflict. A row lock helps. In the default Read Committed, both transactions start by locking the merchant's row:
+
+```sql
+BEGIN;
+SELECT id FROM merchants WHERE id = 'mer_11' FOR UPDATE;   -- a second worker waits here
+SELECT SUM(amount_usd) AS owed_usd
+FROM ledger_entries
+WHERE merchant_id = 'mer_11';                              -- sees every committed advance
+-- owed + new advance <= limit? Then INSERT the advance and the fee entries.
+COMMIT;
+```
+
+B waits until A commits. Its `SUM` then takes a new snapshot, sees 950, and refuses. Serializable also works: one of the two transactions fails with a serialization error, and its retry sees 950.
+
+<Talk q="Two workers take the same job. How do you prevent it?">
+
+"`SELECT … FOR UPDATE SKIP LOCKED` in a job table: each worker locks different rows. Plus a unique key on the business key, so a duplicate fails even if something goes wrong."
+
+A worker takes its next job like this: `SELECT job_id FROM jobs WHERE status = 'new' ORDER BY job_id LIMIT 1 FOR UPDATE SKIP LOCKED;`. Rows locked by other workers are skipped instead of waited for.
+
+</Talk>
+
+## Data types
+
+<Talk q="Which types would you use for money and for time?">
+
+"NUMERIC(12, 2) for money, never float, and Decimal in Python. For time, timestamptz, stored in UTC and converted only for display. For durations, interval, because a month is not 30 days. And I'd ask which time zone defines a day."
+
+In the practice data the columns are `TIMESTAMP` holding UTC, so the conversion has two steps: `start_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'`. On 15 September there are 21 transactions by the UTC day and 19 by the New York day, test purchases excluded. Why float loses cents is shown on [Money and ledgers](/sql-patterns/money-and-ledgers/).
+
+</Talk>
+
+## Query patterns
+
+<Talk q="OFFSET pagination on a big table: is there a problem?">
+
+"OFFSET gets slower with every page, because the database still reads all the skipped rows. Keyset pagination is better: `WHERE (created_at, id) > (:last_created_at, :last_id) ORDER BY created_at, id LIMIT 100`, with an index on (created_at, id)."
+
+The row comparison `(a, b) > (x, y)` compares column by column, in the same order as the sort, so the second column breaks ties.
+
+</Talk>
+
+<Talk q="What is the N+1 problem?">
+
+"One query for a list, then one more query for each item: 100 payouts become 101 queries. The fix is a join, or one query with `WHERE id IN (…)` for all the items."
+
+It often hides in a loop that reads a related object through an ORM. See [Python and SQL](/python/python-and-sql/).
+
+</Talk>
+
+<Talk q="COUNT(*) or COUNT(column)?">
+
+"COUNT(*) counts rows; COUNT(column) skips NULLs. After a LEFT JOIN this difference matters: COUNT(*) gives 1 for a row without a match."
+
+See [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+
+</Talk>
+
+<Talk q="Normalise or denormalise?">
+
+"Normalise by default, so one fact lives in one place. Denormalise for read-heavy reports, for example a daily summary table, and accept that it must be rebuilt or kept in sync."
+
+</Talk>
+
+## After the SQL task: follow-up questions
+
+When the query is ready, the interviewer often asks "what if the data is big?" or "can we trust this number?". The first one or two sentences of each answer are the minimum. The rest is for when they keep asking.
+
+<Talk q="On a table with a billion rows, which index would help this report, and would the database actually use it?">
+
+"I'd add an index on start_time. The filter compares the raw column with a range, so the index can be used; if I wrapped it in EXTRACT, it couldn't. Whether PostgreSQL actually uses it depends on how much of the table the range covers, and on how the rows lie on disk. Transactions are appended in time order, so a date range reads neighbouring pages, and the index stays cheaper for quite a large share. I'd check with EXPLAIN ANALYZE. The other filters aren't selective, so I wouldn't index them, maybe a partial index at most. But for a billion rows I'd rather not scan history every time: I'd keep a monthly summary table per product and only update the current month."
+
+An index pays off when the query reads a small share of the table's pages, not only of its rows. How large a share is too large depends on the physical order of the rows. `transactions` is appended in time order: `pg_stats` gives `start_time` a correlation of 0.9994, where 1 means the same order as on disk. So the rows of one month sit on neighbouring pages. With an index on `start_time`, the planner keeps the index for 65% of the table and switches to a `Seq Scan` at about two thirds. A column in random order, like `customer_id` (correlation 0.0002), costs a page visit for almost every row. The plans are on [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+### BRIN for append-only tables
+
+The same physical order makes a BRIN index possible. A B-tree keeps an entry for every row. A BRIN index keeps only the minimum and the maximum of the column for each block range of the table (128 pages, about 1 MB). A range query reads these summaries and visits only the matching parts of the table, where it checks every row. On a generated table of 1,000,000 rows in time order, the table takes 43 MB, a B-tree on the timestamp 21 MB, and a BRIN index 24 kB:
+
+```sql
+CREATE TABLE tx AS
+SELECT g AS id, TIMESTAMP '2025-01-01' + g * INTERVAL '30 seconds' AS start_time
+FROM generate_series(1, 1000000) AS g;
+CREATE INDEX tx_btree ON tx (start_time);
+CREATE INDEX tx_brin ON tx USING brin (start_time);
+```
+
+A count for one week, from 1 to 8 March 2025, with only the BRIN index left:
+
+```text
+Bitmap Heap Scan on tx  (actual rows=20160.00 loops=1)
+  Rows Removed by Index Recheck: 27200     -- rows at the edges of the ranges, read and thrown away
+  Heap Blocks: lossy=256                   -- the index only knows "somewhere in these pages"
+  ->  Bitmap Index Scan on tx_brin  (actual rows=2560.00 loops=1)
+```
+
+- It works only when the physical order of rows follows the date: tables that are only appended to, such as transactions, webhook events and ledger entries.
+- It does not fit when old rows are loaded out of order, when rows are updated often, or for a lookup of one exact value. Use a B-tree there.
+- `CREATE INDEX transactions_start_brin ON transactions USING brin (start_time);`
+- Out loud: "For an append-only table ordered by time, a BRIN index on start_time is tiny and good enough for date ranges. For exact lookups I'd still use a B-tree."
+
+<Talk q="The query is slow. How do you find out why?">
+
+"I run EXPLAIN ANALYZE and read it from the most expensive node. I look at three things: a Seq Scan on a big table where I expected an index; estimated rows very different from actual rows, which is often stale statistics, so I run ANALYZE, or columns that depend on each other, which CREATE STATISTICS can fix; and a sort or hash that spills to disk. Then I fix the biggest problem first and measure again."
+
+The planner chooses a plan from its row estimates. If it expects 10 rows and gets a million, the plan was built for the wrong numbers, and the problem is not the index. An example of dependent columns is on [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+### Sorts and hashes that spill to disk
+
+A `Sort` node appears for `ORDER BY`, for `DISTINCT`, for window functions, and for some `GROUP BY` and merge joins. A `Hash` node appears for hash joins and `HashAggregate`. Each such operation gets `work_mem` of memory, 4 MB by default. What does not fit is written to temporary files and merged in parts, which is much slower on a real server. The same sort of the 8,294 transactions, by `customer_id, start_time`:
+
+```text
+-- default work_mem = 4MB
+Sort Method: quicksort  Memory: 1382kB
+-- SET LOCAL work_mem = '64kB'
+Sort Method: external merge  Disk: 1096kB
+Buffers: shared hit=200, temp read=271 written=294
+```
+
+The signs: `external merge  Disk:` for a sort, `Batches:` above 1 for a hash join, `Disk Usage:` for a hash aggregate, and `temp read/written` anywhere. What to do, in this order:
+
+1. Feed fewer rows into the operation: filter before the join, and aggregate each side in a CTE before joining (the same habit as against [row multiplication](/sql-patterns/row-multiplication/)).
+2. Feed narrower rows: only the columns you need, not `SELECT *`. Sorting just the two key columns above spills 296 kB instead of 1,096 kB.
+3. Use an index that already returns rows in the needed order; then there is no `Sort` node at all. The planner picks it for a small range, a `LIMIT` or an index-only scan. For a full pass over a table, a `Seq Scan` and one `Sort` are often cheaper (see the `ROW_NUMBER` question below).
+4. Raise `work_mem` only for this query: `BEGIN; SET LOCAL work_mem = '64MB'; …; COMMIT;`. A plain `SET` lasts for the whole session. Raising it globally is dangerous: the memory is given to each operation, so a query with three sorts on a hundred connections can use up the server's RAM.
+
+Out loud: "If I see 'external merge Disk' or more than one hash batch, the operation didn't fit in work_mem. First I'd reduce the rows and columns going into it; raising work_mem for that one query is the last step."
+
+<Talk q="Do these joins need indexes?">
+
+"Primary keys already have an index, so joining to products.id and merchants.id is fine. But PostgreSQL does not index foreign key columns automatically: transactions.product_id has no index unless I create one. If we filter or join transactions by product, for example in one product's report, I'd add an index on (product_id, start_time)."
+
+A common mistake is to think that a foreign key gives an index. In PostgreSQL only `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraints create one.
+
+</Talk>
+
+<Talk q="You take the latest row per customer with ROW_NUMBER. What about 50 million customers?">
+
+"For the whole table, an index doesn't save the work: every row is read anyway, and a sequential scan with one sort is usually cheaper than reading the table in index order. I'd check it with EXPLAIN. An index on (customer_id, product_id, start_time DESC) helps when I need one customer's latest row, or when it holds every column the query reads, so an index-only scan returns the rows already sorted. But if the service needs the current status all the time, I wouldn't compute it from history: I'd keep a current_subscriptions table with one row per customer, updated from webhooks with INSERT … ON CONFLICT DO UPDATE."
+
+On the practice data, after `CREATE INDEX ON transactions (customer_id, product_id, start_time DESC)` and `ANALYZE`, the latest row of every customer and product is still a `Seq Scan`, a `Sort` and a `WindowAgg`, with a total cost of 1085. With `SET enable_seqscan = off`, the plan reads the index and has no `Sort`, but it costs 1394: it visits the table in index order, one row at a time. For one customer (`WHERE customer_id = 'cus_00042'`), the planner does use the index, and the cost is 15. The sort also goes away when the query reads only the index columns and the table has been vacuumed: then it is an `Index Only Scan`, 602 against 1068 for a scan and a sort.
+
+</Talk>
+
+<Talk q="This report runs every hour on the production database. Any concerns?">
+
+"A heavy report should not compete with live traffic. I'd run it on a read replica, set a statement_timeout, and make it incremental: only the current month changes, the past months can be stored once. If it's a dashboard, a materialized view refreshed on a schedule is a simple first step."
+
+</Talk>
+
+<Talk q="Can we trust the number for the last month?">
+
+"Not fully. Refunds come after the purchase: in our data the median is 11 days and the longest is three weeks. So any month younger than that looks better than it really is, because some of its refunds haven't happened yet. I'd mark those months as incomplete, or compare months by the refund rate within the first 30 days after purchase, counting only purchases that already had 30 days."
+
+This is product thinking: knowing when a number is not final yet. The same holds for trial conversion: trials that started last week have not had time to convert.
+
+</Talk>
+
+How many months are incomplete depends on the maturation window: how many days after a purchase refunds still arrive. Measure it from the data, as the maximum or the 99th percentile of `refunded_at - start_time`. In the practice data it is 21 days (median 11, 90th percentile 19). "Today" is 30 September, so September is incomplete: its purchases after 9 September are younger than 21 days. August is ready, because 31 August plus 21 days is 21 September. With a 60-day window, August would be incomplete too. A fair comparison counts only purchases that are already old enough:
+
+```sql
+SELECT CAST(date_trunc('month', start_time) AS DATE) AS month,
+       ROUND(1.0 * COUNT(*) FILTER (WHERE refunded_at < start_time + INTERVAL '30 days')
+                 / COUNT(*), 4) AS refund_rate_30d
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time < TIMESTAMP '2026-09-30' - INTERVAL '30 days'   -- purchases that already had 30 days
+GROUP BY 1
+ORDER BY 1;
+```
+
+Trials last 7 days in this data, so trial conversion is incomplete only for the last week. Out loud: "I'd check how late refunds arrive in our data and treat every month younger than that as incomplete."
+
+<Talk q="What is 'a day' in your daily report?">
+
+"It depends on who reads it. I'd keep timestamps in UTC as timestamptz, and group by the business time zone only in the report, for example (start_time AT TIME ZONE 'America/New_York')::date for a timestamptz column. I'd ask which time zone finance uses, because a day in UTC and a day in New York give different numbers."
+
+</Talk>
+
+<Talk q="How would you test this query?">
+
+"First a few sanity checks: the number of rows I expect, one row recalculated by hand, and the total compared with a simpler query without grouping. Then a tiny test dataset with the edge cases: a refund, a trial, a test purchase, a sale exactly at midnight on the first day of the month, and the expected result for each."
+
+Check on this site does the second part for you: it also runs SQL answers on hidden edge-case data, such as a day with no sales, a tie, or a payout nobody expected.
+
+</Talk>
+
+<Aside type="note" title="In the interview">
+A good short answer has three parts: the tool, the reason, and a link to the task on the screen. For the webhook question:
+
+- **Tool:** "A unique key on event_id, with INSERT … ON CONFLICT DO NOTHING."
+- **Reason:** "A check in code races when two workers get the same event."
+- **Link:** "In this report, it would make the duplicate count zero."
+
+Then stop and let them choose the next level. "It depends" is a fine start if you finish the sentence: "It depends on how much of the table the range covers."
+</Aside>
+
+## Further reading
+
+- [Transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html) — the four levels, what each one allows, and the serialization errors to retry.
+- [Explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html) — row-level locks, `FOR UPDATE`, and how waits and deadlocks work.
+- [Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — `CHECK`, `NOT NULL`, `UNIQUE`, primary and foreign keys.
+- [INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT) — `DO NOTHING`, `DO UPDATE` and `EXCLUDED`.
+- [BRIN indexes](https://www.postgresql.org/docs/current/brin.html) — block range summaries, and when they help.
+
+## Related topics
+
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — constraints and `ON CONFLICT` in queries you can run.
+- [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/) — the plans behind the index answers.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — `NUMERIC`, rounding, and the ledger the debt limit is checked against.
+- [Python and SQL](/python/python-and-sql/) — parameters, N+1 and where the work belongs when Python talks to the database.
+- [Questions to ask](/start/questions-to-ask/) — the time zone and the other questions to settle before you write the query.

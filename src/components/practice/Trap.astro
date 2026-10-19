@@ -1,0 +1,86 @@
+---
+// A trap: a short query that looks right and is not. Guess, run, read the answer, fix it.
+// The answer and the fix are left out of the site search (data-pagefind-ignore).
+//   <Trap id="left-where" q="How many products out of 20 will be in the result?">The answer…</Trap>
+import { Code } from '@astrojs/starlight/components';
+import { getTrap, inline, localeOf, schemaForEditor } from './lib/data';
+import { strings } from './lib/i18n';
+import Ctx from './parts/Ctx.astro';
+import ResultTable from './parts/ResultTable.astro';
+import Workbench from './parts/Workbench.astro';
+import './practice.css';
+
+interface Props {
+  id: string;
+  /** The question, in the page language. */
+  q: string;
+}
+const { id, q } = Astro.props;
+const locale = localeOf(Astro);
+const T = strings(locale);
+const t = getTrap(id);
+const cfg = {
+  kind: 'trap',
+  id,
+  starter: t.data.sql,
+  check: !!t.fixed,
+  ordered: !!t.fixed?.ordered,
+  expected: t.fixed ? { cols: t.fixed.cols, rows: t.fixed.rows } : null,
+  edge: t.fixed?.edge ?? null,
+  schema: schemaForEditor(),
+};
+const a = t.actual;
+// The columns of the fix, as under a drill: Check compares the column count, and a fix often
+// returns other columns than the trap (one count instead of two, say). No order line: the two
+// ordered fixes keep the order the trap already shows, and the full ORDER BY would give one away.
+const fixCols = t.fixed ? t.fixed.cols.join(', ') : '';
+---
+<section class="lcp lcp-trap" data-lcp="trap" data-id={id}>
+  <script type="application/json" data-lcp-cfg set:html={JSON.stringify(cfg).replace(/</g, '\\u003c')} />
+  <header class="lcp-head not-content">
+    <span class="lcp-badge lcp-badge-trap">{T.sql}</span>
+    <span class="lcp-kind">{T.trap}</span>
+    {t.data.core && <span class="lcp-tag">{T.core}</span>}
+    <span class="lcp-solved" data-solved hidden>✓ {T.solved}</span>
+  </header>
+  <p class="lcp-q" set:html={inline(q)} />
+  <p class="lcp-small lcp-muted not-content">{T.trapGuess}{t.fixed ? ` ${T.fixThen}` : ''}</p>
+  {fixCols && (
+    <p class="lcp-small not-content lcp-spec">
+      <span><strong>{T.outputCols}</strong> <code>{fixCols}</code></span>
+    </p>
+  )}
+  <Ctx ctx={t.ctx} locale={locale} />
+  <Workbench locale={locale} lang="sql" code={t.data.sql} check={!!t.fixed} />
+  <details class="lcp-answer" data-answer>
+    <summary class="not-content">{T.showAnswer}</summary>
+    <div class="lcp-answer-body" data-pagefind-ignore>
+      {Astro.slots.has('default') && (
+        <div class="lcp-explain">
+          <slot />
+        </div>
+      )}
+      <div class="not-content">
+        <p class="lcp-small lcp-muted lcp-recorded">{T.trapRecorded}</p>
+        {a.error ? (
+          <div class="lcp-banner lcp-fail"><span class="lcp-icon" aria-hidden="true">✕</span><div class="lcp-banner-body"><strong>{T.error}</strong><div class="lcp-mono">{a.error}</div>{a.hint && <div class="lcp-mono lcp-small">HINT: {a.hint}</div>}</div></div>
+        ) : (
+          <ResultTable cols={a.cols ?? []} rows={a.rows ?? []} />
+        )}
+      </div>
+      {t.fixed && t.data.fix && (
+        <details class="lcp-fix">
+          <summary class="not-content">{T.showFix}</summary>
+          <Code code={t.data.fix.trimEnd()} lang="sql" />
+          <div class="not-content">
+            <ResultTable cols={t.fixed.cols} rows={t.fixed.sample} rowsLabel={`${T.rows(t.fixed.n)}${t.fixed.n > t.fixed.sample.length ? ` (${T.shownFirst(t.fixed.sample.length)})` : ''}`} />
+          </div>
+        </details>
+      )}
+    </div>
+  </details>
+</section>
+
+<script>
+  import './lib/client';
+</script>

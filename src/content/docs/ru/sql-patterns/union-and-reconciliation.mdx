@@ -1,0 +1,186 @@
+---
+title: UNION ALL и сверка
+description: Две ленты в одном отчёте через UNION ALL и два источника рядом через FULL OUTER JOIN, COALESCE для ключей и статус у каждой строки.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+В части задач в одном запросе нужны два набора строк. Отчёт о движении денег складывает продажи и возвраты в одну ленту. Сверка (reconciliation) ставит два источника рядом и ищет, чего не хватает с любой стороны. Неверный инструмент ломается без ошибки: `UNION` теряет одинаковые суммы, `LEFT JOIN` прячет одну сторону, а фильтр не на своём месте выбрасывает именно те строки, ради которых отчёт и нужен.
+
+<Aside type="tip" title="Коротко">
+- Две ленты с одинаковыми колонками: `UNION ALL`, у каждой ветки своя дата, потом одна группировка по результату.
+- Для денег никогда не `UNION`: он убирает одинаковые строки, как `DISTINCT`.
+- Два источника по ключу: каждую сторону свернуть до ключа в своём CTE, потом `FULL OUTER JOIN`.
+- Ключи через `COALESCE(a.key, b.key)`. Статус в `CASE` сначала проверяет наличие (missing, unexpected), потом суммы (mismatch).
+- Фильтры по датам — внутри CTE, а не в `WHERE` после соединения.
+</Aside>
+
+## UNION ALL: строки одна под другой
+
+`JOIN` кладёт строки рядом: колонок становится больше. `UNION ALL` кладёт их одну под другой: строк становится больше. Он нужен, когда два набора строк описывают одно и то же: продажи и возвраты, авансы и погашения, события из двух таблиц. Слова в задаче, которые на него указывают: *cash flow*, *movements*, *sales and refunds*, *all events*.
+
+Пример: платные продажи prd_09 за сентябрь 2026 со знаком плюс и его возвраты со знаком минус.
+
+```sql
+WITH movements AS (
+    SELECT 'sale' AS kind, start_time AS at, charged_usd AS amount
+    FROM transactions
+    WHERE product_id = 'prd_09'
+      AND NOT is_test AND NOT is_trial AND channel <> 'promo'
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    UNION ALL
+    SELECT 'refund', refunded_at, -charged_usd
+    FROM transactions
+    WHERE product_id = 'prd_09'
+      AND NOT is_test AND NOT is_trial AND channel <> 'promo'
+      AND refunded_at >= TIMESTAMP '2026-09-01'
+      AND refunded_at <  TIMESTAMP '2026-10-01'
+)
+SELECT kind, COUNT(*) AS n, SUM(amount) AS usd
+FROM movements
+GROUP BY kind
+ORDER BY kind;
+```
+
+| kind | n | usd |
+|---|---|---|
+| refund | 2 | -15.98 |
+| sale | 15 | 329.85 |
+
+Чистый итог за сентябрь — `SUM(amount)` по всей ленте: 313,87.
+
+### У каждой ветки своя дата
+
+Продажа относится к месяцу `start_time`. Возврат — к месяцу `refunded_at`. Поэтому каждая ветка — полный `SELECT` со своим `WHERE`. Возврат t_000482 показывает, зачем: покупка была 20 августа, возврат — 2 сентября. Возврат попал в сентябрьскую ленту, а его продажа — нет. Один общий фильтр по `start_time` перенёс бы этот возврат в август.
+
+### Правила UNION ALL
+
+1. Колонки совпадают по позиции, а не по имени. У веток должно быть одинаковое число колонок и совместимые типы. Имена берутся из первой ветки.
+2. Ошибка здесь падает громко. Не хватает колонки — `each UNION query must have the same number of columns`. Колонки перепутаны местами — `invalid input syntax for type numeric: "sale"`.
+3. `ORDER BY` и `LIMIT` в самом конце относятся ко всему результату. Фильтр, одинаковый для обеих веток, можно поставить снаружи, на ленту. Первое упражнение ниже так и делает с `month`.
+4. Колонка-метка (`'sale'`, `'refund'`) потом помогает считать по видам.
+
+## Почему не UNION
+
+`UNION` без `ALL` убирает одинаковые строки во всём результате, как `DISTINCT`. Та же лента, но только с колонкой суммы:
+
+| | строк | сумма |
+|---|---|---|
+| `UNION ALL` | 17 | 313.87 |
+| `UNION` | 3 | 49.99 |
+
+Пятнадцать продаж — это 10 по 7,99 и 5 по 49,99. `UNION` оставил по одной строке на каждое значение: 7,99, 49,99 и −7,99. Деньги пропали, и ошибки не было.
+
+Правило: для денег и событий — `UNION ALL`. `UNION` — только для списка уникальных значений, например всех `merchant_id`, которые встречаются в двух таблицах.
+
+## Почему не JOIN
+
+`JOIN` сентябрьских продаж с сентябрьскими возвратами по `product_id` возвращает 15 × 2 = 30 строк. Каждая продажа склеилась с каждым возвратом, и продажи в сумме дают 659,70 вместо 329,85. Связи «эта продажа — этот возврат» здесь нет. Отчёту нужна одна лента, а не пары. Подробно этот эффект разобран в [размножении строк](/sql-patterns/row-multiplication/).
+
+## Сверка: FULL OUTER JOIN
+
+Сверка сравнивает два источника по ключу, когда строки может не быть с любой стороны: ожидаемое и полученное, наш учёт и выписка банка, авансы и выплаты маркетплейсов, которые их гасят. Слова в задаче: *reconcile*, *compare*, *side by side*, *missing on either side*.
+
+`LEFT JOIN` сохраняет все строки левой стороны. `FULL OUTER JOIN` сохраняет все строки обеих сторон и ставит NULL там, где пары нет.
+
+Пример из программы авансов. За каждый месяц с авансом должна прийти выплата канала продаж за этот месяц и покрыть долг продавца (merchant) за него: аванс плюс комиссию. Вот mer_09, выплаты с мая, чтобы были видны и месяцы до первого аванса.
+
+```sql
+WITH adv AS (                                                 -- 1. каждую сторону свернуть до ключа
+    SELECT channel, period_month, SUM(amount_usd + fee_usd) AS owed_usd
+    FROM advances
+    WHERE merchant_id = 'mer_09'
+    GROUP BY channel, period_month
+),
+paid AS (
+    SELECT channel, period_month, SUM(amount_usd) AS paid_usd
+    FROM channel_payouts
+    WHERE merchant_id = 'mer_09'
+      AND period_month >= DATE '2026-05-01'                   -- 2. фильтры внутри CTE
+    GROUP BY channel, period_month
+)
+SELECT COALESCE(a.channel, p.channel)           AS channel,   -- 3. ключи через COALESCE
+       COALESCE(a.period_month, p.period_month) AS period_month,
+       a.owed_usd,
+       p.paid_usd,
+       CASE WHEN p.channel IS NULL       THEN 'missing'       -- 4. один статус на строку
+            WHEN a.channel IS NULL       THEN 'unexpected'
+            WHEN p.paid_usd < a.owed_usd THEN 'mismatch'
+            ELSE 'ok'
+       END AS status
+FROM adv a
+FULL OUTER JOIN paid p
+  ON p.channel = a.channel AND p.period_month = a.period_month
+ORDER BY period_month, channel;
+```
+
+| channel | period_month | owed_usd | paid_usd | status |
+|---|---|---|---|---|
+| north_market | 2026-05-01 | NULL | 137.57 | unexpected |
+| south_market | 2026-05-01 | NULL | 231.06 | unexpected |
+| north_market | 2026-06-01 | 383.53 | 531.94 | ok |
+| south_market | 2026-06-01 | 176.41 | 244.67 | ok |
+| north_market | 2026-07-01 | 195.98 | 135.91 | mismatch |
+| south_market | 2026-07-01 | 128.63 | 178.40 | ok |
+| north_market | 2026-08-01 | 143.31 | NULL | missing |
+| south_market | 2026-08-01 | 128.63 | 178.40 | ok |
+
+Как читать:
+
+- **Май, unexpected.** Выплаты пришли, а аванса ещё не было: mer_09 подключился к программе 16 июня. С точки зрения программы здесь гасить нечего.
+- **Июль, North Market, mismatch.** Выплата 135,91 не покрывает долг 195,98. За этот месяц выдали два аванса — это дубль, его находит [Q13](/sql-tasks/money-and-reconciliation/).
+- **Август, North Market, missing.** Аванс есть, выплаты нет. North Market платит примерно через 32 дня после конца месяца, поэтому эту выплату ждут не раньше октября. Настоящему отчёту нужен для неё статус «срок ещё не наступил»; в Q12 он есть.
+
+### Четыре правила
+
+1. **Сначала свернуть каждую сторону до ключа.** У mer_09 два аванса за июль в North Market. Если соединить сырые таблицы, одна строка выплаты встретится с обоими авансами: `paid_usd` станет 271,82, то есть дважды 135,91, и расхождение исчезнет.
+2. **Ключи брать через `COALESCE`.** В строке, которая есть только справа, `a.channel` равен NULL. Без `COALESCE` у майских строк `channel` был бы пустым.
+3. **Сначала наличие, потом суммы.** Сравнение с NULL даёт NULL, и `CASE` проваливается в `ELSE`. Без двух веток `IS NULL` строки missing и unexpected все получают 'ok'. Когда суммы приходят из разных источников, сравнивайте с допуском, например `ABS(a - b) > 1.00`, а не через `<>`.
+4. **Фильтры — внутри CTE.** Условие на одну сторону в `WHERE` после соединения выкидывает строки, где этой стороны нет. Если перенести фильтр выплат по дате в `WHERE p.period_month >= DATE '2026-05-01'`, останется 7 строк из 8: пропадёт августовская строка missing, ради которой сверка и делается. `LEFT JOIN` от авансов неверен по той же причине: 6 строк, и пропадают майские выплаты.
+
+То же разделение на три группы в Python — операции множеств над ключами словаря: см. [множества и дубли](/python/sets-and-duplicates/).
+
+## Практика
+
+<Drill id="s-union">
+
+Продажи и возвраты — две ленты с одинаковыми колонками: `UNION ALL`, потом одна группировка по месяцу. Каждая ветка считает свой месяц: продажа — по `start_time`, возврат — по `refunded_at`, поэтому в ветке возвратов остаются только строки с `refunded_at IS NOT NULL`. Фильтр по датам можно поставить снаружи, на `month`: эту колонку дают обе ветки. `UNION` без `ALL` склеил бы две продажи на одну сумму в одном месяце в одну строку. Округлять — один раз, после `SUM`.
+
+</Drill>
+
+<Drill id="s-full-outer">
+
+Сверка двух источников, где строки может не быть с любой стороны: `FULL OUTER JOIN`. Каждую сторону свернуть до (channel, period_month) в своём CTE и отфильтровать месяцы внутри обоих CTE. Ключи — через `COALESCE`, иначе в строке, которая есть только справа, `channel` будет NULL. В мае есть выплаты, но нет авансов. У трёх авансов нет выплаты: за июль в North Market и за август в обоих каналах. `LEFT JOIN` с любой стороны теряет одну из этих групп: от авансов пропадёт май, от выплат — эти три аванса. Все 8 строк возвращает только `FULL OUTER JOIN`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Сверка укладывается в три фразы. Произносите их по порядку, пока печатаете:
+
+1. «Either side can miss a row, so I'll use FULL OUTER JOIN.»
+2. «Each side goes down to channel and month first, so one payout can't meet two advances.»
+3. «The status checks presence before amounts, because a comparison with NULL is never true.»
+
+Для ленты продаж и возвратов хватит одной фразы: «Same columns, so UNION ALL. Plain UNION would merge two sales of the same amount.»
+
+Если следующий вопрос — «А месяц, которого нет с обеих сторон?», ответ: «Then neither CTE has a row for it. I'd put a calendar of months on the left.» Календарь — на странице [календари и активные периоды](/sql-patterns/calendars-and-active-periods/).
+</Aside>
+
+## Что почитать
+
+- [Combining queries](https://www.postgresql.org/docs/current/queries-union.html) — `UNION`, `INTERSECT`, `EXCEPT` и почему `ALL` сохраняет повторы.
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — `FULL OUTER JOIN` и чем `ON` отличается от `WHERE`.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — первое значение, которое не NULL.
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) — ветки проверяются по порядку, побеждает первая истинная.
+
+## Связанные темы
+
+- [Размножение строк](/sql-patterns/row-multiplication/) — почему каждую сторону сворачивают до ключа до соединения.
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — односторонний вариант и почему фильтр на правую таблицу в `WHERE` его ломает.
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — по CTE на сторону, и сверка читается легко.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — программа авансов и её журнал.
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — уникальный ключ, который не пускает дубль аванса или выплаты.
+- [Деньги и сверка](/sql-tasks/money-and-reconciliation/) — Q12 и Q13 используют оба приёма этой страницы.

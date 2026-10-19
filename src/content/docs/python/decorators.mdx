@@ -1,0 +1,265 @@
+---
+title: Decorators
+description: "Functions as values, closures, a decorator with functools.wraps, state kept on the wrapper, and a decorator with a parameter such as retry(times)."
+sidebar:
+  order: 9
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Decorator tasks are common in Python rounds: count the calls, log or time a function, retry a flaky call, cache a slow one. Each is about ten lines, but only if three ideas are clear. A function is a value. An inner function remembers the variables of the outer one. The wrapper replaces the original function.
+
+<Aside type="tip" title="TL;DR">
+- `@deco` above `def f` means `f = deco(f)`: a function that takes a function and returns a new one.
+- The wrapper takes `*args, **kwargs`, calls `func` and **returns** its result.
+- Put `@functools.wraps(func)` on the wrapper. It keeps `__name__` and `__doc__` and adds `__wrapped__`.
+- `calls += 1` inside the wrapper fails with `UnboundLocalError`. Use `nonlocal`, or keep the state as an attribute of the wrapper.
+- A decorator with a parameter, `@retry(times=3)`, has one more level: a function that returns the decorator.
+</Aside>
+
+## Functions are values
+
+A function is an object like any other. You can put it in a dict, pass it as an argument and return it from another function. An event processor often picks the handler from a dict by the event type:
+
+```python
+def on_purchase(event):
+    return f"new subscription for {event['customer_id']}"
+
+
+def on_refund(event):
+    return f"refund for {event['customer_id']}"
+
+
+handlers = {"purchase": on_purchase, "refund": on_refund}
+
+event = {"type": "refund", "customer_id": "cus_02564"}
+print(handlers[event["type"]](event))
+```
+
+```text
+refund for cus_02564
+```
+
+`sorted(rows, key=...)` uses the same idea: you pass a function, and `sorted` calls it for every row.
+
+## Closures
+
+A function defined inside another function can read the outer function's variables, even after the outer one has returned. This is a closure.
+
+```python
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def make_fee(rate):
+    def fee(amount):
+        return (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return fee
+
+
+market_fee = make_fee(Decimal("0.15"))
+print(market_fee(Decimal("9.99")))
+```
+
+```text
+1.50
+```
+
+`market_fee` remembers `rate`. Reading an outer variable is free. Assigning to it is not: an assignment makes the name local to the inner function, and the local name has no value yet.
+
+```python
+def count_calls(func):
+    calls = 0
+
+    def wrapper(*args, **kwargs):
+        calls += 1
+        return func(*args, **kwargs)
+    return wrapper
+
+
+@count_calls
+def fee(amount):
+    return amount * 2
+
+
+fee(10)
+```
+
+```text
+UnboundLocalError: cannot access local variable 'calls' where it is not associated with a value
+```
+
+There are two ways out:
+
+- **`nonlocal calls`** in the wrapper. It works, but the counter lives inside the closure, and nobody outside can read it: `fee.calls` raises `AttributeError: 'function' object has no attribute 'calls'`.
+- **An attribute on the wrapper.** After `@count_calls`, the name `fee` *is* the wrapper, so `fee.calls` is visible from outside. Set the attribute once, after `def wrapper`, and change it inside. The drill below asks for exactly this.
+
+## A decorator with functools.wraps
+
+```python
+import functools
+
+
+def log_calls(func):
+    @functools.wraps(func)          # without this line: see the second output
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        print(f"{func.__name__}{args} -> {result!r}")
+        return result
+    return wrapper
+
+
+@log_calls
+def normalise_channel(name):
+    """Channel name in lower case, without spaces."""
+    return name.strip().lower()
+
+
+normalise_channel(" North_Market ")
+print(normalise_channel.__name__, "|", normalise_channel.__doc__)
+print(normalise_channel.__wrapped__(" South_Market "))
+```
+
+```text
+normalise_channel(' North_Market ',) -> 'north_market'
+normalise_channel | Channel name in lower case, without spaces.
+south_market
+```
+
+The same code without the `wraps` line:
+
+```text
+normalise_channel(' North_Market ',) -> 'north_market'
+wrapper | None
+AttributeError: 'function' object has no attribute '__wrapped__'
+```
+
+Without `wraps`, logs, tracebacks and tools see every decorated function as `wrapper`, and the docstring is lost. With it, the name, the docstring and the signature that `help()` shows come from the original. `__wrapped__` gives the original function, for example to test it without the decorator.
+
+Two more details:
+
+- The most common bug is a missing `return` in the wrapper. The decorated function then returns `None`.
+- Stacked decorators apply from the bottom up: `@a` above `@b` above `def f` means `f = a(b(f))`.
+
+<Talk q="What does functools.wraps do, and where do you put it?">
+
+"It goes on the inner wrapper, because the wrapper replaces the original function. It copies the name, the docstring and the module of the original onto the wrapper, and it sets `__wrapped__` to the original. So logs and tracebacks show the real name, `help()` and `inspect.signature` follow `__wrapped__` to the real signature, and tests can call the original."
+
+A typical slip is to put `@functools.wraps` above the outer function. It belongs directly above `def wrapper`.
+
+</Talk>
+
+## A decorator with a parameter
+
+`@retry(times=3)` first calls `retry(times=3)`. That call returns the real decorator, and the decorator then receives the function. So there is one more level:
+
+```python
+import functools
+
+
+def retry(times, exceptions=(TimeoutError,)):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(1, times + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions:
+                    print(f"attempt {attempt} failed")
+                    if attempt == times:
+                        raise
+        return wrapper
+    return decorator
+
+
+answers = iter([TimeoutError("slow"), TimeoutError("slow"), "1.08"])
+
+
+@retry(times=3)
+def fetch_rate():
+    answer = next(answers)
+    if isinstance(answer, Exception):
+        raise answer
+    return answer
+
+
+print(fetch_rate())
+print(fetch_rate.__name__)
+```
+
+```text
+attempt 1 failed
+attempt 2 failed
+1.08
+fetch_rate
+```
+
+A bare `raise` after the last attempt re-raises the last error with its original traceback. A real retry also waits between attempts and retries only temporary errors: see [Errors and validation](/python/errors-and-validation/).
+
+The usual mistake is `@retry` without parentheses. Then `retry` receives the function as `times`, and the first call fails:
+
+```text
+TypeError: retry.<locals>.decorator() missing 1 required positional argument: 'func'
+```
+
+## Ready-made decorators
+
+When the result never goes stale, you do not have to write a cache:
+
+```python
+import functools
+
+
+@functools.lru_cache(maxsize=128)
+def exchange_rate(currency):
+    print(f"calling the rates API for {currency}")
+    return {"EUR": "1.08", "GBP": "1.27"}[currency]
+
+
+exchange_rate("EUR")
+exchange_rate("EUR")
+exchange_rate("GBP")
+print(exchange_rate.cache_info())
+```
+
+```text
+calling the rates API for EUR
+calling the rates API for GBP
+CacheInfo(hits=1, misses=2, maxsize=128, currsize=2)
+```
+
+`functools.cache` is the same without a size limit. Neither forgets an entry after some time. So neither fits data that changes, like an exchange rate that updates every hour. That is why a cache with expiry (TTL) is a separate task in [Caching and rate limits](/python-tasks/caching-and-rate-limits/). `@property`, `@staticmethod`, `@classmethod` and `@dataclass` are decorators too: see [Classes and state](/python/classes-and-state/).
+
+## Practice
+
+<Drill id="y-decorator">
+
+The wrapper replaces the function, so the counter lives on the wrapper: `wrapper.calls = 0` after the definition, `wrapper.calls += 1` inside. `functools.wraps` goes on the wrapper as well: it copies `__name__` and `__doc__` and adds `__wrapped__`. A decorator with a parameter, such as `retry(times)`, is one level deeper.
+
+</Drill>
+
+<Drill id="y-retry">
+
+Three levels: `retry(times, exceptions)` checks its arguments and returns the decorator, the decorator receives the function, and the wrapper runs the attempts. `except exceptions` accepts a tuple, so only the listed errors are retried: the `ValueError` in the third check goes up on the first call. On the last attempt a bare `raise` re-raises the error that is being handled, the last one, with its traceback. Raising a saved first error would hide what happened at the end, and the second check expects `try 3`. `range(1, times + 1)` makes `times` the total number of calls, not the number of retries after the first call; in an interview, ask which one is meant. A real retry also waits between attempts, with backoff and jitter: see [Errors and validation](/python/errors-and-validation/).
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Write what the `@` line means as a comment above the function, so you and the interviewer read the same thing: `# charge = count_calls(charge)`. With a parameter it becomes `# fetch_rate = retry(times=3)(fetch_rate)`, and the extra level of nesting explains itself.
+
+Then one sentence covers the design: *"The wrapper replaces the function, so wraps goes on the wrapper, and the counter is an attribute of the wrapper."* If asked whether the counter is thread-safe: *"No, += 1 is read, add, write. A threading.Lock around it fixes that"* (threads are on [Python and SQL](/python/python-and-sql/)).
+</Aside>
+
+## Further reading
+
+- [functools.wraps](https://docs.python.org/3/library/functools.html#functools.wraps) — what it copies, and `update_wrapper` behind it.
+- [functools.lru_cache](https://docs.python.org/3/library/functools.html#functools.lru_cache) — the built-in cache and `cache_info()`.
+- [Function definitions](https://docs.python.org/3/reference/compound_stmts.html#function-definitions) — the decorator syntax and what it is equivalent to.
+- [The nonlocal statement](https://docs.python.org/3/reference/simple_stmts.html#the-nonlocal-statement) — assigning to a variable of the outer function.
+
+## Related topics
+
+- [Classes and state](/python/classes-and-state/) — when the state grows, a small class reads better than attributes on a function.
+- [Caching and rate limits](/python-tasks/caching-and-rate-limits/) — a TTL cache written as a decorator with parameters and counters.
+- [Errors and validation](/python/errors-and-validation/) — which errors a retry decorator should catch, and how long to wait.
+- [Time windows](/python/time-windows/) — another kind of state that tests drive with an injected clock.

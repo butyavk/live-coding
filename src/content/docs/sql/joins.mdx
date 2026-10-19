@@ -1,0 +1,157 @@
+---
+title: Joins
+description: JOIN in interview queries. Primary and foreign keys, how transactions reach products and merchants, ON or USING, and what a join does to the row count.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+The numbers a report needs are often spread over several tables: revenue is in `transactions`, the merchant's name is in `merchants`. A `JOIN` glues rows together by a key. Before you write one, know which column links which tables, and what the join will do to the number of rows.
+
+<Aside type="tip" title="TL;DR">
+- A primary key identifies a row (`merchants.id`); a foreign key points to it (`products.merchant_id`).
+- A transaction reaches its merchant through `products`: `JOIN products p ON p.id = t.product_id JOIN merchants m ON m.id = p.merchant_id`.
+- `ON` when the column names differ; `USING (col)` only when both sides use the same name for the same thing.
+- A join to the "one" side keeps the row count; a join to the "many" side multiplies it. Count rows before and after.
+- Group by the key (`m.id`), not only by the name.
+</Aside>
+
+## Keys and how the tables connect
+
+A primary key is a column whose value is unique and never NULL: one value, one row. `merchants.id` and `products.id` are primary keys. A foreign key is a column that points to the primary key of another table: `products.merchant_id` points to `merchants.id`. The direction tells you the relationship. One merchant has many products; one product has one merchant.
+
+| Column | Points to | Relationship |
+|---|---|---|
+| `products.merchant_id` | `merchants.id` | a merchant has many products |
+| `transactions.product_id` | `products.id` | a product has many transactions |
+| `webhook_events.product_id` | `products.id` | a product has many events |
+| `channel_payouts.merchant_id` | `merchants.id` | a merchant has many payouts |
+| `advances.merchant_id` | `merchants.id` | a merchant has many advances |
+| `ledger_entries.merchant_id` | `merchants.id` | a merchant has many ledger entries |
+| `ledger_entries.advance_id` | `advances.advance_id` | an advance has several ledger entries |
+
+`merchants` and `products` call their own key `id`; the other tables call it `merchant_id` or `product_id`. `transactions` has no merchant column. A transaction reaches its merchant only through `products`.
+
+## A join that keeps one row per transaction
+
+```sql
+FROM transactions t
+JOIN products p  ON p.id = t.product_id
+JOIN merchants m ON m.id = p.merchant_id
+```
+
+Each transaction has exactly one product, and each product has exactly one merchant. Every step joins to the "one" side, so the join adds columns and keeps the rows. Check it instead of assuming it:
+
+```sql
+SELECT (SELECT COUNT(*) FROM transactions) AS transactions,
+       COUNT(*)                            AS after_join
+FROM transactions t
+JOIN products p  ON p.id = t.product_id
+JOIN merchants m ON m.id = p.merchant_id;
+```
+
+| transactions | after_join |
+|---|---|
+| 8294 | 8294 |
+
+`JOIN` (an inner join) keeps only rows that have a match on both sides. Here every transaction has a product and every product has a merchant, so nothing is lost. When the other side may be missing, an inner join drops the row without a word: see [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+
+## ON or USING
+
+`ON` takes any condition: `ON p.id = t.product_id`. `USING (col)` is a short form of "the column with this name is equal on both sides". Both tables need a column with that name, and the output gets one merged column instead of two.
+
+`ledger_entries.advance_id` and `advances.advance_id` share the name, so `USING` fits:
+
+```sql
+SELECT advance_id, v.amount_usd, l.entry_type, l.amount_usd AS entry_usd
+FROM advances v
+JOIN ledger_entries l USING (advance_id)
+WHERE advance_id = 'adv_0001'
+ORDER BY l.entry_id;
+```
+
+| advance_id | amount_usd | entry_type | entry_usd |
+|---|---|---|---|
+| adv_0001 | 68.38 | advance | 68.38 |
+| adv_0001 | 68.38 | fee | 2.05 |
+| adv_0001 | 68.38 | repayment | -70.43 |
+
+The advance of 68.38 has three ledger entries: the advance, its fee and the repayment. Their sum is 0, so this advance is fully repaid.
+
+When the names differ, `USING` fails. When the names match but the meaning does not, it is worse:
+
+- `products p JOIN merchants m USING (merchant_id)` fails: `column "merchant_id" specified in USING clause does not exist in right table`.
+- `merchants m JOIN products p USING (id)` runs and returns 0 rows. It compares `mer_01` with `prd_01`: both tables call their key `id`, but they are different keys.
+- `NATURAL JOIN` joins on every column with the same name. `advances NATURAL JOIN ledger_entries` matches `advance_id`, `merchant_id`, `amount_usd` and `created_at` at once, and returns 38 rows instead of 104. Do not use it in an interview.
+
+## What a join does to the row count
+
+Count the rows of the table that sets the grain, then count again after the join. A join to the "many" side repeats every row of the "one" side:
+
+```sql
+SELECT (SELECT COUNT(*) FROM advances)        AS advances,
+       (SELECT SUM(amount_usd) FROM advances) AS advanced_usd,
+       COUNT(*)                               AS rows_after_join,
+       SUM(v.amount_usd)                      AS advanced_after_join
+FROM advances v
+JOIN ledger_entries l ON l.advance_id = v.advance_id;
+```
+
+| advances | advanced_usd | rows_after_join | advanced_after_join |
+|---|---|---|---|
+| 38 | 4824.32 | 104 | 13129.33 |
+
+38 advances become 104 rows, and the sum of `v.amount_usd` after the join is almost three times the real total. This is row multiplication (fan-out). The usual fix is to aggregate the "many" side first, to one row per key, and join after that. [Row multiplication](/sql-patterns/row-multiplication/) shows the pattern in detail.
+
+| Join | Example | Rows after |
+|---|---|---|
+| to the "one" side | transaction → product → merchant | the same as before |
+| to the "many" side | advance → ledger entries | more than before |
+| "many" with "many" | a merchant's transactions × the same merchant's advances | the product of both |
+
+## Group by the key, show the name
+
+Two merchants can have the same name. `GROUP BY m.name` would then merge their numbers into one row. Group by the key and show the name: `GROUP BY m.id, m.name`. Because `m.id` is the primary key, PostgreSQL also accepts `GROUP BY m.id` alone.
+
+## When a merchant sells in several currencies
+
+A schema question often follows a join task. In the practice data every amount is already in US dollars: `charged_usd`, `revenue_usd`. Real merchants usually charge customers in their own currency, and the schema has to change for that.
+
+<Talk q="A merchant now sells the same plan in several currencies. How would you change the schema?">
+
+"I'd keep the amount and the currency code on each transaction, exactly as the customer was charged: for example 9.99 and EUR. Then I'd add an exchange-rate table with one rate per currency and day. A report in dollars joins each transaction to the rate of its own date and converts there. I'd never overwrite the original amount, because a refund must return what the customer paid. And amounts and rates are NUMERIC, not float."
+
+A common short answer is "add a currency column". The key part is the date of the rate: with the rate of the transaction date, last month's revenue does not change when today's rate moves. Ask what happens on a day with no rate, such as a weekend: usually the last rate before that date is used.
+
+</Talk>
+
+## Practice
+
+<Drill id="s-join">
+
+A transaction reaches its merchant only through `products`. Each transaction has exactly one product and each product one merchant, so the rows do not multiply. `GROUP BY m.id, m.name` keeps two merchants with the same name apart.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Say the path one link at a time, and put the row count at the end of it: "transactions to products on product_id, products to merchants on merchant_id. Both steps go to the 'one' side, so I still have one row per transaction." If you are not sure, run `COUNT(*)` before and after the join; it takes a few seconds.
+
+A possible next question: "What if some products had no merchant?" A short answer: "Then the inner join drops their transactions. I'd switch to a LEFT JOIN and show them with a NULL name, or ask if they should count at all."
+</Aside>
+
+## Further reading
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — inner and outer joins, `ON`, `USING` and `NATURAL`.
+- [Joins between tables](https://www.postgresql.org/docs/current/tutorial-join.html) — the tutorial chapter, with small examples.
+- [Primary keys](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-PRIMARY-KEYS) and [foreign keys](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK) — the constraints behind "one" and "many".
+- [FROM clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-FROM) — the full join syntax in the `SELECT` reference.
+
+## Related topics
+
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — keep the rows that have no match.
+- [Row multiplication](/sql-patterns/row-multiplication/) — aggregate before you join two "many" sides.
+- [Practice dataset](/start/dataset/) — every table and column used in the examples.
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — aggregate in a named step, then join the result.
+- [Database concepts](/sql-patterns/database-concepts/) — keys and constraints when the talk turns to schema design.

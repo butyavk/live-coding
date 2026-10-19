@@ -1,0 +1,227 @@
+---
+title: Календари и активные периоды
+description: Каждый день в отчёте, даже без продаж, через generate_series и LEFT JOIN; «активна на момент» со скобками вокруг OR; MRR по активным подпискам.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+«Выручка за каждый день сентября». «Активные подписки на 1 июня». «MRR на конец месяца». За этими задачами стоят две идеи. У дня без данных нет строки, поэтому дни нужно построить самим. А подписка — это период, а не событие: «активна на момент» — условие на оба её конца и ещё на возврат.
+
+<Aside type="tip" title="Коротко">
+- Каждый день, даже с нулём: `generate_series` → `LEFT JOIN` дневных итогов → `COALESCE(x, 0)`.
+- Сначала свернуть данные до строки на день в CTE, потом соединять с календарём.
+- Активна в момент m: `start_time <= m AND end_time > m AND (refunded_at IS NULL OR refunded_at > m)`.
+- Вокруг `OR` всегда скобки. `AND` связывает сильнее, и без скобок получится 988 вместо 940.
+- MRR: сумма по подпискам, активным в момент m, где цена каждой приведена к месяцу: недельная × `52.0 / 12`, годовая × `1.0 / 12`.
+</Aside>
+
+## У дня без данных нет строки
+
+`GROUP BY` строит группы из тех строк, что есть. У продавца (merchant) mer_01 не было продаж с 5 по 8 сентября, поэтому в его дневном отчёте за 1–10 сентября пять строк, а не десять (запрос — на странице [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/)). Эти дни не нулевые. Их просто нет. График их пропустит, `LAG` сравнит 9 сентября с 4-м, а скользящее среднее по 7 строкам захватит больше семи дней.
+
+## Календарь через generate_series
+
+`generate_series(start, stop, step)` возвращает по строке на каждый шаг. Оба конца включены:
+
+```sql
+SELECT CAST(d AS DATE) AS day
+FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-05', INTERVAL '1 day') AS g(d);
+```
+
+| day |
+|---|
+| 2026-09-01 |
+| 2026-09-02 |
+| 2026-09-03 |
+| 2026-09-04 |
+| 2026-09-05 |
+
+Концы пишите как `TIMESTAMP '…'`. Со строками без типа функция тоже работает, но возвращает `timestamp with time zone` — другой тип, чем у колонок. В отличие от полуоткрытого фильтра по `start_time`, конец здесь — последний нужный день.
+
+Полный приём: календарь во `FROM`, дневные итоги в CTE, `LEFT JOIN` между ними и `COALESCE` для дней без пары.
+
+```sql
+WITH days AS (
+    SELECT CAST(d AS DATE) AS day
+    FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-10', INTERVAL '1 day') AS g(d)
+),
+daily AS (
+    SELECT CAST(t.start_time AS DATE) AS day, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE p.merchant_id = 'mer_01'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT d.day, COALESCE(s.net_usd, 0) AS net_usd
+FROM days d
+LEFT JOIN daily s ON s.day = d.day
+ORDER BY d.day;
+```
+
+| day | net_usd |
+|---|---|
+| 2026-09-01 | 6.99 |
+| 2026-09-02 | 0.00 |
+| 2026-09-03 | 13.98 |
+| 2026-09-04 | 6.99 |
+| 2026-09-05 | 0 |
+| 2026-09-06 | 0 |
+| 2026-09-07 | 0 |
+| 2026-09-08 | 0 |
+| 2026-09-09 | 6.99 |
+| 2026-09-10 | 0 |
+
+Десять строк, по одной на день. Обратите внимание на два вида нуля. 2 сентября строка настоящая: бесплатный триал с ценой 0,00. 5 сентября строки нет совсем, и 0 туда ставит `COALESCE`.
+
+Три правила, которые сохраняют нули:
+
+- **Календарь слева.** Он решает, какие строки будут; данные их только заполняют.
+- **Фильтры по данным — внутри их CTE** (или в `ON`). Условие на `s` в `WHERE` после соединения снова уберёт пустые дни. См. [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+- **Агрегировать до соединения.** Соединяйте календарь с дневными итогами, а не с сырыми транзакциями. Иначе считаются строки соединения, и пустой день превращается в 1.
+
+С месяцами то же самое: `generate_series(TIMESTAMP '2026-01-01', TIMESTAMP '2026-09-01', INTERVAL '1 month')` и `date_trunc('month', start_time)` на стороне данных. Если в задаче не сказано, спросите: «Should days with no sales be in the result, with zero?»
+
+## Активна на момент
+
+Одна строка `transactions` — один оплаченный период `[start_time, end_time)`: начало ему принадлежит, конец — нет. Возврат заканчивает подписку в момент `refunded_at`. Поэтому платная подписка активна в момент m, когда:
+
+```sql
+SELECT COUNT(*) AS active
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <= TIMESTAMP '2026-06-01'
+  AND end_time   >  TIMESTAMP '2026-06-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-06-01');
+```
+
+| active |
+|---|
+| 940 |
+
+- `start_time <= m`: период начался. Период, который начинается ровно в m, в момент m активен.
+- `end_time > m`: период не кончился. Период, который кончается ровно в m, уже завершён.
+- `refunded_at IS NULL OR refunded_at > m`: возврата не было или он был позже.
+
+### Скобки вокруг OR
+
+`AND` связывает сильнее, чем `OR`. Без скобок последняя строка читается как «(все фильтры AND `refunded_at IS NULL`) OR `refunded_at > m`». Вторая половина пропускает любую строку с поздним возвратом: тестовые покупки, триалы, давно закончившиеся периоды. Тот же запрос без скобок возвращает **988**. Совсем без проверки возврата — **960**. Правило: если в `WHERE` есть `OR`, вокруг него скобки. На странице [Фильтры и даты](/sql/filters-and-dates/) есть ловушка ровно об этом.
+
+### На момент или за период
+
+«Активна хоть когда-то в сентябре» — другой вопрос. Два полуоткрытых периода `[a, b)` и `[c, d)` пересекаются, когда `a < d AND c < b`. Для сентября это `start_time < TIMESTAMP '2026-10-01' AND end_time > TIMESTAMP '2026-09-01'` плюс проверка возврата на начало месяца.
+
+```sql
+SELECT COUNT(*) AS periods,
+       COUNT(DISTINCT original_transaction_id) AS subscriptions
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <  TIMESTAMP '2026-10-01'
+  AND end_time   >  TIMESTAMP '2026-09-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-09-01');
+```
+
+| periods | subscriptions |
+|---|---|
+| 1496 | 1126 |
+
+У месячной подписки, которая продлевается 10 сентября, в сентябре два периода: тот, что кончается в этот день, и тот, что начинается. Поэтому подписки считают через `COUNT(DISTINCT original_transaction_id)` — это id, общий для всех продлений одной цепочки. В один момент оба счётчика равны (940 и 940): периоды одной цепочки не пересекаются.
+
+Для «активных подписок на каждый день» две идеи складываются: календарь слева, подписки присоединены `ON` по условию активности, где m — это день, и подсчёт по дням.
+
+<Talk q="How would you count active subscriptions for every day of September?">
+
+"I build a calendar with generate_series and join the subscriptions to it on the active condition, with the day as the moment. Then I count per day. The calendar is on the left, so a day with no active subscriptions stays in the result with zero."
+
+</Talk>
+
+## MRR на момент
+
+MRR (monthly recurring revenue, ежемесячная регулярная выручка) — значение на момент, а не сумма за период. Берутся подписки, активные в момент m, и цена каждой приводится к одному месяцу: недельная × 52 / 12, месячная × 1, годовая × 1 / 12. Осторожно с целочисленным делением:
+
+```sql
+SELECT 52 / 12 AS int_div, 52.0 / 12 AS weekly_factor, 1 / 12 AS int_year, 1.0 / 12 AS yearly_factor;
+```
+
+| int_div | weekly_factor | int_year | yearly_factor |
+|---|---|---|---|
+| 4 | 4.3333333333333333 | 0 | 0.08333333333333333333 |
+
+`52 / 12` — это 4, а `1 / 12` — 0: годовые подписки не добавили бы ничего. Пишите `52.0 / 12` и `1.0 / 12`. MRR на 1 июня по периоду тарифа (plan):
+
+```sql
+SELECT plan_period,
+       COUNT(*) AS active,
+       ROUND(SUM(charged_usd * CASE plan_period
+                                   WHEN 'P1W' THEN 52.0 / 12
+                                   WHEN 'P1M' THEN 1
+                                   WHEN 'P1Y' THEN 1.0 / 12
+                               END), 2) AS mrr_usd
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <= TIMESTAMP '2026-06-01'
+  AND end_time   >  TIMESTAMP '2026-06-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-06-01')
+GROUP BY plan_period
+ORDER BY plan_period;
+```
+
+| plan_period | active | mrr_usd |
+|---|---|---|
+| P1M | 277 | 2244.23 |
+| P1W | 14 | 181.39 |
+| P1Y | 649 | 2871.96 |
+
+940 активных подписок дают 5297,58 в месяц. Два решения в этом запросе стоит проговорить:
+
+- **`charged_usd`, а не `revenue_usd`.** `revenue_usd` уже равен 0 у подписки, которую вернули позже, после m. На 1 июня с ним выходит 5269,61: три подписки, возвращённые позже, считаются нулём.
+- **`CASE` без `ELSE` возвращает NULL** для незнакомого периода, и `SUM` молча пропускает NULL. Сначала проверьте значения: `SELECT DISTINCT plan_period FROM transactions`.
+
+## Практика
+
+<Drill id="s-calendar">
+
+Каждый день, даже пустой: календарь из `generate_series`, `LEFT JOIN` к дневным счётчикам и `COALESCE(…, 0)`. На South Market в четыре из этих десяти дней новых подписок не было (1, 2, 7 и 8 сентября). Запрос без календаря вернёт 6 строк вместо 10, и проверка не пройдёт.
+
+</Drill>
+
+<Drill id="s-active">
+
+Активна в момент m: `start_time <= m AND end_time > m`, и возврата либо не было, либо он был позже m. Скобки вокруг `OR` обязательны: без них условие о возврате вырывается из-под всех остальных фильтров. В скрытых данных есть период, который кончается ровно в 2026-09-10 00:00: с `end_time >= m` он посчитался бы активным.
+
+</Drill>
+
+<Drill id="s-mrr">
+
+MRR — значение на момент: активные подписки, каждая приведена к месяцу через `CASE` внутри `SUM`. Пишите `52.0 / 12`, а не `52 / 12`: целочисленное деление дало бы 4. Условие активности то же, что в предыдущем упражнении, вместе со скобками. В скрытых данных есть период, который кончается ровно в 2026-09-30 00:00, так что и здесь `end_time >= m` не пройдёт.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Два вопроса стоит задать до первой строки кода:
+
+1. «Which time zone defines the day?»
+2. «Do you want subscriptions or billing periods? A renewal in the middle of the month gives two periods.»
+
+Условие активности, пока пишете, читайте как фразу: «It started at or before the moment, ends after it, and was not refunded by then.» На «Why not BETWEEN?» хватит одной строки: «BETWEEN includes both ends, and with timestamps it drops the last day after midnight.» Полные задачи — [Q03 и Q04 на странице «Подписки во времени»](/sql-tasks/subscriptions-over-time/); [Q05 на странице «Отчёты о выручке»](/sql-tasks/revenue-reports/) заполняет нулями пустые месяцы.
+</Aside>
+
+## Что почитать
+
+- [Set returning functions](https://www.postgresql.org/docs/current/functions-srf.html#FUNCTIONS-SRF-SERIES) — `generate_series` для чисел, дат и timestamp.
+- [date_trunc](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC) — начало дня или месяца; на той же странице — арифметика интервалов.
+- [Operator precedence](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-PRECEDENCE) — почему `AND` вычисляется раньше `OR`.
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) и [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — множитель к месяцу и нули.
+
+## Связанные темы
+
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — почему календарь слева, а фильтры — в `ON` или в CTE.
+- [Фильтры и даты](/sql/filters-and-dates/) — полуоткрытые интервалы, литералы с типом и ловушка с `AND`/`OR`.
+- [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/) — скользящие средние и `LAG`, которым нужна строка на каждый день.
+- [Когорты и удержание](/sql-patterns/cohorts-and-retention/) — активен или нет, месяц за месяцем, для группы клиентов.
+- [Интервалы](/python/intervals/) — те же полуоткрытые периоды и пересечения на Python.

@@ -1,0 +1,88 @@
+---
+title: Prepare for a live-coding interview
+description: SQL and Python interview tasks on one realistic dataset, checked by real tests in your browser, with a protocol for the hour. Free, English and Russian.
+template: splash
+hero:
+  title: Live Coding Map
+  tagline: Practise the hour you will face. A SQL or Python task, a shared editor, an interviewer who asks questions, and a clock.
+  actions:
+    - text: Start learning
+      link: /live-coding/start/introduction/
+      icon: right-arrow
+    - text: Skill map
+      link: /live-coding/start/skill-map/
+      variant: secondary
+    - text: GitHub
+      link: https://github.com/butyavk/live-coding
+      variant: minimal
+      icon: github
+---
+import { Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
+
+For data, analytics and backend engineers preparing for a live-coding round in SQL and practical Python, and for Russian-speaking engineers who interview in English. Four things make it different from a bank of SQL questions:
+
+<CardGrid>
+  <Card title="Interview tasks on one dataset">
+    31 tasks on a realistic business dataset: a made-up subscription marketplace with payouts, webhooks and advances. The Python is the kind you write at work: idempotency, money, retries, messy input files, API clients, writing tests, fixing broken code. Real tests check your answer in the browser.
+  </Card>
+  <Card title="A protocol for the hour">
+    The questions to ask before you code, with the interviewer's answers. A timer, phrases to think aloud, and the follow-up question that comes after the code works.
+  </Card>
+  <Card title="Checks that catch the traps">
+    Check also runs your SQL on hidden edge-case data: a day with no sales, a quiet month, ties, a sale on the last day of a month. A query that fits only the visible rows fails.
+  </Card>
+  <Card title="Free and open">
+    No login and no account. Open source, every page in English and Russian. Task texts stay in English, as in the interview.
+  </Card>
+</CardGrid>
+
+## Where to start
+
+<CardGrid>
+  <LinkCard title="Introduction → Study plan" description="Start here: what the interview tests and how this site works, then a plan for the time you have (1 week, 2–3 weeks or 4–6 weeks)." href="/start/introduction/" />
+  <LinkCard title="Interview protocol" description="What to do in each task, minute by minute: restate, ask, plan, code in small steps, check before you say done." href="/start/interview-protocol/" />
+  <LinkCard title="Skill map" description="Every topic on one map: what it needs first, what it leads to, what you have covered and what to do next." href="/start/skill-map/" />
+  <LinkCard title="Mock interview" description="A random task, a running timer and no hints: a full rehearsal, then a checklist to review it." href="/start/mock-interview/" />
+</CardGrid>
+
+## How to use this site
+
+<Steps>
+
+1. **Read the [introduction](/start/introduction/)**: what the interview tests, the usual format and how an exercise works.
+
+2. **Pick a [study plan](/start/study-plan/)** that fits your time and follow it on the [skill map](/start/skill-map/). The map shows what you have covered, what you skipped and what comes next.
+
+3. **Learn the [protocol](/start/interview-protocol/)** and say the [think-aloud phrases](/start/think-aloud/) until they come without effort. Then get to know the [practice dataset](/start/dataset/): every SQL exercise runs on it.
+
+4. **Work through the topics**: SQL foundations, SQL patterns and Python. Solve each drill before you open the answer, and guess each trap before you run it.
+
+5. **Solve the interview tasks on a timer**: 25 minutes, or the target time plus 10 for the hardest, out loud, from an empty editor. Open the walkthrough only after Check passes.
+
+6. **Before the interview**, do a [mock interview](/start/mock-interview/), copy the [recipes](/reference/recipes/) onto one sheet of paper, read the [common mistakes](/reference/common-mistakes/) and review the [flashcards](/reference/flashcards/).
+
+</Steps>
+
+## Sections
+
+<CardGrid>
+  <LinkCard title="SQL foundations" description="Filters and dates, GROUP BY and COUNT, NULL, CASE and FILTER, joins, LEFT JOIN and zeros, CTE and EXISTS, the PostgreSQL dialect." href="/sql/filters-and-dates/" />
+  <LinkCard title="SQL patterns" description="Row multiplication, top N per group, running totals, calendars, duplicates, reconciliation, ledgers, indexes and cohorts." href="/sql-patterns/row-multiplication/" />
+  <LinkCard title="Python for live coding" description="dict and Counter, sets, sorting, Decimal, dates, intervals, small classes, decorators, time windows, tests and complexity." href="/python/dicts-and-counting/" />
+  <LinkCard title="Practice: SQL tasks" description="Interview tasks: revenue reports, subscriptions over time, a broken report to debug, conversion and churn, money and reconciliation." href="/sql-tasks/revenue-reports/" />
+  <LinkCard title="Practice: Python tasks" description="Interview tasks: events and time, debugging, money, a partner file import, writing tests, a TTL cache, a rate limiter, an API client with pagination, SQL and Python in one task." href="/python-tasks/events-and-time/" />
+  <LinkCard title="Reference" description="Recipes for one sheet of paper, SQL and Python cheat sheets, common mistakes, a glossary and flashcards." href="/reference/recipes/" />
+</CardGrid>
+
+## What is inside
+
+- **36 SQL drills and 26 Python drills.** One question each, an editor, Run, Check and Show answer.
+- **23 SQL traps.** Short queries that look right and are not. Guess the result, run it, then fix it.
+- **15 SQL and 16 Python interview tasks.** The statement, the questions worth asking, notes about the data, a reference solution and a walkthrough. Three of them are debug tasks: working code with bugs and a bug report.
+- **One practice dataset** for every SQL exercise: merchants, products, customers, four sales channels, marketplace payouts and an advances program. Seven tables, 8,294 transactions.
+- **Real runtimes in the browser.** SQL runs on PostgreSQL, Python on CPython, both compiled to WebAssembly. The first run downloads about 19 MB for PostgreSQL and 13 MB for Python; then the browser caches them.
+- **Flashcards** with spaced repetition in the browser, and an export to Anki in English and Russian.
+- **Progress saved in your browser.** The skill map, the study plan and the flashcards remember what you have done. Nothing is sent anywhere.
+- **An [`exercises/` folder](https://github.com/butyavk/live-coding/tree/main/exercises)** in the repository, to practise offline in your own editor: the same data in DuckDB, the tasks as files and pytest checks.
+
+The code is under the MIT License and the content under CC BY 4.0; see [Credits and licence](/about/credits-and-license/). Found a mistake? [Help fix it](/about/contributing/).

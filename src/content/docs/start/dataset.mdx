@@ -1,0 +1,234 @@
+---
+title: Practice dataset
+description: The tables every SQL exercise runs on, a made-up subscription marketplace with an advances program, and what paid, gross and net mean in it.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Playground from '~/components/practice/Playground.astro';
+
+Every SQL drill, trap and task on this site runs on one small, made-up dataset: a subscription marketplace. **Merchants** sell subscription **products** to **customers** on weekly, monthly and annual **plans**. Customers subscribe through four sales channels. Two partner marketplaces, North Market and South Market, collect the money, keep a fee and pay the merchant once a month, after a delay. The merchant's own web checkout costs a 3% card fee, and promo access is free. On top of that sits an advances program: the platform pays a merchant early, against marketplace payouts that have not arrived yet, and keeps a ledger of what the merchant owes. In an interview you will meet a different schema, but the same kinds of columns and the same questions about them.
+
+<Aside type="tip" title="TL;DR">
+- Seven tables; a transaction reaches its merchant only through `products`. Aliases: `t`, `p`, `m`.
+- "Today" is `TIMESTAMP '2026-09-30'`, written as a literal, never `NOW()`. All times are UTC.
+- **Paid** = not a trial, not a test purchase, not promo.
+- **Gross** = `charged_usd`; **net** = `revenue_usd`, which is 0 for a refunded transaction.
+- Test purchases (`is_test`) never count in a business number.
+</Aside>
+
+## The tables
+
+| Table | Rows | One row is |
+|---|---|---|
+| `merchants` | 12 | A business that sells subscriptions |
+| `products` | 20 | A subscription product; a merchant can have several |
+| `transactions` | 8,294 | One billing period of one subscription: a purchase, a renewal or a trial |
+| `webhook_events` | 1,285 | A notification from a sales channel, August–September 2026 |
+| `channel_payouts` | 173 | A monthly payment from a partner marketplace to a merchant |
+| `advances` | 38 | An early payment to a merchant against one marketplace payout |
+| `ledger_entries` | 104 | One money movement of the advances program |
+
+## How the tables connect
+
+`merchants` and `products` call their own key `id`. Every other table points to them with `merchant_id` or `product_id`:
+
+- `products.merchant_id` → `merchants.id`
+- `transactions.product_id` and `webhook_events.product_id` → `products.id`
+- `channel_payouts.merchant_id`, `advances.merchant_id` and `ledger_entries.merchant_id` → `merchants.id`
+- `ledger_entries.advance_id` → `advances.advance_id`
+
+The names differ on the two sides, so join with `ON`; `USING` needs the same name on both. A transaction reaches its merchant through `products`. Every page uses the same aliases: `t` for transactions, `p` for products, `m` for merchants.
+
+```sql
+SELECT t.transaction_id, t.plan_id, p.name AS product, m.name AS merchant
+FROM transactions t
+JOIN products p  ON p.id = t.product_id
+JOIN merchants m ON m.id = p.merchant_id
+ORDER BY t.transaction_id
+LIMIT 3;
+```
+
+| transaction_id | plan_id | product | merchant |
+| --- | --- | --- | --- |
+| t_000001 | prd_03.annual | Product 03 | Driftwood Labs |
+| t_000002 | prd_08.weekly | Product 08 | Brightleaf |
+| t_000003 | prd_19.monthly | Product 19 | Kite Works |
+
+## merchants and products
+
+`merchants`: `id` (`mer_01` … `mer_12`), `name` (an invented business name), `country`, and `advances_enrolled_at`: when the merchant joined the advances program, or NULL if it has not. Six of the twelve merchants are enrolled.
+
+`products`: `id` (`prd_01` … `prd_20`), `merchant_id` and `name` ("Product 01" …). Half of the merchants have one product; the others have two or three.
+
+## transactions
+
+One row is one billing period of one subscription. A subscription is a chain of rows: the first purchase (or a trial) and then each renewal.
+
+| Column | Meaning |
+|---|---|
+| `transaction_id` | Unique id of this transaction |
+| `original_transaction_id` | Id of the first transaction of the chain; all renewals of one subscription share it |
+| `customer_id` | The customer, for example `cus_02564` |
+| `product_id`, `plan_id` | The product and its plan, for example `prd_15` and `prd_15.monthly` |
+| `plan_period` | The plan's length: `P1W`, `P1M` or `P1Y` (ISO 8601 durations) |
+| `channel` | The sales channel: `north_market`, `south_market`, `web` or `promo` |
+| `is_trial` | A free trial: price 0, 7 days |
+| `is_trial_conversion` | The first paid period right after a trial |
+| `renewal_number` | 1 for the first transaction of a chain, then 2, 3, … |
+| `start_time`, `end_time` | The period is `[start_time, end_time)` |
+| `charged_usd` | What the customer paid (gross) |
+| `revenue_usd` | Revenue net of refunds: 0 if the transaction was refunded |
+| `fee_rate` | The channel's fee: 0.15 or 0.30 on a marketplace, 0.03 on the web checkout, 0 for promo |
+| `refunded_at` | When the refund happened, or NULL; a refund ends the subscription |
+| `is_test` | A test purchase |
+| `country` | The customer's country |
+
+Here is the start of one chain: a trial, the first paid month and a renewal.
+
+```sql
+SELECT transaction_id, renewal_number, is_trial, is_trial_conversion,
+       start_time, end_time, charged_usd
+FROM transactions
+WHERE original_transaction_id = 't_000028'
+ORDER BY renewal_number
+LIMIT 3;
+```
+
+| transaction_id | renewal_number | is_trial | is_trial_conversion | start_time | end_time | charged_usd |
+| --- | --- | --- | --- | --- | --- | --- |
+| t_000028 | 1 | true | false | 2025-09-03 02:06:32 | 2025-09-10 02:06:32 | 0.00 |
+| t_000029 | 2 | false | true | 2025-09-10 02:06:32 | 2025-10-10 02:06:32 | 9.99 |
+| t_000030 | 3 | false | false | 2025-10-10 02:06:32 | 2025-11-10 02:06:32 | 9.99 |
+
+In every chain of the dataset, each period starts exactly when the previous one ends. That is why the interval is half-open: a moment belongs to one period only.
+
+## webhook_events
+
+What the sales channels told the platform in August and September 2026: `event_id`, `type` (`purchase`, `renewal`, `expiration`, `refund`), `customer_id`, `product_id`, `transaction_id`, `occurred_at` (when it happened) and `received_at` (when it reached us).
+
+Webhooks are delivered at least once, so **the same `event_id` can arrive more than once**. A duplicate is an exact copy; only `received_at` differs. The table has 1,285 rows but 1,226 distinct event ids.
+
+## channel_payouts
+
+What the two marketplaces actually paid each merchant: `payout_id`, `merchant_id`, `channel`, `period_month` (the first day of the sales month), `amount_usd` and `paid_at`. North Market pays about 32 days after the month ends, South Market about 14 days, so on 2026-09-30 the latest North Market payout is for July and the latest South Market payout is for August. The web checkout has no payouts here: that money reaches the merchant directly.
+
+The table is not clean, on purpose: some payouts are missing, some amounts differ from what the sales suggest, and one payout is duplicated. Finding these is the point of the reconciliation tasks.
+
+## advances and ledger_entries
+
+The advances program has two rules. An advance is at most **70%** of the proceeds the merchant expects from one marketplace for one month, and it costs a **3% fee**.
+
+`advances`: `advance_id`, `merchant_id`, `channel`, `period_month` (the payout it is paid against), `amount_usd`, `fee_usd`, `idempotency_key` (`merchant:channel:month`, for example `mer_01:north_market:2026-06-01`) and `created_at`. Like the payouts, the advances are not clean: a few break the program's rules, and the money tasks ask you to find them.
+
+`ledger_entries`: `entry_id`, `merchant_id`, `advance_id`, `entry_type` (`advance`, `fee` or `repayment`), `amount_usd` and `created_at`. The ledger is append-only. Advance and fee entries are positive, repayments are negative, so what a merchant owes is `SUM(amount_usd)` over all their entries, for all time.
+
+Here is the life of one advance. `mer_01` expected 97.69 USD from North Market for June, so on 2 July it got 68.38 USD (70%) and owed a fee of 2.05 USD (3%). The June payout arrived on 2 August, and the repayment took both back the same morning.
+
+```sql
+SELECT entry_id, advance_id, entry_type, amount_usd, created_at
+FROM ledger_entries
+WHERE advance_id = 'adv_0001'
+ORDER BY entry_id;
+```
+
+| entry_id | advance_id | entry_type | amount_usd | created_at |
+| --- | --- | --- | --- | --- |
+| le_00001 | adv_0001 | advance | 68.38 | 2026-07-02 10:00:00 |
+| le_00002 | adv_0001 | fee | 2.05 | 2026-07-02 10:00:00 |
+| le_00003 | adv_0001 | repayment | -70.43 | 2026-08-02 09:00:00 |
+
+The three entries sum to 0: this advance is closed.
+
+## "Today" and time
+
+All timestamps are UTC and have the type `TIMESTAMP`. **Today is 2026-09-30 00:00.** Write it as a literal, `TIMESTAMP '2026-09-30'`, never `NOW()` or `CURRENT_DATE`: the data does not move, so a query with `NOW()` gives a different answer every day. "The last 30 days" is `[TIMESTAMP '2026-09-30' - INTERVAL '30 days', TIMESTAMP '2026-09-30')`. The latest transaction starts on 2026-09-29.
+
+## What "paid" means
+
+A **paid** transaction is not a trial, not a test purchase and not promo access. All three filters, together:
+
+```sql
+SELECT COUNT(*) AS paid
+FROM transactions t
+WHERE NOT t.is_trial
+  AND NOT t.is_test
+  AND t.channel <> 'promo';
+```
+
+Of the 8,294 transactions, 7,022 are paid. Trials and promo access cost 0, so they do not change a revenue sum, but they do change a count and an average.
+
+## Gross, net and proceeds
+
+Three amounts answer three different questions:
+
+- **Gross** is what the customer paid: `charged_usd`.
+- **Net** is revenue after refunds: `revenue_usd`, which is 0 for a refunded transaction.
+- **Proceeds** are what the merchant keeps after the channel's fee: `revenue_usd * (1 - fee_rate)`.
+
+```sql
+SELECT t.channel,
+       COUNT(*) AS transactions,
+       SUM(t.charged_usd) AS gross_usd,
+       SUM(t.revenue_usd) AS net_usd,
+       ROUND(SUM(t.revenue_usd * (1 - t.fee_rate)), 2) AS proceeds_usd
+FROM transactions t
+WHERE NOT t.is_test
+  AND NOT t.is_trial
+  AND t.channel <> 'promo'
+  AND t.start_time >= TIMESTAMP '2026-08-01'
+  AND t.start_time <  TIMESTAMP '2026-09-01'
+GROUP BY t.channel
+ORDER BY t.channel;
+```
+
+| channel | transactions | gross_usd | net_usd | proceeds_usd |
+| --- | --- | --- | --- | --- |
+| north_market | 282 | 4079.18 | 4002.23 | 3301.92 |
+| south_market | 159 | 2600.41 | 2572.44 | 2133.96 |
+| web | 44 | 518.56 | 507.58 | 492.35 |
+
+**Proceeds of a month** are what a marketplace owes a merchant for one month (the reconciliation and advances tasks). They are counted by event, not by sale: each sale adds `charged_usd * (1 - fee_rate)` in the month of its `start_time`, and each refund subtracts the same amount in the month of its `refunded_at`. The table above counts by sale. By month, August gives 3134.51 for north_market and 2140.75 for south_market: refunds of earlier sales that arrive in August lower August, and an August sale refunded in September still counts in full in August and lowers September.
+
+When a task says "revenue", ask which of the three it means. A finance report usually wants net or proceeds; a product dashboard may want gross.
+
+## Test purchases and refunds
+
+**Test purchases** (`is_test`) are purchases merchants make to try their own checkout. They look like real ones, with real prices, so they are easy to miss. In August 2026 there are 18 test purchases with 222.82 USD of gross; leaving them in makes the month look richer than it was. Exclude them from every business number.
+
+**Refunds** arrive days or weeks after the purchase: for refunded transactions, the median time from the start of the period to the refund is about 11 days, the longest about 21 days. A refunded row keeps its `charged_usd`, gets 0 in `revenue_usd` and a timestamp in `refunded_at`. A refund also ends the subscription: from `refunded_at` on, the period is no longer active, and no renewal follows. Because refunds come late, the last weeks of data still look better than they will.
+
+## Try it
+
+A free SQL editor on the same data. Run the query, then change it: add a filter, group by another column.
+
+<Playground lang="sql" code={"SELECT channel, COUNT(*) AS transactions\nFROM transactions\nGROUP BY channel\nORDER BY channel;"} />
+
+You should see four channels: `north_market` 4594, `promo` 105, `south_market` 2855 and `web` 740.
+
+Python can query the same database through a small `db` module, as the Python tasks that combine SQL and Python do. Placeholders are `?`, and the values are passed separately, never pasted into the SQL text. `NUMERIC` values come back as `Decimal` and timestamps as `datetime`. Each `execute` runs in its own transaction that is rolled back, so changes to the data do not stay.
+
+<Playground lang="python" code={"import db\n\ncon = db.connect()\nrows = con.execute(\"SELECT id, name FROM merchants WHERE country = ? ORDER BY id\", [\"US\"]).fetchall()\nprint(rows[:3])"} />
+
+The expected output is `[('mer_01', 'Pocket Quest'), ('mer_02', 'Lumen Labs'), ('mer_03', 'Driftwood Labs')]`. Calling the database from Python needs WebAssembly stack switching (JSPI), which a recent Chrome or Edge has. In other browsers the rest of Python works, but a database call raises an error.
+
+## Practise offline
+
+The [`exercises/` folder](https://github.com/butyavk/live-coding/tree/main/exercises) in the repository has the same data as CSV files, every interview task as a file, pytest checks and the reference solutions. SQL runs on DuckDB, which accepts the PostgreSQL syntax the tasks use; Python runs on your own interpreter. Install `duckdb` and `pytest`, then run `python db.py tasks/sql/q01.sql` to execute a query and `pytest -k q01` to check it. The folder's README has the details.
+
+<Aside type="note" title="In the interview">
+Turn the columns of a new schema into questions before you write a query. On this data, four questions cover most of the traps: "Do test purchases count?", "Is promo access a sale?", "What does NULL in refunded_at mean?" and "Which amount is revenue: charged or net of refunds?"
+</Aside>
+
+## Further reading
+
+- [PostgreSQL: date/time functions and operators](https://www.postgresql.org/docs/current/functions-datetime.html): intervals, `date_trunc` and timestamp arithmetic.
+- [ISO 8601 durations](https://en.wikipedia.org/wiki/ISO_8601#Durations): what `P1W`, `P1M` and `P1Y` mean.
+- [DuckDB documentation](https://duckdb.org/docs/): the database behind the offline exercises.
+
+## Related topics
+
+- [Interview protocol](/start/interview-protocol/): how to turn the columns of a new schema into questions.
+- [Filters and dates](/sql/filters-and-dates/): the first SQL page, with half-open ranges on this data.
+- [Python and SQL](/python/python-and-sql/): parameters and where to do the work when Python talks to a database.
+- [Glossary](/reference/glossary/): gross, net, proceeds, churn and the other words of this domain.

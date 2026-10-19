@@ -1,0 +1,179 @@
+---
+title: Contributing
+description: How to report a problem, fix a page, add a drill, a trap or an interview task, run the site locally, and which checks a pull request has to pass.
+sidebar:
+  order: 1
+---
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+This site is open source, and help is welcome: a fixed typo in a reference query is as useful as a new task. The repository has the same guide in [CONTRIBUTING.md](https://github.com/butyavk/live-coding/blob/main/CONTRIBUTING.md).
+
+<Aside type="tip" title="TL;DR">
+- Found a wrong answer, a broken check or a typo? Open an [issue](https://github.com/butyavk/live-coding/issues).
+- Small text fix: use the "Edit page" link at the bottom of any page.
+- Drills, traps and tasks live in `src/data/practice/*.ts` and `exercises/`; run `npm run exercises` after a change.
+- Every change goes into both the English and the Russian page; read the [content guide](https://github.com/butyavk/live-coding/blob/main/CONTENT_GUIDE.md) first.
+- Before the pull request: `npm run check:content`, `npm run build`, `npm run check:links`.
+</Aside>
+
+## Report a problem
+
+Open an [issue on GitHub](https://github.com/butyavk/live-coding/issues) and say where you saw the problem: the page, the exercise id (for example `s-filter` or `q01`) and what you expected. Useful reports include:
+
+- **A wrong reference.** Check passes with a wrong answer, or fails with a right one. Paste your query or function.
+- **A confusing question.** The task text can be read in two ways, or misses a rule that the reference uses.
+- **A wrong number or claim** in the text of a page.
+- **A runtime problem.** An editor that does not load or a run that never ends. Name your browser and its version.
+- **The Russian text** reads unnaturally or does not match the English page.
+
+## Run the site locally
+
+You need [Node.js](https://nodejs.org/en/download) 22.18 or newer, Git, and Python 3 for the drill checks and the offline exercises.
+
+<Steps>
+
+1. Fork the repository on GitHub, then clone your fork:
+
+   ```bash
+   git clone https://github.com/<your-username>/live-coding.git
+   cd live-coding
+   ```
+
+2. Install the dependencies:
+
+   ```bash
+   npm install
+   ```
+
+3. Start the development server. It copies the PostgreSQL and Python runtimes into `public/runtime/`, prints a local address (by default `http://localhost:4321/live-coding/`) and reloads pages as you edit:
+
+   ```bash
+   npm run dev
+   ```
+
+4. Create a branch for your change:
+
+   ```bash
+   git checkout -b fix/q05-zero-months
+   ```
+
+5. When you are done, build the whole site once. The output goes to `dist/`; `npm run preview` serves it locally:
+
+   ```bash
+   npm run build
+   ```
+
+</Steps>
+
+## How the content is organised
+
+```text
+src/content/docs/
+├── index.mdx                      English home page
+├── start/introduction.mdx         English pages: <section>/<slug>.mdx
+├── sql/joins.mdx
+├── ...
+└── ru/
+    ├── index.mdx                  Russian home page
+    ├── start/introduction.mdx     Russian twin: same section, same file name
+    └── ...
+src/data/practice/                 drills, traps and tasks (the data behind the components)
+src/data/generated/practice.json   reference outputs, written by npm run exercises
+src/data/skill-map.ts              the skill map: each page and its prerequisites
+src/data/study-plan.ts             the three study plans
+exercises/                         the dataset as CSV, task files, tests, solutions
+scripts/pages.json                 every section and slug, in sidebar order
+scripts/sql.mjs                    runs a query on the practice data with PostgreSQL
+scripts/check-mdx.mjs              self-check for content files
+CONTENT_GUIDE.md                   how pages are written
+```
+
+- **English** pages live in `src/content/docs/<section>/<slug>.mdx`; **Russian** pages in `src/content/docs/ru/<section>/<slug>.mdx`, with exactly the same section and file name.
+- **The sidebar** is generated from the folders; `sidebar.order` in the frontmatter is the page's position in `scripts/pages.json`.
+- **A new page** needs its slug in `scripts/pages.json` and a node in `src/data/skill-map.ts` with its prerequisites, or the build fails.
+- **Internal links** are root-relative, without the locale or base path, and end with a slash: `/sql/joins/`. The build adds `/live-coding` and `/ru`.
+
+## Add a drill, a trap or a task
+
+The interactive components read their data from `src/data/practice/` and the reference outputs from `src/data/generated/practice.json`. The explanations live in the MDX pages.
+
+- **SQL drill.** Add an entry to `src/data/practice/sql-drills.ts`: an id that starts with `s-`, the question `q` in English as an interviewer would say it, and the reference query `ref`. Set `ordered: true` when the row order is part of the answer.
+- **Python drill.** Add an entry to `src/data/practice/py-drills.ts`: an id that starts with `y-`, `q`, the `starter` code, the reference `ref` and `tests` (each one a call and the expected value, or the exception it raises). The reference must pass every test, and the starter must fail.
+- **Trap.** Add an entry to `src/data/practice/traps.ts`: the `sql` that looks right and is not, and an optional `fix`. The question and the answer are written in the page, in each language.
+- **SQL task.** Write the statement, the questions to ask and the output columns in `exercises/tasks/sql/<id>.sql`, the reference in `exercises/solutions/sql/<id>.sql`, and the notes about the data in `src/data/practice/sql-tasks.ts`.
+- **Python task.** Write `exercises/tasks/<file>.py` (the statement in the docstring), `exercises/tests/test_<file>.py` and `exercises/solutions/<file>.py`, then add the brief and an example to `src/data/practice/py-tasks.ts`.
+
+Then place the new id on one English page and one Russian page, with its explanation or walkthrough, and rebuild the reference outputs:
+
+```bash
+npm run exercises
+```
+
+It runs every SQL reference on PostgreSQL (PGlite), checks every Python drill with `python3` and writes `src/data/generated/practice.json`. Commit the regenerated file. To check the offline exercises too, run the references through pytest:
+
+```bash
+cd exercises
+pip install -r requirements.txt
+SOLUTIONS=1 pytest
+```
+
+## Write a page
+
+The [content guide](https://github.com/butyavk/live-coding/blob/main/CONTENT_GUIDE.md) is the reference for page templates, frontmatter, components, style, the English–Russian glossary and MDX pitfalls. Please read it before you write or rewrite a page. In short:
+
+- **Numbers from real runs.** Every number and every output table on a page comes from a query you ran: `node scripts/sql.mjs "SELECT …"` prints the result as a Markdown table. Run every Python snippet you show.
+- **Your own words.** Do not paste text from documentation, books or blogs. Link the official PostgreSQL and Python documentation under "Further reading".
+- **Neutral.** The dataset is an invented subscription marketplace, with invented merchants and marketplaces. No real company names, in the text or in the data, and no names of people.
+- **Plain English, British spelling.** Short sentences and common words: many readers are not native speakers.
+- **Both languages in the same pull request.** The Russian page keeps the same structure, headings, code and exercises, in natural technical Russian. Task texts and phrases to say stay in English on both. Can only write one language? Open the pull request anyway and say so.
+
+## Check your changes
+
+Run the content check on your files first. It reports MDX syntax errors, missing frontmatter, internal links to pages that do not exist, a missing translation twin, and practice ids that do not exist or are placed twice:
+
+```bash
+node scripts/check-mdx.mjs src/content/docs/sql/joins.mdx src/content/docs/ru/sql/joins.mdx
+```
+
+If the page has SQL blocks, run them all on the practice data. The script lists the blocks that fail; a fragment or a deliberate error fails on purpose, everything else must run:
+
+```bash
+node scripts/check-sql-blocks.mjs src/content/docs/sql/joins.mdx src/content/docs/ru/sql/joins.mdx
+```
+
+Then run the full checks, the same ones the CI runs:
+
+```bash
+npm run check:content   # every page; also checks that every exercise is placed in both languages
+npm run build           # builds the site and validates the skill map and the study plans
+npm run check:links     # every internal link and #anchor in the built site
+```
+
+Fix every ✗ before you open the pull request.
+
+## Pull request checklist
+
+- The change is in **both** the English and the Russian page, or the description says which half is missing.
+- The frontmatter is complete: `title`, `description` (120–160 characters), `sidebar.order`.
+- Every number on the page comes from a real run, and every code example was run.
+- After a change in `src/data/practice/` or `exercises/`, `npm run exercises` was run and `practice.json` is committed.
+- `npm run check:content`, `npm run build` and `npm run check:links` pass.
+- The description says what changed and why.
+
+If you are new to pull requests, GitHub's guide to [creating a pull request from a fork](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/proposing-changes-to-your-work-with-pull-requests/creating-a-pull-request-from-a-fork) walks through it.
+
+## Licence of contributions
+
+By contributing, you agree that your contribution is published under the same licences as the rest of the project: code under the [MIT License](https://opensource.org/license/mit), content under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). See [Credits and licence](/about/credits-and-license/).
+
+## Further reading
+
+- [Content guide](https://github.com/butyavk/live-coding/blob/main/CONTENT_GUIDE.md): templates, style, glossary and MDX rules for this site.
+- [Starlight: using components](https://starlight.astro.build/components/using-components/): how to import and use components in MDX.
+- [PGlite documentation](https://pglite.dev/docs/): the PostgreSQL build that runs the SQL exercises.
+- [Pyodide documentation](https://pyodide.org/en/stable/): the Python build that runs the Python exercises.
+
+## Related topics
+
+- [Credits and licence](/about/credits-and-license/): the licences your contribution falls under, and the tools this site is built with.
+- [Practice dataset](/start/dataset/): the tables every SQL exercise runs on.

@@ -1,0 +1,22 @@
+-- Q01. Revenue by channel — August 2026
+-- Level: easy. Target time: 5 min.
+--
+-- TASK
+--   For August 2026 show, per channel: the number of transactions, gross revenue and revenue net of refunds.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Which timestamp and time zone define "August"?
+--   A: UTC; start_time in [2026-08-01, 2026-09-01).
+--   Q: Do we include test purchases?
+--   A: No.
+--   Q: What is gross and what is net of refunds?
+--   A: gross = SUM(charged_usd); net = SUM(revenue_usd). revenue_usd is 0 for refunded transactions.
+--   Q: Trials and promo access?
+--   A: Keep them: they cost 0 but still count as transactions.
+--
+-- OUTPUT COLUMNS: channel, transactions, gross_usd, net_usd
+-- ORDER BY: gross_usd DESC, channel
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q01.sql   Check: pytest -k q01
+
+-- your query below

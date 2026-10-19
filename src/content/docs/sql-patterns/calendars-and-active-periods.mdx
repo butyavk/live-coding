@@ -1,0 +1,227 @@
+---
+title: Calendars and active periods
+description: Every day in the report, even with zero sales, from generate_series and LEFT JOIN; "active at a moment" with brackets around OR; MRR from active subscriptions.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+"Revenue for every day of September." "Active subscriptions on 1 June." "MRR at the end of the month." Two ideas sit behind these tasks. A day without data has no row, so you build the days yourself. And a subscription is a period, not an event: "active at a moment" is a condition on both of its ends, plus the refund.
+
+<Aside type="tip" title="TL;DR">
+- Every day, even with zero: `generate_series` → `LEFT JOIN` the daily totals → `COALESCE(x, 0)`.
+- Aggregate the data to one row per day in a CTE first, then join it to the calendar.
+- Active at moment m: `start_time <= m AND end_time > m AND (refunded_at IS NULL OR refunded_at > m)`.
+- Always put brackets around `OR`. `AND` binds tighter, and without them the count is 988 instead of 940.
+- MRR: the sum over subscriptions active at m, each price brought to a month: weekly × `52.0 / 12`, yearly × `1.0 / 12`.
+</Aside>
+
+## A day without data has no row
+
+`GROUP BY` makes groups from the rows that exist. mer_01 sold nothing from 5 to 8 September, so its daily report for 1–10 September has five rows, not ten (the query is on [Shares and running totals](/sql-patterns/running-totals-and-shares/)). Those days are not zero. They are missing. A chart skips them, `LAG` compares 9 September with 4 September, and a 7-row moving average covers more than seven days.
+
+## Build a calendar with generate_series
+
+`generate_series(start, stop, step)` returns one row per step. Both ends are included:
+
+```sql
+SELECT CAST(d AS DATE) AS day
+FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-05', INTERVAL '1 day') AS g(d);
+```
+
+| day |
+|---|
+| 2026-09-01 |
+| 2026-09-02 |
+| 2026-09-03 |
+| 2026-09-04 |
+| 2026-09-05 |
+
+Write the ends as `TIMESTAMP '…'`. With plain strings the function still runs, but it returns `timestamp with time zone`, a different type from the columns. Unlike the half-open filter on `start_time`, the stop value here is the last day you want.
+
+The full pattern: the calendar in `FROM`, the daily totals in a CTE, a `LEFT JOIN` between them, and `COALESCE` for the days without a match.
+
+```sql
+WITH days AS (
+    SELECT CAST(d AS DATE) AS day
+    FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-10', INTERVAL '1 day') AS g(d)
+),
+daily AS (
+    SELECT CAST(t.start_time AS DATE) AS day, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE p.merchant_id = 'mer_01'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT d.day, COALESCE(s.net_usd, 0) AS net_usd
+FROM days d
+LEFT JOIN daily s ON s.day = d.day
+ORDER BY d.day;
+```
+
+| day | net_usd |
+|---|---|
+| 2026-09-01 | 6.99 |
+| 2026-09-02 | 0.00 |
+| 2026-09-03 | 13.98 |
+| 2026-09-04 | 6.99 |
+| 2026-09-05 | 0 |
+| 2026-09-06 | 0 |
+| 2026-09-07 | 0 |
+| 2026-09-08 | 0 |
+| 2026-09-09 | 6.99 |
+| 2026-09-10 | 0 |
+
+Ten rows, one per day. Look at the two kinds of zero. On 2 September there is a real row: a free trial with a price of 0.00. On 5 September there is no row at all, and `COALESCE` puts 0 there.
+
+Three rules keep the zeros alive:
+
+- **The calendar is on the left.** It decides which rows exist; the data only fills them.
+- **Filters on the data stay in its CTE** (or in `ON`). A condition on `s` in the `WHERE` after the join removes the empty days again. See [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+- **Aggregate before the join.** Join the calendar to daily totals, not to raw transactions. Otherwise you count rows of the join, and an empty day becomes 1.
+
+The same works for months: `generate_series(TIMESTAMP '2026-01-01', TIMESTAMP '2026-09-01', INTERVAL '1 month')` and `date_trunc('month', start_time)` on the data side. When the task does not say, ask: "Should days with no sales be in the result, with zero?"
+
+## Active at a moment
+
+One row of `transactions` is one billing period `[start_time, end_time)`: the start belongs to it, the end does not. A refund ends the subscription at `refunded_at`. So a paid subscription is active at moment m when:
+
+```sql
+SELECT COUNT(*) AS active
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <= TIMESTAMP '2026-06-01'
+  AND end_time   >  TIMESTAMP '2026-06-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-06-01');
+```
+
+| active |
+|---|
+| 940 |
+
+- `start_time <= m`: it has started. A period that starts exactly at m is active at m.
+- `end_time > m`: it has not ended. A period that ends exactly at m is already over.
+- `refunded_at IS NULL OR refunded_at > m`: there was no refund, or it came later.
+
+### Brackets around OR
+
+`AND` binds tighter than `OR`. Without the brackets, the last line reads as "(all the filters AND `refunded_at IS NULL`) OR `refunded_at > m`". The second half lets in any row with a later refund: test purchases, trials, periods that ended long ago. The same query without the brackets returns **988**. Without the refund check at all it returns **960**. The rule: when a `WHERE` contains `OR`, put brackets around it. [Filters and dates](/sql/filters-and-dates/) has a trap about exactly this.
+
+### At a moment or during a period
+
+"Active at any time in September" is a different question. Two half-open periods `[a, b)` and `[c, d)` overlap when `a < d AND c < b`. For September that is `start_time < TIMESTAMP '2026-10-01' AND end_time > TIMESTAMP '2026-09-01'`, plus the refund check at the start of the month.
+
+```sql
+SELECT COUNT(*) AS periods,
+       COUNT(DISTINCT original_transaction_id) AS subscriptions
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <  TIMESTAMP '2026-10-01'
+  AND end_time   >  TIMESTAMP '2026-09-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-09-01');
+```
+
+| periods | subscriptions |
+|---|---|
+| 1496 | 1126 |
+
+A monthly subscription that renews on 10 September has two periods in September: the one that ends that day and the one that starts. So count subscriptions with `COUNT(DISTINCT original_transaction_id)`, the id that all renewals of one chain share. At a single moment the two counts are equal (940 and 940), because the periods of one chain never overlap.
+
+For "active subscriptions on every day", combine both ideas: the calendar on the left, the subscriptions joined `ON` the active condition with the day as m, and a count per day.
+
+<Talk q="How would you count active subscriptions for every day of September?">
+
+"I build a calendar with generate_series and join the subscriptions to it on the active condition, with the day as the moment. Then I count per day. The calendar is on the left, so a day with no active subscriptions stays in the result with zero."
+
+</Talk>
+
+## MRR at a moment
+
+MRR (monthly recurring revenue) is a value at a moment, not a sum over a period. Take the subscriptions active at m and bring each price to one month: a weekly price × 52 / 12, a monthly price × 1, a yearly price × 1 / 12. Watch the integer division:
+
+```sql
+SELECT 52 / 12 AS int_div, 52.0 / 12 AS weekly_factor, 1 / 12 AS int_year, 1.0 / 12 AS yearly_factor;
+```
+
+| int_div | weekly_factor | int_year | yearly_factor |
+|---|---|---|---|
+| 4 | 4.3333333333333333 | 0 | 0.08333333333333333333 |
+
+`52 / 12` is 4 and `1 / 12` is 0: every yearly subscription would add nothing. Write `52.0 / 12` and `1.0 / 12`. MRR on 1 June by plan period:
+
+```sql
+SELECT plan_period,
+       COUNT(*) AS active,
+       ROUND(SUM(charged_usd * CASE plan_period
+                                   WHEN 'P1W' THEN 52.0 / 12
+                                   WHEN 'P1M' THEN 1
+                                   WHEN 'P1Y' THEN 1.0 / 12
+                               END), 2) AS mrr_usd
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time <= TIMESTAMP '2026-06-01'
+  AND end_time   >  TIMESTAMP '2026-06-01'
+  AND (refunded_at IS NULL OR refunded_at > TIMESTAMP '2026-06-01')
+GROUP BY plan_period
+ORDER BY plan_period;
+```
+
+| plan_period | active | mrr_usd |
+|---|---|---|
+| P1M | 277 | 2244.23 |
+| P1W | 14 | 181.39 |
+| P1Y | 649 | 2871.96 |
+
+The 940 active subscriptions give 5297.58 per month. Two choices in this query are worth saying out loud:
+
+- **`charged_usd`, not `revenue_usd`.** `revenue_usd` is already 0 for a subscription that was refunded later, after m. On 1 June it gives 5269.61, because three subscriptions refunded later count as 0.
+- **`CASE` without `ELSE` returns NULL** for a period it does not know, and `SUM` skips NULL without a word. Check the values first: `SELECT DISTINCT plan_period FROM transactions`.
+
+## Practice
+
+<Drill id="s-calendar">
+
+Every day, even empty: a calendar from `generate_series`, a `LEFT JOIN` to the daily counts, and `COALESCE(…, 0)`. On South Market four of these ten days have no new subscription (1, 2, 7 and 8 September). A query without the calendar returns 6 rows instead of 10 and fails Check.
+
+</Drill>
+
+<Drill id="s-active">
+
+Active at m: `start_time <= m AND end_time > m`, and the refund either did not happen or happened after m. The brackets around `OR` are required: without them the refund condition escapes all the other filters. The hidden data has a period that ends exactly at 2026-09-10 00:00: with `end_time >= m` it would count as active.
+
+</Drill>
+
+<Drill id="s-mrr">
+
+MRR is a value at a moment: the active subscriptions, each brought to a month with `CASE` inside `SUM`. Write `52.0 / 12`, not `52 / 12`: integer division would give 4. The active condition is the same as in the previous drill, with its brackets. The hidden data has a period that ends exactly at 2026-09-30 00:00, so `end_time >= m` fails here too.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Two questions belong before the first line of code:
+
+1. "Which time zone defines the day?"
+2. "Do you want subscriptions or billing periods? A renewal in the middle of the month gives two periods."
+
+While you write the active condition, read it as a sentence: "It started at or before the moment, ends after it, and was not refunded by then." If you hear "Why not BETWEEN?", answer in one line: "BETWEEN includes both ends, and with timestamps it drops the last day after midnight." The full tasks are [Q03 and Q04 on Subscriptions over time](/sql-tasks/subscriptions-over-time/); [Q05 on Revenue reports](/sql-tasks/revenue-reports/) fills empty months with zero.
+</Aside>
+
+## Further reading
+
+- [Set returning functions](https://www.postgresql.org/docs/current/functions-srf.html#FUNCTIONS-SRF-SERIES) — `generate_series` for numbers, dates and timestamps.
+- [date_trunc](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC) — the start of a day or month, and interval arithmetic on the same page.
+- [Operator precedence](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-PRECEDENCE) — why `AND` is evaluated before `OR`.
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) and [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — the monthly multiplier and the zeros.
+
+## Related topics
+
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — why the calendar goes on the left and the filters go into `ON` or the CTE.
+- [Filters and dates](/sql/filters-and-dates/) — half-open ranges, typed literals, and the `AND`/`OR` trap.
+- [Shares and running totals](/sql-patterns/running-totals-and-shares/) — moving averages and `LAG`, which need one row per day.
+- [Cohorts and retention](/sql-patterns/cohorts-and-retention/) — active or not, month by month, for a group of customers.
+- [Intervals](/python/intervals/) — the same half-open periods and overlaps in Python.

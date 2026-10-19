@@ -1,0 +1,236 @@
+---
+title: Time windows
+description: "A sliding window on collections.deque: drop old times from the left, never record a rejection, amortised O(1), and what fixed windows and token buckets cost."
+sidebar:
+  order: 11
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Rate limiters and "how many events in the last N seconds" are classic Python tasks. The window moves with time: new timestamps enter on the right, old ones leave on the left. That is a queue, and in Python a queue is `collections.deque`. Without it, the code either scans the whole history on every call or forgets to drop old entries and grows without limit.
+
+<Aside type="tip" title="TL;DR">
+- Keep the times of **accepted** requests in a `deque`. On each call, drop from the left while `times[0] <= now - window`.
+- Then, if `len(times) < limit`, append `now` and allow. Otherwise reject, and do **not** record the rejected request.
+- Each timestamp enters once and leaves once: amortised O(1) per call, and memory of at most `limit` timestamps per key.
+- Pass `now` (or a clock) in as a parameter, so tests move time without sleeping.
+- Ask before you code: sliding or fixed window? Is a request exactly `window` seconds old still inside? Do rejections count?
+</Aside>
+
+## The window as a queue
+
+A `deque` is cheap at both ends. `append` adds on the right, `popleft` removes on the left, both in O(1):
+
+```python
+from collections import deque
+
+q = deque([0, 1, 5])
+q.append(10)
+print(q.popleft(), q)
+
+last3 = deque(maxlen=3)
+for t in [0, 1, 5, 10]:
+    last3.append(t)
+print(last3)
+```
+
+```text
+0 deque([1, 5, 10])
+deque([1, 5, 10], maxlen=3)
+```
+
+`maxlen` keeps the last N items by count, not by time, so on its own it is not a time window. A `list` would work too, but `list.pop(0)` shifts every element left. On 100,000 items:
+
+```python
+import timeit
+
+n = 100_000
+print(timeit.timeit("while q: q.pop(0)", setup=f"q = list(range({n}))", number=1))
+print(timeit.timeit("while q: q.popleft()", setup=f"from collections import deque; q = deque(range({n}))", number=1))
+```
+
+```text
+0.8637160459998086
+0.0017750160000105097
+```
+
+The heart of a sliding window is two lines:
+
+```python
+while self.times and self.times[0] <= now - self.window:
+    self.times.popleft()                  # O(1); list.pop(0) would be O(n)
+```
+
+After the loop, the deque holds only the requests inside the window, and its length is the number to compare with the limit. Here is a limit of 2 requests per 10 seconds, with requests at 0, 1, 5, 10, 11 and 12:
+
+| now | dropped from the left | deque after the call | allowed |
+|---|---|---|---|
+| 0 | — | [0] | True |
+| 1 | — | [0, 1] | True |
+| 5 | — | [0, 1] | False |
+| 10 | 0 | [1, 10] | True |
+| 11 | 1 | [10, 11] | True |
+| 12 | — | [10, 11] | False |
+
+At 10, the request from 0 is out, because `0 <= 10 - 10`. So there is room again.
+
+## The boundary: `<=` or `<`
+
+The comparison decides whether a request exactly `window` seconds old still counts. With `<=` the window is `(now - window, now]`. With `<` it is `[now - window, now]`, and the same input gives a different answer:
+
+| Condition | Result for 0, 1, 5, 10, 11, 12 |
+|---|---|
+| `times[0] <= now - window` | True, True, False, True, True, False |
+| `times[0] < now - window` | True, True, False, False, True, True |
+
+Neither is wrong. It is a product decision, so ask: *"Is a request exactly window seconds ago still inside the window?"* Then write the answer as a comment and test exactly that case.
+
+## Do not record a rejected request
+
+If rejected requests go into the deque, a client that keeps calling never gets out. Here a client calls once a second for 30 seconds, with a limit of 2 per 10 seconds:
+
+```python
+from collections import deque
+
+
+class RateLimiter:
+    def __init__(self, limit, window, record_rejects=False):
+        self.limit, self.window = limit, window
+        self.record_rejects = record_rejects
+        self.times = deque()
+
+    def allow(self, now):
+        while self.times and self.times[0] <= now - self.window:
+            self.times.popleft()
+        ok = len(self.times) < self.limit
+        if ok or self.record_rejects:
+            self.times.append(now)
+        return ok
+
+
+for record in (False, True):
+    rl = RateLimiter(2, 10, record_rejects=record)
+    allowed = [t for t in range(30) if rl.allow(t)]
+    print(f"record_rejects={record}: allowed at {allowed}, deque holds {len(rl.times)}")
+```
+
+```text
+record_rejects=False: allowed at [0, 1, 10, 11, 20, 21], deque holds 2
+record_rejects=True: allowed at [0, 1], deque holds 10
+```
+
+With rejections recorded, the window is always full of the client's own failed attempts. The deque also grows with every call instead of staying at `limit`.
+
+## What it costs
+
+- **Time: amortised O(1) per call.** One call can pop many old timestamps, for example after a long pause. But each timestamp is appended once and popped at most once, so n calls do at most n pops in total.
+- **Memory: at most `limit` timestamps per key.** Only accepted requests are stored, and the window never holds more than `limit` of them.
+- **Many keys.** A limiter per merchant or per customer is a `defaultdict(deque)`. Memory then grows with the number of keys. Delete a key when its deque becomes empty, or clean up idle keys from time to time.
+
+## Time as a parameter
+
+`allow(now)` takes the time from the caller instead of calling `time.time()` inside. A test then passes plain numbers and runs instantly. In production the caller passes `time.monotonic()`: the system clock can jump back when it is corrected, a monotonic clock cannot. A class that takes a `clock` function does the same job (see [Classes and state](/python/classes-and-state/)).
+
+Two more production questions come up often:
+
+- **Threads.** Two threads can both see `len(times) < limit` and both append. Wrap the body of `allow` in a `threading.Lock`. [Python and SQL](/python/python-and-sql/) covers threads.
+- **Several servers.** Each process has its own deque, so the real limit becomes `limit` times the number of servers. The counter must live in shared storage, such as Redis with an atomic operation.
+
+## Alternatives and what they cost
+
+A **fixed window** counts requests per window on the clock: seconds 0–9, 10–19, and so on. One counter per window, very cheap:
+
+```python
+from collections import defaultdict
+
+
+class FixedWindow:
+    def __init__(self, limit, window):
+        self.limit, self.window = limit, window
+        self.counts = defaultdict(int)        # window number -> requests
+
+    def allow(self, now):
+        bucket = now // self.window           # 0 for 0..9, 1 for 10..19
+        if self.counts[bucket] >= self.limit:
+            return False
+        self.counts[bucket] += 1
+        return True
+
+
+fw = FixedWindow(limit=3, window=10)
+print([fw.allow(t) for t in [9, 9, 9, 10, 10, 10]])
+```
+
+```text
+[True, True, True, True, True, True]
+```
+
+The limit is 3 per 10 seconds, but 6 requests pass within one second, on the edge between two windows. A sliding window would reject the last three.
+
+A **token bucket** holds up to `capacity` tokens and refills at `rate` tokens per second. Each request takes one token:
+
+```python
+class TokenBucket:
+    def __init__(self, capacity, rate):
+        self.capacity = capacity              # the biggest burst
+        self.rate = rate                      # tokens added per second
+        self.tokens = capacity
+        self.last = None
+
+    def allow(self, now):
+        if self.last is not None:
+            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+        self.last = now
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        return False
+
+
+tb = TokenBucket(capacity=2, rate=0.2)        # on average 2 requests per 10 s
+print([tb.allow(t) for t in [0, 1, 5, 10, 11, 12]])
+```
+
+```text
+[True, True, True, True, False, False]
+```
+
+On the same input as the sliding window, the bucket lets through 0, 1 and 5: three requests within ten seconds. It limits the average rate, not every window.
+
+| Approach | State per key | Precision | Weak point |
+|---|---|---|---|
+| Sliding window (deque of times) | up to `limit` timestamps | exact for every window | memory grows with `limit` |
+| Fixed window | one counter per window | coarse | up to 2 × `limit` around the edge of two windows |
+| Token bucket | two numbers: tokens and the last time | limits the average rate | lets through a burst of up to `capacity` |
+
+A middle ground, the sliding window counter, adds a weighted share of the previous fixed window to the current one. It needs two counters per key and gives an approximate answer.
+
+## Practice
+
+<Drill id="y-limiter">
+
+A time window is a deque of times. Drop from the left everything at or before `now - window`, then compare the length with the limit. Each entry enters and leaves once, so a call is O(1) on average (amortised). A rejected request is not recorded. The third check, `[8, 9, 10, 18]`, catches two answers that pass the other checks: a fixed window lets 10 through because a new window starts there, and a limiter that records the refused request at 10 then refuses 18 as well. If asked about threads: a `threading.Lock` around `allow`; across servers: a shared counter in Redis.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+The limiter itself is about ten lines; most of the time goes to the questions after it. Settle the boundary first: *"Does a request exactly window seconds old still count?"* Then have short answers ready:
+
+- *"What if the limit is 10,000 per minute?"* — "The deque then holds up to 10,000 times per key. A token bucket keeps two numbers instead, if limiting the average rate is enough."
+- *"What about several servers?"* — "Each process has its own deque, so the counter has to move to shared storage, like Redis."
+- *"And threads?"* — "A lock around the whole allow call, not around single lines."
+</Aside>
+
+## Further reading
+
+- [collections.deque](https://docs.python.org/3/library/collections.html#collections.deque) — the methods, `maxlen`, and which operations are O(1).
+- [time.monotonic](https://docs.python.org/3/library/time.html#time.monotonic) — a clock that never goes back.
+- [Lock objects](https://docs.python.org/3/library/threading.html#lock-objects) — `threading.Lock` and `with lock:`.
+- [collections.defaultdict](https://docs.python.org/3/library/collections.html#collections.defaultdict) — one deque per key without `if key not in`.
+
+## Related topics
+
+- [Classes and state](/python/classes-and-state/) — a small class with state and an injected clock, the shape of every limiter.
+- [Caching and rate limits](/python-tasks/caching-and-rate-limits/) — a per-key sliding window limiter as a full task.
+- [Python and SQL](/python/python-and-sql/) — threads, the GIL and when a lock is needed.
+- [Testing and complexity](/python/testing-and-complexity/) — the cost table, and which boundary cases to test.

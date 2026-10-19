@@ -1,0 +1,24 @@
+-- Q06. Customers who came back after a break
+-- Level: medium. Target time: 12 min.
+--
+-- TASK
+--   Find customers who came back to the same product after a break of more than 30 days: the next transaction started more than 30 days after the previous one ended.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Per product or across products?
+--   A: Per (customer_id, product_id).
+--   Q: "Previous" by what order?
+--   A: By start_time, then transaction_id.
+--   Q: How is the gap measured?
+--   A: Condition: start_time > previous end_time + 30 days. gap_days = returned_on - lapsed_on, both as DATE.
+--   Q: Test?
+--   A: Excluded.
+--   Q: Trials, promo access, refunds?
+--   A: Keep all those rows. For a refunded period, still use its end_time.
+--
+-- OUTPUT COLUMNS: customer_id, product_id, lapsed_on (DATE), returned_on (DATE), gap_days
+-- ORDER BY: returned_on, customer_id, product_id
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q06.sql   Check: pytest -k q06
+
+-- your query below

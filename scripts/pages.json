@@ -1,0 +1,10 @@
+{
+  "start": ["introduction", "study-plan", "skill-map", "interview-protocol", "think-aloud", "mock-interview", "dataset", "questions-to-ask"],
+  "sql": ["filters-and-dates", "grouping-and-counting", "null-logic", "conditional-aggregation", "joins", "left-join-and-zeros", "subqueries-and-cte", "postgresql-dialect"],
+  "sql-patterns": ["row-multiplication", "top-n-per-group", "running-totals-and-shares", "calendars-and-active-periods", "duplicates-and-idempotency", "union-and-reconciliation", "money-and-ledgers", "indexes-and-explain", "database-concepts", "cohorts-and-retention"],
+  "python": ["dicts-and-counting", "sets-and-duplicates", "sorting-and-top-k", "money-and-decimal", "dates-and-durations", "intervals", "classes-and-state", "testing-and-complexity", "decorators", "errors-and-validation", "time-windows", "python-and-sql", "iteration-and-generators"],
+  "sql-tasks": ["revenue-reports", "subscriptions-over-time", "debug-a-report", "funnels-and-churn", "money-and-reconciliation"],
+  "python-tasks": ["events-and-time", "debugging", "money", "caching-and-rate-limits", "sql-and-python"],
+  "reference": ["recipes", "sql-cheatsheet", "python-cheatsheet", "common-mistakes", "glossary", "flashcards"],
+  "about": ["contributing", "credits-and-license"]
+}

@@ -1,0 +1,202 @@
+---
+title: Условная агрегация
+description: Корзины через CASE, COUNT(*) FILTER, несколько счётчиков за один проход, доли без целочисленного деления, ловушка AVG с ELSE 0 и медиана через PERCENTILE_CONT.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Многие задачи просят несколько чисел на группу: все транзакции, триалы, возвраты и долю возвратов. Один `GROUP BY` с условными агрегатами считает их за один проход по таблице. Типичные ошибки — доля 0 из-за целочисленного деления и среднее, которое тянут вниз нули.
+
+<Aside type="tip" title="Коротко">
+- Метка строки — `CASE WHEN … THEN … ELSE … END`: побеждает первая истинная ветка.
+- Подсчёт части строк — `COUNT(*) FILTER (WHERE …)`. Переносимая форма — `SUM(CASE WHEN … THEN 1 ELSE 0 END)`.
+- Доля — `1.0 * часть / NULLIF(целое, 0)`, `ROUND` в самом конце.
+- Среднее по части строк — `FILTER` или `CASE` без `ELSE`. `ELSE 0` — только для долей.
+- Медиана — `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`, перед `ROUND` каст в `numeric`.
+</Aside>
+
+## CASE: метка для каждой строки
+
+`CASE` проверяет ветки сверху вниз и возвращает первую истинную. Без `ELSE` строка, которая не подошла ни под одну ветку, получает NULL. Группировка по метке считает строки в каждой корзине:
+
+```sql
+SELECT CASE
+         WHEN is_trial       THEN 'trial'
+         WHEN channel = 'promo' THEN 'promo'
+         ELSE 'paid'
+       END AS kind,
+       COUNT(*) AS transactions
+FROM transactions
+WHERE NOT is_test
+  AND start_time >= TIMESTAMP '2026-07-01'
+  AND start_time <  TIMESTAMP '2026-08-01'
+GROUP BY 1
+ORDER BY 1;
+```
+
+| kind | transactions |
+|---|---|
+| paid | 427 |
+| promo | 8 |
+| trial | 51 |
+
+Порядок веток важен, когда строка подходит под две из них. Триал, выданный как промо-доступ, получил бы здесь метку `trial`, потому что эта ветка идёт первой. В учебных данных таких строк нет, но порядок всё равно стоит проговорить.
+
+`GROUP BY 1` группирует по первой колонке `SELECT`, поэтому длинный `CASE` пишется один раз.
+
+## FILTER: несколько счётчиков за один проход
+
+`COUNT(*) FILTER (WHERE …)` считает только строки, прошедшие условие. `FILTER` принимает любой агрегат: `SUM(x) FILTER (…)`, `AVG(x) FILTER (…)`. У того же счётчика есть две переносимые формы:
+
+```sql
+SELECT COUNT(*) FILTER (WHERE is_trial)          AS with_filter,
+       SUM(CASE WHEN is_trial THEN 1 ELSE 0 END) AS with_sum_case,
+       COUNT(CASE WHEN is_trial THEN 1 END)      AS with_count_case
+FROM transactions
+WHERE NOT is_test;
+```
+
+| with_filter | with_sum_case | with_count_case |
+|---|---|---|
+| 906 | 906 | 906 |
+
+`FILTER` работает в PostgreSQL, SQLite и DuckDB. В MySQL и SQL Server пишут `SUM(CASE …)`. `COUNT(CASE WHEN … THEN 1 END)` тоже работает: `COUNT` пропускает NULL, который `CASE` возвращает без `ELSE`.
+
+Несколько счётчиков в одном `SELECT` читают таблицу один раз. Три отдельных запроса, соединённые вместе, читают её трижды и дают три шанса ошибиться в фильтре.
+
+## Доли без целочисленного деления
+
+`COUNT` возвращает `bigint`. В PostgreSQL целое, делённое на целое, — целое, дробная часть отбрасывается:
+
+```sql
+SELECT 7 / 2            AS int_div,
+       7.0 / 2          AS numeric_div,
+       1.0 * 7 / 2      AS times_one,
+       7 / NULLIF(0, 0) AS by_zero;
+```
+
+| int_div | numeric_div | times_one | by_zero |
+|---|---|---|---|
+| 3 | 3.5000000000000000 | 3.5000000000000000 | NULL |
+
+Перед делением сделайте одну сторону `numeric`: `1.0 * a / b` или `a::numeric / b`. От пустой группы защищает `NULLIF(b, 0)`: доля станет NULL, а не ошибкой `division by zero`.
+
+<Trap id="int-div" q="Доля триалов. Что окажется в share_a и pct_b?">
+
+`share_a` = 0: `COUNT` — целое, и целое делится на целое без дробной части. `pct_b` = 11,3, потому что `100.0` делает выражение `numeric`. Пишите `1.0 * a / b` или `a::numeric / b`, а от деления на ноль — `NULLIF(b, 0)`.
+
+</Trap>
+
+Округляйте один раз, в конце. Спросите, что хочет видеть интервьюер: долю (0,035) или проценты (3,5).
+
+## AVG и ловушка ELSE 0
+
+`AVG` пропускает NULL. `CASE` без `ELSE` возвращает NULL для остальных строк, поэтому `AVG(CASE WHEN channel = 'web' THEN charged_usd END)` усредняет только строки оплаты на сайте. С `ELSE 0` в среднее попадает ноль за каждую другую строку.
+
+<Trap id="avg-else0" q="Средний чек платной покупки на сайте (без триалов) тремя способами. Какой из трёх неверный?">
+
+Неверный `c`: 1,18 вместо 13,19. С `ELSE 0` в среднее попадает ноль за каждую строку других каналов. Бесплатные триалы сделали бы то же самое: каждый стоит 0, поэтому `WHERE` их и убирает. Для `AVG` — `FILTER` или `CASE` без `ELSE`: NULL в `AVG` не участвует. А для доли `ELSE 0` как раз нужен: `AVG(CASE WHEN … THEN 1.0 ELSE 0 END)`.
+
+</Trap>
+
+Для доли должна учитываться каждая строка: подходящие как 1, остальные как 0.
+
+```sql
+SELECT ROUND(AVG(CASE WHEN is_trial THEN 1.0 ELSE 0 END), 3) AS trial_share
+FROM transactions
+WHERE NOT is_test;
+```
+
+| trial_share |
+|---|
+| 0.113 |
+
+Это то же, что исправленный `share_a` в ловушке выше: триалы — 11,3 % строк без тестовых покупок.
+
+## Медиана и перцентили
+
+Несколько дорогих покупок тянут среднее вверх. Медиана — среднее по порядку значение, и редкие большие значения её не сдвигают. PostgreSQL считает её агрегатом с сортировкой (ordered-set aggregate):
+
+```sql
+SELECT channel,
+       ROUND(AVG(charged_usd), 2) AS avg_usd,
+       ROUND(CAST(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY charged_usd) AS numeric), 2) AS median_usd
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+GROUP BY channel
+ORDER BY channel;
+```
+
+| channel | avg_usd | median_usd |
+|---|---|---|
+| north_market | 14.91 | 7.99 |
+| south_market | 15.37 | 7.99 |
+| web | 13.19 | 7.99 |
+
+У всех каналов продаж медиана 7,99, а средние — от 13 до 16: их тянет вверх меньшая часть годовых тарифов.
+
+- Синтаксис — `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`; 90-й перцентиль — `0.9`. Работает с `GROUP BY`, как любой агрегат.
+- `PERCENTILE_CONT` интерполирует между соседями, `PERCENTILE_DISC` возвращает значение, которое есть в данных.
+- Возвращает `double precision`, поэтому `ROUND(…, 2)` без каста падает: `function round(double precision, integer) does not exist`.
+- Это не оконная функция. `OVER (PARTITION BY …)` падает с `OVER is not supported for ordered-set aggregate percentile_cont`. Считайте через `GROUP BY` и присоединяйте результат, если он нужен в каждой строке.
+
+```sql
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS cont,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY x) AS disc
+FROM (VALUES (1), (2), (3), (10)) AS v(x);
+```
+
+| cont | disc |
+|---|---|
+| 2.5 | 2 |
+
+## Практика
+
+<Drill id="s-case">
+
+`CASE` проверяет ветки сверху вниз и берёт первую подходящую. Поэтому второе условие — просто `<= 20`: всё, что меньше 5, поймала первая ветка. В скрытых данных есть продажи ровно на 5,00 и 20,00, поэтому `<= 5` в первой ветке или `< 20` во второй проверку не пройдут. `GROUP BY 1` — группировка по первой колонке `SELECT`. Порядок строк здесь не проверяется.
+
+</Drill>
+
+<Drill id="s-filter-multi">
+
+Несколько счётчиков в одной группировке — `COUNT(*) FILTER (WHERE …)`. Переносимый вариант — `SUM(CASE WHEN … THEN 1 ELSE 0 END)`. Три отдельных запроса и `JOIN` не нужны.
+
+</Drill>
+
+<Drill id="s-rate">
+
+`COUNT` — целое, и целое, делённое на целое, в PostgreSQL дало бы здесь 0. Нужен `1.0 *` или `::numeric`. Сентябрь не берём намеренно: возвраты приходят до трёх недель после покупки, и последний месяц ещё не полный.
+
+</Drill>
+
+<Drill id="s-median">
+
+Медиана и перцентили — `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`; p90 — `0.9`, p95 — `0.95`. Результат — `double precision`, поэтому для `ROUND` с двумя знаками нужен каст в `numeric`. Каждый недельный тариф стоит 2,99, поэтому оба перцентиля P1W равны.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Перед каждой долей назовите вслух обе её части: «The numerator is refunded paid transactions; the denominator is all paid transactions in the same months.» Так часто находится фильтр, который есть в одной части и забыт в другой.
+
+Если спросят, заработает ли запрос в MySQL, хватит одной фразы: «Not as it is. I'd rewrite each FILTER as SUM(CASE WHEN … THEN 1 ELSE 0 END), and the numbers stay the same.»
+</Aside>
+
+## Что почитать
+
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) — полная и простая формы и что бывает без `ELSE`.
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — `FILTER` и `WITHIN GROUP`.
+- [Ordered-set aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html#FUNCTIONS-ORDEREDSET-TABLE) — `percentile_cont`, `percentile_disc` и `mode`.
+- [Mathematical operators](https://www.postgresql.org/docs/current/functions-math.html) — целочисленное деление отбрасывает дробь; `round` со знаками принимает `numeric`.
+- [NULLIF](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-NULLIF) — защита от деления на ноль.
+
+## Связанные темы
+
+- [Группировка и подсчёт](/sql/grouping-and-counting/) — `GROUP BY`, внутри которого живут условные агрегаты.
+- [Логика NULL](/sql/null-logic/) — почему `CASE` без `ELSE` работает в `AVG` и почему пустой `SUM` — NULL.
+- [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/) — доля от итога через оконную функцию.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — суммы со знаком и округление денег.
+- [Воронки и отток](/sql-tasks/funnels-and-churn/) — задачи из нескольких счётчиков и долей.

@@ -1,0 +1,187 @@
+---
+title: Intervals
+description: Half-open periods [start, end), the overlap test a < d and c < b, touching ends, merging periods after a sort by start, and the total time they cover.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+A subscription is a period: it starts, and later it ends. Tasks about periods ask whether two of them overlap, when a customer had access, how many days were covered, or how many subscriptions were active at once. The code is short. The bugs are in the boundaries: a period that ends exactly when the next one starts, a period inside another, an input that is not sorted.
+
+<Aside type="tip" title="TL;DR">
+- Periods are half-open, `[start, end)`: the start is included, the end is not. The length is `end - start`.
+- Active at moment `m`: `start <= m < end`.
+- Overlap of `[a, b)` and `[c, d)`: `a < d and c < b`. Touching ends do not overlap.
+- Merge: sort by start, keep the current period, extend it with `max(cur_end, end)` while the next one starts no later than its end, otherwise start a new one.
+- Total covered time is the sum of the merged lengths. The sort makes it O(n log n).
+</Aside>
+
+## Half-open intervals
+
+```python
+from datetime import datetime
+
+sep = (datetime(2026, 9, 1), datetime(2026, 10, 1))
+oct_ = (datetime(2026, 10, 1), datetime(2026, 11, 1))
+m = datetime(2026, 10, 1)                     # midnight between the two months
+
+print(sep[0] <= m < sep[1], oct_[0] <= m < oct_[1])   # False True -- the moment is in one month only
+print(sep[1] - sep[0], oct_[1] - oct_[0])             # 30 days, 0:00:00 31 days, 0:00:00
+```
+
+September is `[1 September, 1 October)`. Half-open periods have three useful properties:
+
+- **Each moment belongs to exactly one period.** Midnight on 1 October is in October, not in both months.
+- **The length is a subtraction.** `end - start` is 30 days for September, with no `+ 1`.
+- **Consecutive periods touch without overlapping.** A renewal that starts when the previous period ends is not a double subscription.
+
+The practice dataset stores every transaction as `[start_time, end_time)`, and PostgreSQL range types use `[)` by default. When a task does not say, ask: *"Is the end of the period included or excluded?"*
+
+## The overlap test
+
+Two periods overlap when each one starts before the other one ends. In code, with `a` and `b` as the two periods:
+
+```python
+from datetime import date
+
+def d(day):
+    return date(2026, 9, day)
+
+def overlaps(a_start, a_end, b_start, b_end):
+    return a_start < b_end and b_start < a_end
+
+def overlaps_wrong(a_start, a_end, b_start, b_end):
+    return a_start <= b_start < a_end or a_start < b_end <= a_end   # "an end of b is inside a"
+
+cases = {
+    "apart":      (d(1), d(5), d(10), d(15)),
+    "touching":   (d(1), d(10), d(10), d(15)),
+    "partial":    (d(1), d(10), d(5), d(15)),
+    "a inside b": (d(5), d(6), d(1), d(30)),
+}
+for name, c in cases.items():
+    print(f"{name:<11} {overlaps(*c)!s:<6} {overlaps_wrong(*c)}")
+```
+
+| Case | `overlaps` | `overlaps_wrong` |
+|---|---|---|
+| apart | `False` | `False` |
+| touching | `False` | `False` |
+| partial | `True` | `True` |
+| a inside b | `True` | `False` |
+
+The comparisons are strict (`<`), because the end is not part of the period: two periods that touch on 10 September share no day. The "wrong" version checks whether an end of `b` falls inside `a`. It misses the case where `a` lies inside `b`, because then neither end of `b` is inside `a`. The two-comparison test covers every case and is easier to say out loud.
+
+The length of the overlap is the earliest end minus the latest start, but never below zero:
+
+```python
+from datetime import timedelta
+
+def overlap_days(a_start, a_end, b_start, b_end):
+    return max(timedelta(0), min(a_end, b_end) - max(a_start, b_start)).days
+
+print(overlap_days(d(1), d(10), d(5), d(15)))    # 5 -- 5 to 9 September
+print(overlap_days(d(1), d(10), d(10), d(15)))   # 0 -- touching
+print(overlap_days(d(1), d(5), d(10), d(15)))    # 0 -- apart: without max() it would be -5
+```
+
+## Merging after a sort by start
+
+Merging turns a list of periods that may overlap into a list that does not. It is the answer to "when did the customer have access?". One pass is enough after a sort:
+
+1. Sort the periods by start. Tuples sort by their first element, so `sorted(periods)` is enough.
+2. Keep a current period. If the next one starts no later than the current end, extend the current end to `max(current_end, end)`.
+3. Otherwise there is a gap: close the current period and start a new one.
+
+Here is the trace for five periods in September, given in the order `[20, 25)`, `[1, 10)`, `[5, 20)`, `[2, 3)`, `[28, 30)`:
+
+| Next period (sorted) | Step | Current period | Result so far |
+|---|---|---|---|
+| `[1, 10)` | new | `[1, 10)` | `[1, 10)` |
+| `[2, 3)` | extend | `[1, 10)` | `[1, 10)` |
+| `[5, 20)` | extend | `[1, 20)` | `[1, 20)` |
+| `[20, 25)` | extend | `[1, 25)` | `[1, 25)` |
+| `[28, 30)` | new | `[28, 30)` | `[1, 25)`, `[28, 30)` |
+
+`[20, 25)` touches `[1, 20)`, and this loop merges it, because `start <= current_end`. For coverage it makes no difference: there is no gap either way. In a list that people read, it may matter, so ask: *"Should periods that touch be merged?"*
+
+Two bugs are common, and both pass the easy examples:
+
+- **No `max()`.** With `current_end = end`, the period `[2, 3)` inside `[1, 10)` shrinks it: the loop returns `[1, 3)` for these two periods.
+- **No sort.** On `[20, 25)`, `[1, 10)`, `[5, 20)` in the given order, the same loop returns only `[20, 25)`: every later period "overlaps" the first one and never moves its start.
+
+The sort costs O(n log n) and the pass costs O(n). Comparing every pair of periods is O(n²), and it still does not give the merged list.
+
+## Total covered time
+
+The total covered time is the sum of the lengths of the merged periods. In the trace above it is `[1, 25)` plus `[28, 30)`: 24 + 2 = 26 days. Overlaps are counted once, because the merged periods do not overlap.
+
+A related follow-up asks for the largest number of periods active at the same time. The usual answer is a sweep line: +1 at each start, −1 at each end, sort the events, and keep a running count.
+
+```python
+def max_active(periods):
+    events = []
+    for start, end in periods:
+        events.append((start, +1))
+        events.append((end, -1))
+    events.sort()                    # at the same moment -1 sorts before +1: an end frees the place first
+    active = best = 0
+    for _, delta in events:
+        active += delta
+        best = max(best, active)
+    return best
+
+periods = [(d(1), d(10)), (d(5), d(20)), (d(10), d(15)), (d(12), d(13))]
+print(max_active(periods))                            # 3 -- on 12 September: [5, 20), [10, 15), [12, 13)
+print(max_active([(d(1), d(10)), (d(10), d(15))]))    # 1 -- touching periods are never active together
+```
+
+The tie order follows from the half-open rule. If starts came before ends at the same moment, the two touching periods would count as 2.
+
+## Practice
+
+<Drill id="y-overlap">
+
+Two periods overlap when each one starts before the other one ends: `a_start < b_end and b_start < a_end`. The comparison is strict because the end is excluded: periods that touch on 10 September do not overlap. The third check is a period inside another, the case that breaks "is an end of b inside a?".
+
+</Drill>
+
+<Drill id="y-merge">
+
+Sort by start, then one pass: keep the current period and extend it while the next one starts no later than its end; otherwise add its length to the total and start a new one. `max(cur_end, end)` stops a period inside the current one from shrinking it. The third check is the trace above without `[28, 30)`, in a mixed order: 24 days. Without `max()` the loop returns 22, and without the sort it returns 5. The empty list must give 0. O(n log n) because of the sort.
+
+</Drill>
+
+<Drill id="y-max-active">
+
+The sweep line from the section above: +1 at each start, −1 at each end, sort, then keep a running count and its maximum. Tuples sort by time and then by the second element, so at the same moment `-1` comes before `+1`: an end frees its place before the next start takes it. That is the half-open rule. The second check gives three touching periods in reverse order. A sort by time alone (`key=lambda e: e[0]`) keeps the input order at a tie, puts a start before an end and returns 2. Counting, for each period, the periods that overlap it gives 3 on the first check: `[2, 3)` and `[5, 6)` both overlap `[1, 10)`, but not each other. O(n log n) because of the sort.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Draw the case in a comment before you write the comparison. It takes ten seconds and shows the boundary to both of you:
+
+```python
+# a: [1 ------- 10)
+# b:            [10 ------ 15)    touching: no common day
+```
+
+Then say the rule in plain words: *"The end is excluded, so these two do not overlap. Two periods overlap if each one starts before the other one ends."* For the busiest moment the answer is a sweep line: *"Plus one at each start, minus one at each end, and ends first when the times are equal."*
+</Aside>
+
+## Further reading
+
+- [Sorting techniques](https://docs.python.org/3/howto/sorting.html) — how tuples and keys sort, which the merge depends on.
+- [sorted()](https://docs.python.org/3/builtins/functions.html#sorted) — the function behind step 1.
+- [timedelta objects](https://docs.python.org/3/library/datetime.html#timedelta-objects) — lengths of periods, `max(timedelta(0), …)` and `.days`.
+- [PostgreSQL range types](https://www.postgresql.org/docs/current/rangetypes.html) — `[)` bounds by default and the `&&` overlap operator.
+
+## Related topics
+
+- [Dates and durations](/python/dates-and-durations/) — `date`, `datetime` and `timedelta`, the values inside the periods.
+- [Sorting and top-k](/python/sorting-and-top-k/) — sorting by several keys, as in the sweep line.
+- [Time windows](/python/time-windows/) — a sliding window over time, the other kind of interval task.
+- [Filters and dates](/sql/filters-and-dates/) — half-open date ranges in SQL.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — "active at a moment" and "every day" in SQL.
+- [Events and time](/python-tasks/events-and-time/) — merging periods and counting daily actives as full tasks.

@@ -1,0 +1,255 @@
+---
+title: Duplicates and idempotency
+description: At-least-once delivery, deliveries versus events, keeping the first copy with ROW_NUMBER, and the cure at write time with UNIQUE and INSERT … ON CONFLICT.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Webhooks, payouts and retried API calls can deliver the same fact twice. A report must count events, not deliveries. A system must store each fact once, even when two workers receive it at the same moment. The first is a query pattern; the second is a constraint in the table. A task often asks for the query first and for the constraint next.
+
+<Aside type="tip" title="TL;DR">
+- At-least-once delivery: the same event can arrive more than once. A duplicate has the same `event_id`.
+- Deliveries are `COUNT(*)`, events are `COUNT(DISTINCT event_id)`, duplicates are the difference.
+- If copies can fall into different groups, keep the first copy before you group: `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY received_at)`, then `rn = 1`.
+- The real cure is at write time: `PRIMARY KEY` or `UNIQUE` on the key, and `INSERT … ON CONFLICT (key) DO NOTHING`.
+- Upsert: `ON CONFLICT (key) DO UPDATE SET v = t.v + EXCLUDED.v`. Without `t.v +` it overwrites the value.
+</Aside>
+
+## Why the same event arrives twice
+
+A sender of webhooks retries until it gets a success response. If the receiver processed the event but the response was lost, the sender cannot know that, and it sends the event again. This is **at-least-once delivery**: nothing is lost, but some events come twice. Exactly-once delivery over a network is not something you can rely on. What you can build is at-least-once delivery plus processing where a repeat changes nothing. That property is **idempotency**.
+
+In the practice data, `webhook_events` keeps every delivery. A duplicate is an exact copy of the event; only `received_at` differs:
+
+```sql
+SELECT event_id, type, occurred_at, received_at
+FROM webhook_events
+WHERE event_id IN ('evt_000029', 'evt_000032')
+ORDER BY event_id, received_at;
+```
+
+| event_id | type | occurred_at | received_at |
+|---|---|---|---|
+| evt_000029 | expiration | 2026-09-26 10:57:18 | 2026-09-26 10:58:16 |
+| evt_000029 | expiration | 2026-09-26 10:57:18 | 2026-09-26 11:04:49 |
+| evt_000032 | expiration | 2026-08-01 17:02:23 | 2026-08-01 17:03:15 |
+| evt_000032 | expiration | 2026-08-01 17:02:23 | 2026-08-01 17:12:19 |
+
+To list all repeated ids, group by the key: `GROUP BY event_id HAVING COUNT(*) > 1`.
+
+## Deliveries and events
+
+One delivery is one row. One event is one `event_id`. Count both, and the difference is the number of repeats:
+
+```sql
+SELECT COUNT(*)                            AS deliveries,
+       COUNT(DISTINCT event_id)            AS events,
+       COUNT(*) - COUNT(DISTINCT event_id) AS duplicates
+FROM webhook_events
+WHERE occurred_at >= TIMESTAMP '2026-08-01'
+  AND occurred_at <  TIMESTAMP '2026-09-01';
+```
+
+| deliveries | events | duplicates |
+|---|---|---|
+| 680 | 646 | 34 |
+
+Ask which one the task wants: "Do you want deliveries, or unique events?" A load report needs deliveries. A business report needs events.
+
+## Keep the first copy
+
+`COUNT(DISTINCT event_id)` removes repeats only inside its own group. If two copies of one event land in different groups, the event is counted in both. The copies of evt_000210 arrived at 12:54 and at 13:04 on 7 August, so a report per hour of `received_at` sees the event in two hours. Over August this adds up:
+
+```sql
+WITH per_hour AS (
+    SELECT date_trunc('hour', received_at) AS hour, COUNT(DISTINCT event_id) AS events
+    FROM webhook_events
+    WHERE occurred_at >= TIMESTAMP '2026-08-01'
+      AND occurred_at <  TIMESTAMP '2026-09-01'
+    GROUP BY 1
+)
+SELECT COUNT(*) AS hours, SUM(events) AS events
+FROM per_hour;
+```
+
+| hours | events |
+|---|---|
+| 420 | 651 |
+
+651 instead of 646: five events, evt_000210 among them, were counted twice. The fix is to remove the copies before grouping. Number the copies of each event by arrival and keep number 1, as on [Top N per group](/sql-patterns/top-n-per-group/):
+
+```sql
+WITH first_copy AS (
+    SELECT event_id, received_at,
+           ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY received_at) AS rn
+    FROM webhook_events
+    WHERE occurred_at >= TIMESTAMP '2026-08-01'
+      AND occurred_at <  TIMESTAMP '2026-09-01'
+),
+per_hour AS (
+    SELECT date_trunc('hour', received_at) AS hour, COUNT(*) AS events
+    FROM first_copy
+    WHERE rn = 1
+    GROUP BY 1
+)
+SELECT COUNT(*) AS hours, SUM(events) AS events
+FROM per_hour;
+```
+
+| hours | events |
+|---|---|
+| 420 | 646 |
+
+`rn = 1` is the event and `rn > 1` are the duplicates. The rule: if every column you group by is the same in all copies (`type`, `occurred_at`), `COUNT(DISTINCT event_id)` is enough. If you group by something that differs between copies, such as `received_at`, keep the first copy first.
+
+## The real cure: one row per fact
+
+A report that removes duplicates is a workaround. The cure is a table that cannot hold them. Checking in code does not work: two workers ask "is this event already stored?", both see nothing, and both insert. A unique key in the database lets only one of the two inserts succeed, however the workers interleave.
+
+### Constraints
+
+Here is a table for advance requests with every common constraint:
+
+```sql
+CREATE TABLE advance_requests (
+    advance_id      TEXT PRIMARY KEY,
+    merchant_id     TEXT NOT NULL REFERENCES merchants (id),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    amount_usd      NUMERIC(12, 2) NOT NULL CHECK (amount_usd > 0)
+);
+```
+
+After one valid row (`'a1', 'mer_01', 'mer_01:north_market:2026-09-01', 120.00`), each bad insert fails with its own error:
+
+| Constraint | Rejects | Error |
+|---|---|---|
+| `PRIMARY KEY` | a repeated id, and NULL | `duplicate key value violates unique constraint "advance_requests_pkey"` |
+| `UNIQUE` | a repeated value; NULL is allowed, even twice | `… unique constraint "advance_requests_idempotency_key_key"` |
+| `NOT NULL` | an empty value | `null value in column "amount_usd" … violates not-null constraint` |
+| `CHECK (amount_usd > 0)` | a row where the condition is false | `… violates check constraint "advance_requests_amount_usd_check"` |
+| `REFERENCES merchants (id)` | a link to a row that does not exist | `… violates foreign key constraint "advance_requests_merchant_id_fkey"` |
+
+Constraints keep the data correct even when the code has a bug. For money, let the database reject bad rows. Every run on this site is rolled back, so create the table, insert and select in one run.
+
+### INSERT … ON CONFLICT DO NOTHING
+
+An error on a repeat is safe, but noisy. `ON CONFLICT (key) DO NOTHING` turns a repeat into a quiet no-op. `RETURNING` tells you whether the row was inserted:
+
+```sql
+CREATE TEMP TABLE webhook_inbox (
+    event_id    TEXT PRIMARY KEY,
+    type        TEXT NOT NULL,
+    received_at TIMESTAMP NOT NULL
+);
+INSERT INTO webhook_inbox VALUES ('evt_000029', 'expiration', TIMESTAMP '2026-09-26 10:58:16')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;
+INSERT INTO webhook_inbox VALUES ('evt_000029', 'expiration', TIMESTAMP '2026-09-26 11:04:49')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;
+```
+
+| event_id |
+|---|
+| evt_000029 |
+
+The first insert returns the id. The second returns 0 rows: the event was already there. In application code, this is the signal to skip the side effects, such as sending an email or moving money. Pushed through the same table, all 680 August deliveries leave 646 rows, one per event.
+
+The conflict target must have a unique constraint or index. `ON CONFLICT (k)` on a column without one fails: `there is no unique or exclusion constraint matching the ON CONFLICT specification`.
+
+Choose the key that identifies the fact, not the row. A retried advance request may get a new `advance_id`, but it carries the same idempotency key (`merchant:channel:month`). So the target is `ON CONFLICT (idempotency_key) DO NOTHING`, and a second request with a new id inserts nothing.
+
+### Upsert: ON CONFLICT DO UPDATE
+
+`DO UPDATE` inserts a new key, or changes the existing row. `EXCLUDED` is the row you tried to insert. Here two batches of webhook deliveries add to a daily counter:
+
+```sql
+CREATE TEMP TABLE daily_deliveries (
+    day        DATE PRIMARY KEY,
+    deliveries INT  NOT NULL
+);
+INSERT INTO daily_deliveries
+SELECT CAST(received_at AS DATE), COUNT(*)
+FROM webhook_events
+WHERE received_at >= TIMESTAMP '2026-09-01 00:00' AND received_at < TIMESTAMP '2026-09-01 12:00'
+GROUP BY 1
+ON CONFLICT (day) DO UPDATE SET deliveries = daily_deliveries.deliveries + EXCLUDED.deliveries
+RETURNING day, deliveries;
+INSERT INTO daily_deliveries
+SELECT CAST(received_at AS DATE), COUNT(*)
+FROM webhook_events
+WHERE received_at >= TIMESTAMP '2026-09-01 12:00' AND received_at < TIMESTAMP '2026-09-02 00:00'
+GROUP BY 1
+ON CONFLICT (day) DO UPDATE SET deliveries = daily_deliveries.deliveries + EXCLUDED.deliveries
+RETURNING day, deliveries;
+```
+
+| day | deliveries |
+|---|---|
+| 2026-09-01 | 15 |
+
+| day | deliveries |
+|---|---|
+| 2026-09-01 | 29 |
+
+The first batch inserts 15. The second finds the day and adds 14, so the counter is 29, the number of deliveries received that day. Three details:
+
+- `SET deliveries = EXCLUDED.deliveries`, without `daily_deliveries.deliveries +`, overwrites: the counter would end at 14.
+- One statement cannot update the same row twice. A batch with two rows for one day fails: `ON CONFLICT DO UPDATE command cannot affect row a second time`. Aggregate the batch to one row per key first, as with the `GROUP BY` above.
+- An adding upsert is not idempotent on its own: the same batch applied twice adds twice. Store the event ids with `DO NOTHING` in the same transaction, and add only for the ids that were inserted.
+
+<Talk q="Two workers receive the same webhook at the same time. What happens?">
+
+"Both try to insert the event id, and the unique key lets only one insert succeed. With ON CONFLICT DO NOTHING the other one simply inserts nothing and gets no row back, so it skips the side effects. A check in code, select first and then insert, would race: both selects can see nothing."
+
+</Talk>
+
+## Practice
+
+<Drill id="s-dedupe">
+
+A duplicate is the same `event_id`. Deliveries are `COUNT(*)`, events are `COUNT(DISTINCT event_id)`, and the difference is the repeats. The copies are exact, so all copies of an event have the same type, and `COUNT(DISTINCT)` inside each type is enough. The real cure is a unique key on `event_id` and `ON CONFLICT DO NOTHING` when the webhook arrives.
+
+</Drill>
+
+<Drill id="s-ddl">
+
+The database keeps the guarantee: `PRIMARY KEY` (or `UNIQUE`) plus `INSERT … ON CONFLICT DO NOTHING`. A check in code, "is it already there?", does not survive two workers racing. `CHECK (amount_usd >= 0)` rejects a negative amount: try to insert -1 and read the error.
+
+</Drill>
+
+<Drill id="s-upsert">
+
+Upsert: `ON CONFLICT (merchant_id) DO UPDATE`, with the new amount in `EXCLUDED`. The balance changes in one atomic statement, with no "read, compute, write" in code: 100.00 + 2.50 − 102.50 = 0.00. In the advances program this runs in the same transaction as the ledger entry.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Give the short answer first and stop: "A unique key on event_id and INSERT … ON CONFLICT DO NOTHING. The database keeps the guarantee even with two workers; a check in code would race."
+
+Then wait for the next question. Each one has a one-line reply:
+
+- "Which copy is the real one?" — "Usually the first by received_at, but I'd like to confirm that."
+- "How long do you keep the ids?" — "Longer than the sender's retry window."
+- "How do you make a payment retry safe?" — "The client sends an idempotency key. The server stores it under a unique constraint and returns the stored result on a repeat."
+
+If you remove duplicates with `DISTINCT` in a report, call it a workaround, not the fix. The full task is [Q11 on Money and reconciliation](/sql-tasks/money-and-reconciliation/).
+</Aside>
+
+## Further reading
+
+- [INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT) — `DO NOTHING`, `DO UPDATE`, `EXCLUDED` and the conflict target.
+- [Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — `CHECK`, `NOT NULL`, `UNIQUE`, primary and foreign keys.
+- [Returning data from modified rows](https://www.postgresql.org/docs/current/dml-returning.html) — `RETURNING` on `INSERT`, `UPDATE` and `DELETE`.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `ROW_NUMBER` for the first copy.
+
+## Related topics
+
+- [Top N per group](/sql-patterns/top-n-per-group/) — the `ROW_NUMBER` and `rn = 1` that keep the first copy.
+- [Grouping and counting](/sql/grouping-and-counting/) — `COUNT(*)`, `COUNT(column)` and `COUNT(DISTINCT)`.
+- [Database concepts](/sql-patterns/database-concepts/) — transactions, isolation and constraints, for the talk after the task.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — the idempotency key that stops a second advance.
+- [Sets and duplicates](/python/sets-and-duplicates/) — "seen before?" in Python, with a set.

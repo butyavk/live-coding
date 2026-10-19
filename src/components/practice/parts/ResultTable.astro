@@ -1,0 +1,33 @@
+---
+// A static result table (build time): column names and rows, in its own horizontal scroller.
+import { cellText } from '../lib/data';
+
+interface Props {
+  cols: string[];
+  rows: unknown[][];
+  /** Total row count, when only a sample is shown. */
+  n?: number;
+  rowsLabel?: string;
+  max?: number;
+}
+const { cols, rows, n, rowsLabel, max = 100 } = Astro.props;
+const shown = rows.slice(0, max);
+// A column is numeric when every value in it is a number or NULL (and at least one is a number).
+const numeric = cols.map((_, j) => shown.some((r) => typeof r[j] === 'number') && shown.every((r) => r[j] === null || typeof r[j] === 'number'));
+---
+<div class="lcp-scroll">
+  <table class="lcp-table">
+    <thead><tr>{cols.map((c, j) => <th class={numeric[j] ? 'lcp-num' : undefined}>{c}</th>)}</tr></thead>
+    <tbody>
+      {shown.map((r) => (
+        <tr>
+          {r.map((v, j) => {
+            const s = cellText(v);
+            return <td class={numeric[j] || typeof v === 'number' ? 'lcp-num' : undefined}>{s === null ? <span class="lcp-null">NULL</span> : s}</td>;
+          })}
+        </tr>
+      ))}
+    </tbody>
+  </table>
+</div>
+{rowsLabel && <div class="lcp-foot">{rowsLabel}</div>}

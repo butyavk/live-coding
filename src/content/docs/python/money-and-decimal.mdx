@@ -1,0 +1,169 @@
+---
+title: Money and Decimal
+description: Why money is never a float, Decimal from strings, rounding to cents with quantize and ROUND_HALF_UP, splitting an amount in cents and paying debts oldest first.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Revenue, fees, payouts, advances: a lot of interview tasks are about money. The interviewer checks three things early. Is the money a `Decimal`? Is it rounded to cents with an explicit mode? Do the parts add up to the total? A float in the chain or a lost cent in a split is the kind of bug that stays hidden until finance finds it.
+
+<Aside type="tip" title="TL;DR">
+- Money is `Decimal`, created from strings: `Decimal("9.99")`, never `Decimal(9.99)`.
+- Round to cents: `x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`. `round(x, 2)` on a `Decimal` is banker's rounding: `0.125` → `0.12`.
+- Round down (a limit, an amount we can advance at most): `rounding=ROUND_DOWN`.
+- Split an amount in whole cents: `divmod(cents, n)`, then one extra cent to each of the first `rest` parts.
+- Allocate a payout: `pay = min(left, due)`, record it only `if pay > 0`, stop when `left == 0`.
+</Aside>
+
+## Why not float
+
+```python
+from decimal import Decimal
+
+print(0.1 + 0.2 == 0.3, 0.1 + 0.2)                         # False 0.30000000000000004
+print(sum([0.10] * 3))                                     # 0.30000000000000004
+print(Decimal("0.1") + Decimal("0.2") == Decimal("0.3"))   # True
+
+print(Decimal(0.1))        # 0.1000000000000000055511151231257827021181583404541015625
+print(Decimal(str(0.1)))   # 0.1
+print(Decimal("9.99") * 3, Decimal("10.00") == Decimal("10"))   # 29.97 True
+```
+
+A float is a binary fraction. Most decimal amounts, such as `0.1`, have no exact binary form, so every float amount is a little off, and sums make the error visible. `Decimal` stores decimal digits, so `0.1` is exactly `0.1`.
+
+Create a `Decimal` from a string. `Decimal(0.1)` copies the float exactly, with its binary error. If the value is already a float, go through `str()`. Mixing the two types in arithmetic fails loudly, which is good: `Decimal("1.10") + 0.1` raises `TypeError: unsupported operand type(s) for +: 'decimal.Decimal' and 'float'`. A comparison does not fail: `Decimal("0.1") == 0.1` is `False`, with no error, because the float holds a value slightly above 0.1. So a check like `amount == expected` can be wrong, and nothing tells you. Mixing with `int` is fine: `Decimal("9.99") * 3` is `Decimal('29.97')`.
+
+A `Decimal` keeps its trailing zeros: `Decimal("10.00")` and `Decimal("10")` are equal, but they print differently. Tests that compare values do not care; a report that prints them might.
+
+<Talk q="Why not float for money? How do you round to cents?">
+
+"Float is binary, so 0.1 + 0.2 is not exactly 0.3, and the error grows in sums. I use Decimal created from strings, and `quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)` for cents. In the database it is NUMERIC(12, 2)."
+
+`round()` on a `Decimal` is banker's rounding: `0.125` → `0.12`.
+
+</Talk>
+
+## Rounding to cents
+
+```python
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+
+CENT = Decimal("0.01")
+for s in ("0.125", "0.135", "2.675", "23.9976"):
+    x = Decimal(s)
+    print(s,
+          x.quantize(CENT, rounding=ROUND_HALF_UP),
+          round(x, 2),
+          x.quantize(CENT),                    # no rounding=: the context default
+          x.quantize(CENT, rounding=ROUND_DOWN))
+
+print(round(2.675, 2))   # 2.67 -- a float: 2.675 is stored as slightly less
+```
+
+| Value | `quantize`, `ROUND_HALF_UP` | `round(x, 2)` | `quantize`, no mode | `quantize`, `ROUND_DOWN` |
+|---|---|---|---|---|
+| `0.125` | `0.13` | `0.12` | `0.12` | `0.12` |
+| `0.135` | `0.14` | `0.14` | `0.14` | `0.13` |
+| `2.675` | `2.68` | `2.68` | `2.68` | `2.67` |
+| `23.9976` | `24.00` | `24.00` | `24.00` | `23.99` |
+
+`quantize(Decimal("0.01"))` means "round to the same exponent as `0.01`", that is, to cents. Without `rounding=`, it uses the mode of the current context, which is `ROUND_HALF_EVEN` by default: a half goes to the even digit. `round(x, 2)` on a `Decimal` does the same, so `0.125` becomes `0.12` with both. Half up is what people expect from a receipt, so always pass `rounding=ROUND_HALF_UP` and say why. Use `ROUND_DOWN` when the amount is a limit that must never be exceeded.
+
+The last line shows why the input must be a `Decimal` before rounding: as a float, `2.675` is stored as slightly less, and `round` gives `2.67`.
+
+### Where to round
+
+```python
+fee = Decimal("9.99") * Decimal("0.15")
+print(fee, fee.quantize(CENT, rounding=ROUND_HALF_UP))      # 1.4985 1.50
+
+lines = [Decimal("0.125")] * 3
+per_line = sum(x.quantize(CENT, rounding=ROUND_HALF_UP) for x in lines)
+at_end = sum(lines).quantize(CENT, rounding=ROUND_HALF_UP)
+print(per_line, at_end)                                     # 0.39 0.38
+
+print(Decimal("100") / 3)         # 33.33333333333333333333333333 -- 28 significant digits
+print(Decimal(-7) // 2, -7 // 2)  # -3 -4 -- Decimal // goes toward zero, int // goes down
+```
+
+Multiplication keeps all digits: a 15% fee on `9.99` is `1.4985`. Rounding each line and rounding the total give different answers: `0.39` and `0.38` here. Ask which one the task wants: *"Do we round each line or only the total?"* Division gives 28 significant digits by default, so round the result before you store or compare it.
+
+## Splitting an amount in cents
+
+`100.00` split three ways cannot be three equal amounts in cents. Rounding each part on its own loses a cent:
+
+```python
+amount, n = Decimal("100.00"), 3
+
+naive = [(amount / n).quantize(CENT, rounding=ROUND_HALF_UP)] * n
+print(naive, sum(naive))   # [Decimal('33.33'), Decimal('33.33'), Decimal('33.33')] 99.99
+
+cents = int(amount * 100)        # 10000
+base, rest = divmod(cents, n)    # 3333 cents each, 1 cent left over
+print(base, rest)                # 3333 1
+```
+
+`divmod(a, b)` returns the quotient and the remainder at once. Work in whole cents: every part gets `base` cents, and the first `rest` parts get one cent more. Then the parts differ by at most one cent and always add up to the original amount. `int(amount * 100)` drops anything below a cent, so quantize the amount first if it can have more digits.
+
+## Allocating a payout oldest first
+
+A marketplace payout arrives, and the merchant has open debts, such as advances, oldest first. The rule fits in one sentence: *"Each debt gets min(what is left, what is due), and I stop when nothing is left."* With debts `d1 = 30.00` and `d2 = 50.00`:
+
+| Payout | Payments | Left for the merchant |
+|---|---|---|
+| `0.00` | none | `0.00` |
+| `20.00` | `d1` 20.00 | `0.00` |
+| `30.00` | `d1` 30.00 | `0.00` |
+| `45.00` | `d1` 30.00, `d2` 15.00 | `0.00` |
+| `100.00` | `d1` 30.00, `d2` 50.00 | `20.00` |
+| `-5.00` | `ValueError` | — |
+
+Each row is an edge case to test before you say "done": zero, a partial payment, exactly on a boundary, more than all debts, and bad input. Three mistakes show up again and again:
+
+- **A zero line.** Without `if pay > 0` (or a `break` when `left == 0`), the `30.00` payout also records `('d2', Decimal('0.00'))`.
+- **Only whole debts.** Every cent of the payout goes to the debt first. Paying only the debts that fit completely sends money to the merchant while a debt is still open.
+- **A loop around the loop.** `while left > 0:` around the `for` pays `d1` a second time when the payout is larger than all debts. One pass over the sorted debts and a `break` is enough.
+
+## Practice
+
+<Drill id="y-split">
+
+Money is divided in whole cents. `divmod(cents, n)` gives the base and the remainder, and the remainder goes one cent at a time to the first parts. Rounding each part on its own does not work: the sum would differ from the original amount by a cent. Putting the whole remainder on one part does not work either: the third check splits `10.00` into 7 and expects six parts of `1.43`, not one part of `1.48`. The fourth check tests the sum. Turn cents back into money with `scaleb(-2)` or `* Decimal("0.01")`: `Decimal(1000) / 100` is `Decimal('10')`, and the last check expects `Decimal('10.00')`.
+
+</Drill>
+
+<Drill id="y-allocate">
+
+The rule in one sentence: "each debt gets min(what is left, what is due); stop when the money runs out". Do not write zero lines: `if pay > 0`. The checks are the edge cases: a partial payment, exactly on a boundary, more than all debts, zero, and a negative payout that raises `ValueError`.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+| When | What to say |
+|---|---|
+| Before the code | *"Do we round half up or down? Each line, or only the total?"* |
+| While you write | *"Money stays in Decimal, created from strings. I round once, with quantize."* |
+| On a split | *"I work in whole cents, so the parts always add up to the total."* |
+| Asked about storage | *"NUMERIC(12, 2) in the database, never a float type."* |
+
+Before you say "done", run the allocation with a payout of zero and with more than all the debts. These two inputs catch a zero line and a debt paid twice. If the next request is *"Now each debt has a fee and a principal"*, keep the same loop and pay the fee of each debt before its principal.
+</Aside>
+
+## Further reading
+
+- [decimal: quick-start tutorial](https://docs.python.org/3/library/decimal.html#quick-start-tutorial) — creating values, the context and its default precision.
+- [Decimal.quantize](https://docs.python.org/3/library/decimal.html#decimal.Decimal.quantize) and [rounding modes](https://docs.python.org/3/library/decimal.html#rounding-modes) — `ROUND_HALF_UP`, `ROUND_HALF_EVEN`, `ROUND_DOWN`.
+- [decimal FAQ](https://docs.python.org/3/library/decimal.html#decimal-faq) — the recipe for "two decimal places".
+- [Floating-point arithmetic: issues and limitations](https://docs.python.org/3/tutorial/floatingpoint.html) — why `0.1 + 0.2` is not `0.3`.
+- [divmod()](https://docs.python.org/3/builtins/functions.html#divmod) — quotient and remainder in one call.
+- [PostgreSQL: arbitrary precision numbers](https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL) — `NUMERIC(precision, scale)` for money.
+
+## Related topics
+
+- [Errors and validation](/python/errors-and-validation/) — turning an input string into a `Decimal` safely.
+- [dict, defaultdict and Counter](/python/dicts-and-counting/) — totals per key with `defaultdict(Decimal)`.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — the same money in SQL: flows, balances and ledgers.
+- [Money tasks](/python-tasks/money/) — advances, matching payments and safe payouts as full tasks.

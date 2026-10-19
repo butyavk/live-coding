@@ -1,0 +1,286 @@
+---
+title: Indexes and EXPLAIN
+description: Which index helps a query and whether PostgreSQL uses it. B-tree, column order, partial and expression indexes, and how to read EXPLAIN plans.
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+When the query works, the interviewer often asks: "And on a table with a billion rows?" The answer is an index and a plan: which index helps, whether the database will use it, and how to check. The practice data is small (8,294 transactions), but its plans have the same shape as on a big table. Every plan below is a real `EXPLAIN` on it, with the long type names shortened to `…`.
+
+<Aside type="tip" title="TL;DR">
+- A B-tree index finds rows by a value or a range. It pays off when the query reads a small part of the table's pages: few rows, or more rows that lie together on disk, like a date range in a table written in time order.
+- A composite index puts the equality columns first and the range column last: `(product_id, start_time)` for `product_id = … AND start_time >= …`.
+- An index is not used when a function wraps the column (`CAST(start_time AS DATE) = …`) or when the query takes most of the table. How much is "most" depends on the physical order of the rows.
+- Read `EXPLAIN` from the bottom up. `Seq Scan` reads the whole table; `Index Scan`, `Index Only Scan` and `Bitmap Index Scan` use an index. `EXPLAIN ANALYZE` runs the query and adds the real numbers.
+- Every index slows down writes and takes space: add one for a real query, then check that the plan uses it.
+</Aside>
+
+## What a B-tree index is
+
+`CREATE INDEX` builds a B-tree by default. It is a sorted tree of the column's values, and each value points to its row in the table. To find a range, the database walks down the tree to the first value, then reads the values in order until the range ends. A B-tree serves `=`, `<`, `>`, `BETWEEN`, half-open ranges and `ORDER BY` on its columns.
+
+PostgreSQL creates an index for every `PRIMARY KEY`, `UNIQUE` and `EXCLUDE` constraint, and for nothing else. A foreign key column has no index unless you create one. In the practice data, only `merchants.id` and `products.id` have an index; `transactions` has none.
+
+## Reading a plan
+
+The question: how many transactions started in September 2026? First without an index:
+
+```sql
+EXPLAIN
+SELECT COUNT(*)
+FROM transactions
+WHERE start_time >= TIMESTAMP '2026-09-01'
+  AND start_time <  TIMESTAMP '2026-10-01';
+```
+
+```text
+Aggregate  (cost=325.57..325.58 rows=1 width=8)
+  ->  Seq Scan on transactions  (cost=0.00..324.41 rows=463 width=0)
+        Filter: ((start_time >= '2026-09-01 00:00:00'::timestamp …) AND (start_time < '2026-10-01 00:00:00'::timestamp …))
+```
+
+Then after `CREATE INDEX tx_start_time_idx ON transactions (start_time);`:
+
+```text
+Aggregate  (cost=34.59..34.60 rows=1 width=8)
+  ->  Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..33.43 rows=464 width=0)
+        Index Cond: ((start_time >= '2026-09-01 00:00:00'::timestamp …) AND (start_time < '2026-10-01 00:00:00'::timestamp …))
+```
+
+How to read it:
+
+1. **From the bottom up.** The most nested node runs first and passes its rows to the node above. Here the scan feeds `Aggregate`, which counts.
+2. **The node type** says how the rows are read:
+
+   | node | what it does |
+   |---|---|
+   | `Seq Scan` | reads the whole table and checks every row |
+   | `Index Scan` | finds the rows in the index, then reads each one from the table |
+   | `Index Only Scan` | everything the query needs is in the index |
+   | `Bitmap Index Scan` + `Bitmap Heap Scan` | collects the matches from the index, then reads their table pages in order, each page once |
+
+3. **`cost=start..total`** is an estimate in arbitrary units. Compare only plans of the same query: 325.58 against 34.60.
+4. **`rows=`** is the estimated number of rows.
+5. **`Filter`** is a check on every row that was read. **`Index Cond`** is the condition used to search the index.
+
+If the query needs a column that is not in the index, `SUM(revenue_usd)` instead of `COUNT(*)`, the plan becomes an `Index Scan`: the price has to be read from the table.
+
+### EXPLAIN ANALYZE
+
+`EXPLAIN` only plans. `EXPLAIN ANALYZE` also runs the query and adds what really happened. The times change from run to run; the row counts do not. Trimmed, with the index:
+
+```text
+Aggregate  (cost=34.59..34.60 rows=1 width=8) (actual time=0.807..0.809 rows=1.00 loops=1)
+  ->  Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..33.43 rows=464 width=0) (actual time=0.106..0.538 rows=475.00 loops=1)
+        Heap Fetches: 475
+        Buffers: shared hit=12 read=1
+```
+
+And without it:
+
+```text
+  ->  Seq Scan on transactions  (cost=0.00..324.41 rows=463 width=0) (actual time=1.362..1.907 rows=475.00 loops=1)
+        Rows Removed by Filter: 7819
+        Buffers: shared hit=200
+```
+
+- **Estimate against reality:** 464 rows planned, 475 found, so the statistics are fine. When they differ by tens of times, the plan was chosen for the wrong numbers. Often the statistics are stale: run `ANALYZE transactions` and look again. If that does not help, the conditions may depend on each other (see below).
+- **`Rows Removed by Filter: 7819`**: the full scan read every row to keep 475.
+- **`Buffers`**: 200 pages of 8 kB is the whole table; the index read 13.
+- **`Heap Fetches: 475`**: the index-only scan still checked each row in the table, because only `VACUUM` marks the pages it may skip.
+
+`EXPLAIN ANALYZE` on an `UPDATE` or a `DELETE` really changes the data. Run it inside `BEGIN; … ROLLBACK;`.
+
+The planner treats two conditions as independent and multiplies their shares. In the practice data every plan belongs to one product, so `product_id = 'prd_07' AND plan_id = 'prd_07.monthly'` is estimated at 17 rows and returns 343. A new `ANALYZE` still says 17. Extended statistics tell the planner that the columns depend on each other:
+
+```sql
+CREATE STATISTICS tx_product_plan (dependencies) ON product_id, plan_id FROM transactions;
+ANALYZE transactions;   -- now the estimate is 343 rows, the same as the actual count
+```
+
+## Composite indexes: the order of columns
+
+A composite index is sorted by its first column, then by the second inside each value of the first, like a phone book sorted by last name and then first name. Finding "Smith, John" is quick. Finding every "John" means looking under every last name.
+
+An index on `(product_id, start_time)` therefore serves three kinds of query differently:
+
+| condition | how the index helps |
+|---|---|
+| `product_id = … AND start_time` range | one search: both columns in `Index Cond` |
+| `product_id = …` | one search on the first column |
+| a `start_time` range alone | one search per `product_id` value |
+
+The first case, for prd_09 in September:
+
+```text
+Bitmap Heap Scan on transactions  (cost=4.53..63.29 rows=19 width=6)
+  Recheck Cond: ((product_id = 'prd_09'::text) AND (start_time >= …) AND (start_time < …))
+  ->  Bitmap Index Scan on tx_product_start_idx  (cost=0.00..4.52 rows=19 width=0)
+        Index Cond: ((product_id = 'prd_09'::text) AND (start_time >= …) AND (start_time < …))
+```
+
+The third case is the expensive one. For `SUM(revenue_usd)` of all September transactions, the same query with three different set-ups:
+
+| set-up | plan | total cost |
+|---|---|---|
+| no index | `Seq Scan` | 325.58 |
+| index on `(product_id, start_time)` | `Bitmap Index Scan`, `Index Searches: 21` | 260.33 |
+| index on `(start_time)` | `Index Scan` | 34.60 |
+
+PostgreSQL 18 can use the composite index here with a *skip scan*: one search for each of the 20 products, which `EXPLAIN ANALYZE` reports as `Index Searches: 21`. It works only when the first column has few distinct values. Older versions, or a first column with many values, read the whole index or the whole table instead.
+
+The rule: **equality columns first, the range column last.** With the range first, `(start_time, product_id)`, the index has to read every September row of every product and check `product_id` on each.
+
+## When an index is not used
+
+1. **A function wraps the column.** The index holds `start_time`, not `CAST(start_time AS DATE)`. With the index on `start_time`:
+
+   ```text
+   -- WHERE CAST(start_time AS DATE) = DATE '2026-09-15'
+   Seq Scan on transactions  (cost=0.00..324.41 rows=41 width=0)
+     Filter: ((start_time)::date = '2026-09-15'::date)
+
+   -- WHERE start_time >= TIMESTAMP '2026-09-15' AND start_time < TIMESTAMP '2026-09-16'
+   Index Only Scan using tx_start_time_idx on transactions  (cost=0.29..8.70 rows=17 width=0)
+   ```
+
+   `EXTRACT(MONTH FROM start_time) = 9` gives a `Seq Scan` for the same reason. This is one more reason to write dates as half-open ranges ([Filters and dates](/sql/filters-and-dates/)).
+
+2. **The query takes most of the table.** `start_time >= TIMESTAMP '2025-01-01'` matches all 8,294 rows, and the plan is a `Seq Scan` even with the index. That is the right choice: reading the table in order is cheaper than jumping through the index for every row. Where "most" begins depends on the physical order, below.
+3. **The table is tiny.** The 12 rows of `merchants` fit in one 8 kB page. Even a lookup by the primary key reads the table: `Seq Scan on merchants (cost=0.00..1.15 rows=1 width=30)`.
+
+### Physical order: correlation
+
+An `Index Scan` finds the rows in the index, then reads their pages in the table. If the rows lie next to each other, it reads a few neighbouring pages. If they are scattered, it reads a page for almost every row. `pg_stats` measures this as `correlation`, from -1 to 1: 1 means the values grow in the same order as the rows on disk.
+
+```sql
+SELECT attname, ROUND(correlation::numeric, 4) AS correlation
+FROM pg_stats
+WHERE tablename = 'transactions'
+  AND attname IN ('start_time', 'customer_id')
+ORDER BY attname;
+```
+
+| attname | correlation |
+|---|---|
+| customer_id | 0.0002 |
+| start_time | 0.9994 |
+
+Transactions are written in time order, so `start_time` follows the disk and `customer_id` does not. With an index on each column, `SUM(revenue_usd)` for about 6% of the rows:
+
+| filter | rows | plan | total cost |
+|---|---|---|---|
+| `start_time >= TIMESTAMP '2026-09-01'` | 475 | `Index Scan` | 33.44 |
+| `customer_id < 'cus_00131'` | 484 | `Bitmap Heap Scan` | 219.51 |
+| either one, with no index | | `Seq Scan` | about 305 |
+
+The share of rows is almost the same, but the costs are far apart. The planner keeps the index on `start_time` even for 65% of the table (`start_time >= TIMESTAMP '2025-10-08'`) and switches to a `Seq Scan` only at about two thirds. So the rule is about pages, not rows:
+
+- A table that is only appended to in time order keeps date ranges cheap by itself: transactions, webhook events, ledger entries. This is also what a [BRIN index](/sql-patterns/database-concepts/) needs.
+- Rows loaded out of order, or updated a lot, lose that order. `CLUSTER transactions USING tx_start_time_idx` rewrites the table in index order once. It locks the table while it runs, and new rows do not follow the order.
+- `EXPLAIN` already takes the correlation into account. Check the plan instead of guessing a share.
+
+## Expression and partial indexes
+
+When the query must keep a function, index the expression itself. The expression in the query has to match the index exactly:
+
+```sql
+CREATE INDEX tx_day_idx ON transactions (CAST(start_time AS DATE));
+```
+
+```text
+-- WHERE CAST(start_time AS DATE) = DATE '2026-09-15'
+Bitmap Heap Scan on transactions  (cost=4.60..107.53 rows=41 width=0)
+  ->  Bitmap Index Scan on tx_day_idx  (cost=0.00..4.59 rows=41 width=0)
+        Index Cond: ((start_time)::date = '2026-09-15'::date)
+```
+
+A partial index holds only the rows a query needs. Only 188 of the 8,294 transactions have a refund:
+
+```sql
+CREATE INDEX tx_refunded_idx ON transactions (refunded_at)
+WHERE refunded_at IS NOT NULL;
+```
+
+A query on refunds in September uses it (`Index Only Scan using tx_refunded_idx`), because `refunded_at >= …` can only be true when `refunded_at` is not NULL. The planner uses a partial index only when the query's `WHERE` implies the index's `WHERE`.
+
+## What an index costs
+
+Every index makes writes slower, and in PostgreSQL the cost depends on the kind of write:
+
+- **`INSERT`** adds an entry to every index. A table with five indexes does six writes for each new row.
+- **`UPDATE`** writes a new version of the row. If no indexed column changes and the new version fits on the same page, it is a HOT update and the indexes stay as they are. Otherwise every index gets a new entry, even an index whose columns did not change.
+- **`DELETE`** only marks the row as deleted. Its index entries stay until `VACUUM` removes them, so the work moves to `VACUUM`, which has to clean every index.
+
+Indexes also take space:
+
+| relation | size |
+|---|---|
+| `transactions` | 1600 kB |
+| `tx_start_time_idx` | 200 kB |
+| `tx_day_idx` | 88 kB |
+| `tx_refunded_idx` | 16 kB |
+
+So an index is added for a real query, and the plan is checked afterwards. An index that no query uses only costs writes.
+
+## Questions out loud
+
+<Talk q="This query is slow on a big table. What would you do?">
+
+"First I would look at the plan with EXPLAIN ANALYZE. If it scans the whole table, I would add an index on the columns in the WHERE clause, for example (product_id, start_time), and then check the plan again."
+
+The longer answer, with stale statistics and sorts that spill to disk, is on [Database concepts](/sql-patterns/database-concepts/).
+
+</Talk>
+
+<Talk q="Does the order of columns in a composite index matter?">
+
+"Yes. An index on (product_id, start_time) helps `WHERE product_id = … AND start_time > …` and `WHERE product_id = …`, but not efficiently for `WHERE start_time > …` alone. Equality columns go first, the range column last."
+
+PostgreSQL 18 can skip-scan such an index when the first column has few values (the `Index Searches: 21` above), but do not build a design on it.
+
+</Talk>
+
+<Talk q="Why not index every column?">
+
+"Every index slows down writes and takes space. I add an index for a real query, and I check that the planner uses it."
+
+</Talk>
+
+<Talk q="When is an index not used?">
+
+"When a function wraps the column, like `date(start_time) = …`. Then I compare with a range instead, or create an expression index. Also when the query returns a large part of the table: a full scan is cheaper then. How large depends on the order of the rows on disk: a date range in a table written in time order stays cheap for much longer."
+
+</Talk>
+
+## Practice
+
+<Drill id="s-explain">
+
+There is nothing to check here: compare the plans yourself. Every run is rolled back, so the index exists only during the run that creates it. Run the `EXPLAIN` without the `CREATE INDEX` line first, and you get a `Seq Scan`; with the index, an `Index Only Scan`, and the cost drops from about 325 to 35. Then change one thing at a time. `SUM(revenue_usd)` instead of `COUNT(*)` gives an `Index Scan`. `EXTRACT(MONTH FROM start_time) = 9` gives a `Seq Scan` again. When the range covers most of the table, a `Seq Scan` is the planner's right choice, not a failure.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Narrate the plan from the bottom up, with its numbers: "The bottom node is a sequential scan over all 8,294 rows. With an index on start_time it becomes an index-only scan, and the cost drops from about 325 to 35."
+
+"Will the database use it?" has no yes-or-no answer, so give the condition and the check: "If the range is a small part of the table, yes. If it covers most of the table, a full scan is cheaper. Where that line is depends on the physical order: transactions are written in time order, so a date range reads neighbouring pages. I'd confirm it with EXPLAIN ANALYZE."
+</Aside>
+
+## Further reading
+
+- [Indexes](https://www.postgresql.org/docs/current/indexes.html) — the chapter: index types, multicolumn, partial and expression indexes.
+- [Multicolumn indexes](https://www.postgresql.org/docs/current/indexes-multicolumn.html) — why the leading columns matter, and skip scan.
+- [Partial indexes](https://www.postgresql.org/docs/current/indexes-partial.html) — and when the planner can use one.
+- [Indexes on expressions](https://www.postgresql.org/docs/current/indexes-expressional.html) — indexing `lower(email)` or a date cast.
+- [Using EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html) — the node types, costs and `EXPLAIN ANALYZE`, with examples.
+
+## Related topics
+
+- [Filters and dates](/sql/filters-and-dates/) — a half-open range keeps the column bare, so the index can be used.
+- [Database concepts](/sql-patterns/database-concepts/) — the follow-up questions after a task: a billion rows, a slow query, BRIN.
+- [Top N per group](/sql-patterns/top-n-per-group/) — `ROW_NUMBER` per group; an index in the window's order helps for one group, not for a pass over the whole table.
+- [Revenue reports](/sql-tasks/revenue-reports/) — each walkthrough names the index that would serve the query.

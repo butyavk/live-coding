@@ -1,0 +1,244 @@
+---
+title: Топ-N в группе
+description: Оконные функции с нуля, затем лучшая или последняя строка в каждой группе через ROW_NUMBER, ничьи через RANK и DENSE_RANK и DISTINCT ON в PostgreSQL.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+«Лучший продукт каждого продавца (merchant)», «последняя подписка каждого клиента», «топ-3 в каждой стране». `GROUP BY` на такое не отвечает: `MAX` даёт лучшее значение, но не строку, из которой оно взято. Оконная функция нумерует строки внутри каждой группы и сохраняет их все, так что следующий шаг может выбрать нужные. Часто это приходит продолжением, когда базовый запрос уже работает.
+
+<Aside type="tip" title="Коротко">
+- Оконная функция считает по группе строк и сохраняет каждую строку: `OVER (PARTITION BY группа ORDER BY x)`.
+- Лучший или последний в группе: `ROW_NUMBER() OVER (PARTITION BY g ORDER BY x DESC, id)` в CTE, снаружи `WHERE rn = 1`. Топ-N: `rn <= N`.
+- Всегда второй ключ сортировки. `DESC` действует на одну колонку: `paid_at DESC, payout_id DESC`.
+- Если ничьи нужно оставить: `RANK()` (1, 1, 3) или `DENSE_RANK()` (1, 1, 2).
+- Короткий путь в PostgreSQL для одной строки на группу: `DISTINCT ON (g) … ORDER BY g, x DESC`.
+</Aside>
+
+## Оконные функции с нуля
+
+`GROUP BY` сворачивает каждую группу в одну строку. Оконная функция тоже считает по группе, но каждая входная строка остаётся в результате, а рядом с ней стоит посчитанное значение. Здесь каждая выплата двух продавцов получает номер внутри своего продавца и число его выплат:
+
+```sql
+SELECT merchant_id, payout_id, channel, amount_usd, paid_at,
+       ROW_NUMBER() OVER (PARTITION BY merchant_id
+                          ORDER BY paid_at DESC, payout_id DESC) AS rn,
+       COUNT(*) OVER (PARTITION BY merchant_id) AS payouts
+FROM channel_payouts
+WHERE merchant_id IN ('mer_01', 'mer_02')
+ORDER BY merchant_id, rn;
+```
+
+| merchant_id | payout_id | channel | amount_usd | paid_at | rn | payouts |
+|---|---|---|---|---|---|---|
+| mer_01 | po_0007 | north_market | 69.64 | 2026-09-02 09:00:00 | 1 | 14 |
+| mer_01 | po_0014 | south_market | 137.62 | 2026-08-15 09:00:00 | 2 | 14 |
+| mer_01 | po_0006 | north_market | 97.69 | 2026-08-02 09:00:00 | 3 | 14 |
+| mer_02 | po_0026 | south_market | 154.57 | 2026-09-15 09:00:00 | 1 | 13 |
+| mer_02 | po_0019 | north_market | 426.77 | 2026-09-02 09:00:00 | 2 | 13 |
+| mer_02 | po_0173 | north_market | 363.75 | 2026-08-02 09:00:00 | 3 | 13 |
+
+Запрос возвращает все 27 выплат; здесь первые три у каждого продавца. Из чего состоит окно:
+
+- **`OVER (…)`** превращает функцию в оконную. Пустое `OVER ()` значит «все строки результата».
+- **`PARTITION BY merchant_id`** делит строки на группы. В каждой группе нумерация начинается заново с 1. Похоже на `GROUP BY`, но строки не сворачиваются.
+- **`ORDER BY` внутри `OVER`** задаёт порядок, в котором нумеруются строки. Результат он не сортирует: это делает последний `ORDER BY` запроса.
+
+`ROW_NUMBER()` без `ORDER BY` в окне смысла не имеет. `COUNT(*)` и `SUM()` работают и без него и дают итог группы в каждой строке. На этом построены [доли и нарастающий итог](/sql-patterns/running-totals-and-shares/).
+
+## Лучший или последний в группе
+
+Рецепт в три шага:
+
+1. Если ранжировать нужно по агрегату (выручка продукта), сначала `GROUP BY` до одной строки на пару (группа, элемент) в CTE.
+2. На следующем шаге пронумеровать строки: `ROW_NUMBER() OVER (PARTITION BY группа ORDER BY …)`.
+3. Снаружи оставить `rn = 1` или `rn <= N` для топ-N.
+
+Последней выплате каждого продавца агрегация не нужна, поэтому начинаем со второго шага:
+
+```sql
+WITH ranked AS (
+    SELECT merchant_id, channel, period_month, amount_usd, paid_at,
+           ROW_NUMBER() OVER (PARTITION BY merchant_id
+                              ORDER BY paid_at DESC, payout_id DESC) AS rn
+    FROM channel_payouts
+)
+SELECT merchant_id, channel, period_month, amount_usd, paid_at
+FROM ranked
+WHERE rn = 1
+ORDER BY merchant_id;
+```
+
+| merchant_id | channel | period_month | amount_usd | paid_at |
+|---|---|---|---|---|
+| mer_01 | north_market | 2026-07-01 | 69.64 | 2026-09-02 09:00:00 |
+| mer_02 | south_market | 2026-08-01 | 154.57 | 2026-09-15 09:00:00 |
+| mer_03 | south_market | 2026-08-01 | 89.20 | 2026-09-15 09:00:00 |
+
+12 строк, по одной на продавца; показаны первые три. Сверьте одну группу руками: строка mer_01 — та, что получила номер 1 в таблице выше.
+
+Когда ранжируют по агрегату, добавляется ещё один CTE. Работающий запрос остаётся как есть, шаги надстраиваются сверху:
+
+```sql
+WITH base AS (
+    -- запрос, который уже работает: одна строка на (продавец, продукт)
+),
+ranked AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY merchant_id
+                                 ORDER BY net_usd DESC, product_id) AS rn
+    FROM base
+)
+SELECT merchant_id, product_id, net_usd
+FROM ranked
+WHERE rn = 1;
+```
+
+### Почему фильтру нужен свой шаг
+
+PostgreSQL вычисляет запрос в постоянном логическом порядке: `FROM` и соединения, `WHERE`, `GROUP BY`, `HAVING`, потом оконные функции, потом список `SELECT`, `DISTINCT`, `ORDER BY` и `LIMIT`. Окна считаются после `WHERE` и `HAVING`, поэтому ни тот, ни другой `rn` не видят. Фильтр уходит в следующий запрос, который читает CTE.
+
+<Trap id="window-where" q="Первая транзакция каждого клиента. Выполнится ли запрос?">
+
+Нет: `window functions are not allowed in WHERE`. Окна вычисляются уже после `WHERE`. Посчитайте `ROW_NUMBER` в CTE и фильтруйте `WHERE rn = 1` снаружи — или возьмите `DISTINCT ON`.
+
+</Trap>
+
+## Ничьи
+
+### Второй ключ сортировки
+
+Если у двух выплат продавца одинаковый `paid_at`, одного `ORDER BY paid_at DESC` мало, чтобы решить, кто будет номером 1. PostgreSQL выберет одну, а при следующем запуске может выбрать другую. Второй ключ, например `payout_id DESC`, делает результат одинаковым при каждом запуске. Скажите это вслух: «I add a tie-breaker so the result is deterministic.»
+
+### DESC действует на одну колонку
+
+`ORDER BY paid_at DESC, payout_id` сортирует `paid_at` от новых к старым, а `payout_id` — от меньшего к большему. `DESC` относится к колонке прямо перед ним. Если правило «потом больший id», напишите `DESC` ещё раз: `ORDER BY paid_at DESC, payout_id DESC`. То же верно для итогового `ORDER BY`.
+
+### ROW_NUMBER, RANK и DENSE_RANK
+
+Три функции нумерации различаются только на ничьих. Ранжируем все продукты по числу сентябрьских транзакций без тестовых покупок:
+
+```sql
+WITH per_product AS (
+    SELECT product_id, COUNT(*) AS transactions
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY product_id
+)
+SELECT product_id, transactions,
+       ROW_NUMBER() OVER (ORDER BY transactions DESC, product_id) AS row_number,
+       RANK()       OVER (ORDER BY transactions DESC)             AS rank,
+       DENSE_RANK() OVER (ORDER BY transactions DESC)             AS dense_rank
+FROM per_product
+ORDER BY transactions DESC, product_id;
+```
+
+| product_id | transactions | row_number | rank | dense_rank |
+|---|---|---|---|---|
+| prd_13 | 22 | 7 | 7 | 7 |
+| prd_01 | 21 | 8 | 8 | 8 |
+| prd_05 | 21 | 9 | 8 | 8 |
+| prd_07 | 21 | 10 | 8 | 8 |
+| prd_11 | 21 | 11 | 8 | 8 |
+| prd_18 | 21 | 12 | 8 | 8 |
+| prd_03 | 20 | 13 | 13 | 9 |
+| prd_14 | 20 | 14 | 13 | 9 |
+
+Это строки 7–14 из 20. У пяти продуктов по 21 транзакции:
+
+- `ROW_NUMBER` даёт им 8, 9, 10, 11, 12. Номера всегда разные, поэтому на каждый номер остаётся одна строка.
+- `RANK` даёт всем пятерым 8, а следующий продукт получает 13: занятые места пропускаются.
+- `DENSE_RANK` даёт всем пятерым 8, а следующий получает 9: без пропусков.
+
+Поэтому у «топ-10 продуктов» два ответа. `row_number <= 10` вернёт 10 строк и разрежет группу с 21 транзакцией посередине. `rank <= 10` вернёт 12 строк. Спросите до выбора: «If two rows tie, do you want both of them or just one?»
+
+## DISTINCT ON в PostgreSQL
+
+`DISTINCT ON (g)` оставляет первую строку каждой группы `g` в порядке `ORDER BY`. Последняя выплата каждого продавца становится одним коротким запросом с теми же 12 строками:
+
+```sql
+SELECT DISTINCT ON (merchant_id)
+       merchant_id, channel, period_month, amount_usd, paid_at
+FROM channel_payouts
+ORDER BY merchant_id, paid_at DESC, payout_id DESC;
+```
+
+Три правила. `ORDER BY` должен начинаться с колонок из `DISTINCT ON`, а дальше задавать порядок внутри группы. Остаётся ровно одна строка на группу, так что топ-3 или ничьи так не получить. И это есть только в PostgreSQL: на интервью скажите, что переносимый вариант — `ROW_NUMBER`.
+
+<Trap id="distinct-on-order" q="Последняя транзакция каждого клиента через DISTINCT ON; при равенстве — больший transaction_id. Что не так?">
+
+Ошибка: `SELECT DISTINCT ON expressions must match initial ORDER BY expressions`. Правильно: `ORDER BY customer_id, start_time DESC, transaction_id DESC` — сначала колонки из `DISTINCT ON`, потом порядок внутри группы. Последний ключ решает ничьи: у клиента бывают две транзакции с одинаковым `start_time`, и без него PostgreSQL оставит любую из них. В скрытых данных проверки такие ничьи есть.
+
+</Trap>
+
+## Без оконной функции
+
+Найдите `MAX(paid_at)` по продавцу в CTE и соедините обратно с таблицей по `merchant_id` и `paid_at`. Это работает, но при ничьей вернёт обе строки. Иногда задаче нужно именно это, но это другой ответ, чем у `ROW_NUMBER`.
+
+<Talk q="Can you do it without a window function?">
+
+"Yes. I find the maximum per merchant in a CTE and join it back on the merchant and that value. The difference is ties: if two rows share the maximum, the join returns both of them, while ROW_NUMBER keeps one."
+
+</Talk>
+
+## Как это выглядит на интервью
+
+Базовая задача — отчёт: «Show net revenue per product for September, with the merchant.» Запрос группирует по продавцу и продукту и возвращает 20 строк. У mer_06 два продукта: prd_18 с 313,80 и prd_06 с 239,90. Потом приходит продолжение: «Now keep only the best product of each merchant.»
+
+1. **Сначала вопрос:** «If two products of one merchant have the same revenue, do you want both, or just one?» Допустим, ответ — «один, с меньшим product_id».
+2. **План вслух:** «I'll number the products inside each merchant by revenue and keep number one. I can't filter on a window in the same SELECT, so that's one more step.»
+3. **Обернуть, а не переписать:** работающий запрос становится первым CTE, без своего `ORDER BY`.
+4. **Сверить с базой:** «Twelve rows, one per merchant. For mer_06 it's prd_18, which matches the base query: 313.80 against 239.90.»
+
+Первое упражнение ниже — ровно этот шаг. Топ-N по всем строкам проще: `ORDER BY net_usd DESC, product_id LIMIT 5`, как в [Q02 на странице «Отчёты о выручке»](/sql-tasks/revenue-reports/). Окно нужно, только когда топ считается внутри групп.
+
+## Практика
+
+<Drill id="s-top1">
+
+Лучший в группе: сначала свернуть до (продавец, продукт), потом `ROW_NUMBER` внутри продавца и `rn = 1` снаружи — окно нельзя фильтровать в `WHERE` того же `SELECT`. `DESC` действует только на `net_usd`, поэтому второй ключ `product_id` идёт по возрастанию, и при ничьей побеждает меньший id. В скрытых данных у одного продавца два лучших продукта идут вровень, так что направление этого ключа важно.
+
+</Drill>
+
+<Drill id="s-rank">
+
+`RANK` даёт одинаковым значениям одно место и пропускает следующие (1, 2, 2, 4). `DENSE_RANK` не пропускает (1, 2, 2, 3). `ROW_NUMBER` всегда даёт разные номера, поэтому оставить обе равные строки не может. Здесь у prd_15 и prd_16 поровну, по 25 транзакций, поэтому ранги 1–5 дают шесть строк; `ROW_NUMBER` потерял бы одну из них. Эта ничья на последнем месте, поэтому `DENSE_RANK` случайно вернёт те же строки. В скрытых данных есть ничья выше, и там он ошибётся. Фильтр `rnk <= 5` стоит во внешнем запросе, после того как окно посчитано.
+
+</Drill>
+
+<Drill id="s-latest">
+
+Последняя строка в группе: `ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY start_time DESC, transaction_id DESC)` и снаружи `rn = 1`. `DESC` нужен у обоих ключей, потому что правило — «больший id». В PostgreSQL то же короче: `SELECT DISTINCT ON (customer_id) … ORDER BY customer_id, start_time DESC, transaction_id DESC`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Когда базовый запрос работает, каждое продолжение — небольшая правка к нему. Назовите правку одной фразой, прежде чем её набирать:
+
+| Вопрос-продолжение | Что меняется |
+|---|---|
+| «Top two per merchant?» | `rn <= 2` во внешнем запросе |
+| «Keep both tied rows?» | `RANK()` без дополнительного ключа в его `ORDER BY` |
+| «Is it fast on a big table?» | Ничего. Ответ: «The window sorts twenty rows after the aggregation. The cost is reading transactions, so an index on start_time matters more.» |
+</Aside>
+
+## Что почитать
+
+- [Window functions tutorial](https://www.postgresql.org/docs/current/tutorial-window.html) — `OVER`, `PARTITION BY` и `ORDER BY` на коротких примерах.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `ROW_NUMBER`, `RANK`, `DENSE_RANK` и остальной список.
+- [Window function processing](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-WINDOW) — почему окна считаются после `WHERE`, `GROUP BY` и `HAVING`.
+- [DISTINCT ON](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT) — правило о первых колонках `ORDER BY`.
+
+## Связанные темы
+
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — именованные шаги, в которых живут базовый запрос и нумерация.
+- [Группировка и подсчёт](/sql/grouping-and-counting/) — агрегация, которая идёт перед ранжированием.
+- [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/) — тот же `OVER`, только с `SUM` вместо номера.
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — первая копия каждого события тем же `ROW_NUMBER`.
+- [Подписки во времени](/sql-tasks/subscriptions-over-time/) — Q07, текущий статус каждого клиента.
+- [Сортировка и топ-k](/python/sorting-and-top-k/) — та же задача на Python: ключи сортировки и `heapq`.

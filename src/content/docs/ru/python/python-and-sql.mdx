@@ -1,0 +1,331 @@
+---
+title: Python и SQL
+description: "Как обращаться к базе из Python: плейсхолдеры вместо f-строк, фильтр в SQL, чтение пачками, транзакции из кода, а также потоки и GIL."
+sidebar:
+  order: 12
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+import Playground from '~/components/practice/Playground.astro';
+
+В некоторых задачах языки смешаны: SQL достаёт строки, Python делает логику, которую на SQL писать неудобно. Интервьюер тогда смотрит на три вещи. Как вы передаёте значение в запрос? Какая часть работы где выполняется? Что будет, если результат большой? f-строку в запросе или `SELECT *` с фильтром в цикле Python замечают сразу.
+
+<Aside type="tip" title="Коротко">
+- Значения передаются параметрами: `con.execute("… WHERE merchant_id = ?", ["mer_01"])`. Никогда не собирайте SQL f-строкой.
+- Фильтр, соединения и агрегацию делайте в SQL, забирайте маленький результат. В Python оставляйте только логику, которую трудно написать на SQL.
+- Большой результат читайте итерацией по курсору или циклом с `fetchmany(n)`, а не `fetchall()`.
+- Записи, которые связаны друг с другом, — в одной транзакции: фиксация в конце, откат при любой ошибке.
+- Потоки помогают, пока программа ждёт сеть или базу. Из-за GIL они бесполезны для тяжёлых вычислений на Python: нужны процессы или перенос работы в SQL.
+</Aside>
+
+## Модуль db на этом сайте
+
+Python-упражнения на этом сайте обращаются к той же PostgreSQL, что и SQL-страницы, через небольшой модуль `db`. Его интерфейс близок к стандарту баз данных Python (DB-API) и к клиенту DuckDB: `connect()`, `execute(sql, parameters)`, `fetchall()`, `fetchone()`, `fetchmany(n)`.
+
+```python
+import db
+
+con = db.connect()
+rows = con.execute(
+    "SELECT channel, period_month, amount_usd FROM advances WHERE merchant_id = ? ORDER BY period_month, channel",
+    ["mer_01"],
+).fetchall()
+print(len(rows))
+print(rows[:2])
+print(sum(amount for _, _, amount in rows))
+```
+
+```text
+6
+[('north_market', datetime.date(2026, 6, 1), Decimal('68.38')), ('south_market', datetime.date(2026, 6, 1), Decimal('20.80'))]
+359.72
+```
+
+- Каждая строка — кортеж. `NUMERIC` приходит как `Decimal`, `DATE` — как `date`, `TIMESTAMP` — как `datetime`, поэтому деньги остаются точными.
+- `?` обозначает параметр. Модуль отправляет значения в PostgreSQL отдельно, как `$1`, `$2`, и никогда не вставляет их в текст SQL.
+- Каждый `execute` выполняется в своей транзакции, которая откатывается, поэтому `INSERT` в упражнении не меняет данные для следующего запуска.
+
+## Параметры, а не f-строки
+
+f-строка вставляет текст пользователя в SQL, и текст становится кодом. Пример на `sqlite3`, который входит в Python:
+
+```python
+import sqlite3
+
+con = sqlite3.connect(":memory:")
+con.execute("CREATE TABLE products (id TEXT, merchant_id TEXT)")
+con.executemany("INSERT INTO products VALUES (?, ?)",
+                [("prd_01", "mer_01"), ("prd_02", "mer_02"), ("prd_03", "mer_02")])
+
+merchant = "mer_01' OR '1'='1"                    # что ввёл пользователь
+
+unsafe = f"SELECT id FROM products WHERE merchant_id = '{merchant}'"
+print(con.execute(unsafe).fetchall())             # продукты всех продавцов
+
+safe = "SELECT id FROM products WHERE merchant_id = ?"
+print(con.execute(safe, [merchant]).fetchall())   # значение — данные, а не SQL
+print(con.execute(safe, ["mer_01"]).fetchall())
+```
+
+```text
+[('prd_01',), ('prd_02',), ('prd_03',)]
+[]
+[('prd_01',)]
+```
+
+Версия с f-строкой вернула продукты всех продавцов. С параметром вся строка — одно значение, и продавца с таким id нет. Параметры дают три вещи:
+
+- **Нет SQL-инъекций.** Значение никогда не читается как SQL: драйвер передаёт его отдельно от запроса или безопасно экранирует.
+- **Типы и кавычки.** Драйвер сам справляется с `Decimal`, `date`, `None` и именем вроде `O'Brien`.
+- **Повторное использование плана — у некоторых драйверов.** Текст запроса одинаков для любого значения, поэтому драйвер может подготовить его один раз: asyncpg так и делает, psycopg 3 — только после нескольких запусков одного и того же запроса (`prepare_threshold`, по умолчанию 5), а psycopg2 подставляет значения в текст на стороне клиента и ничего не подготавливает.
+
+Вид плейсхолдера зависит от библиотеки. В PEP 249 это называется `paramstyle`:
+
+| Библиотека | Плейсхолдер | Вызов |
+|---|---|---|
+| `db` этого сайта, DuckDB, sqlite3 | `?` | `con.execute(sql, [a, b])` |
+| psycopg (PostgreSQL) | `%s` или `%(name)s` | `cur.execute(sql, (a, b))` |
+| SQLAlchemy `text()` | `:name` | `conn.execute(sa.text(sql), {"name": a})` |
+| asyncpg | `$1`, `$2` | `await con.fetch(sql, a, b)` |
+
+Некоторые редакторы для интервью подключают Python к базе PostgreSQL через SQLAlchemy. Тот же запрос там (здесь запущен на SQLite с двумя продуктами):
+
+```python
+with engine.connect() as conn:
+    rows = conn.execute(
+        sa.text("SELECT id, name FROM products WHERE merchant_id = :merchant_id"),
+        {"merchant_id": "mer_01"},
+    ).mappings().all()          # список строк, похожих на dict
+print(rows)
+print(rows[0]["name"])
+```
+
+```text
+[{'id': 'prd_01', 'name': 'Product 01'}]
+Product 01
+```
+
+Два случая требуют внимания:
+
+- **Список значений для `IN`.** Сгенерируйте по плейсхолдеру на значение. Сами значения по-прежнему идут параметрами:
+
+  ```python
+  merchants = ["mer_01", "mer_02"]
+  marks = ", ".join("?" * len(merchants))        # "?, ?"
+  sql = f"SELECT id FROM products WHERE merchant_id IN ({marks}) ORDER BY id"
+  print(sql)
+  print(con.execute(sql, merchants).fetchall())
+  ```
+
+  ```text
+  SELECT id FROM products WHERE merchant_id IN (?, ?) ORDER BY id
+  [('prd_01',), ('prd_02',), ('prd_03',)]
+  ```
+
+- **Имена таблиц и колонок параметрами быть не могут.** `ORDER BY ? DESC` с `["id"]` сортирует по строковой константе `'id'`, а не по колонке: результат — `prd_01, prd_02, prd_03` в порядке вставки, а не с `prd_03` в начале. Проверьте имя по фиксированному набору (`if column not in {"id", "merchant_id"}: raise ValueError(...)`) и только потом вставляйте его в текст.
+
+<Talk q="How do you pass a user value into SQL from Python?">
+
+"Only as a parameter: `cur.execute('… WHERE product_id = %s', (product_id,))` or `:product_id` with SQLAlchemy. Never an f-string — that is SQL injection, and parameters also handle types and quoting."
+
+Если спросят про имена колонок, добавьте: идентификаторы параметрами не бывают, поэтому их проверяют по списку разрешённых.
+
+</Talk>
+
+## Где делать работу
+
+База фильтрует, соединяет и агрегирует рядом с данными, с индексами. В Python должен приходить маленький результат. Чистая выручка за сентябрь по каналам продаж для одного продавца:
+
+```python
+from datetime import datetime
+
+SQL = """
+SELECT t.channel, COUNT(*) AS n, SUM(t.revenue_usd) AS net_usd
+FROM transactions t
+JOIN products p ON p.id = t.product_id
+WHERE p.merchant_id = ?
+  AND NOT t.is_test
+  AND t.start_time >= ? AND t.start_time < ?
+GROUP BY t.channel
+ORDER BY t.channel
+"""
+rows = con.execute(SQL, ["mer_01", datetime(2026, 9, 1), datetime(2026, 10, 1)]).fetchall()
+for channel, n, net in rows:
+    print(channel, n, net)
+```
+
+```text
+north_market 8 114.93
+south_market 9 88.92
+web 4 60.96
+```
+
+В Python приезжают три строки. Альтернатива — `SELECT * FROM transactions` и цикл с `if` — гонит по сети все 8 294 строки и строит в памяти 8 294 кортежа, чтобы оставить 21. На таблице в миллионы строк цена растёт с каждой строкой.
+
+Что остаётся в Python: логика, которую неудобно писать на SQL, — цикл, распределяющий платёж по долгам, поиск самой длинной серии дней, — и всё, что вызывает другой сервис на каждую строку. Но и тогда фильтр пусть сделает SQL. Задачи [SQL + Python](/python-tasks/sql-and-python/) тренируют именно такое разделение.
+
+<Talk q="Should you filter and group in Python or in SQL?">
+
+"In SQL: the database filters and aggregates close to the data and uses indexes, and I fetch a small result. In Python I keep the logic that is hard to express in SQL, like an allocation loop. Fetching all rows and filtering in Python is slow and wastes memory."
+
+Хорошее дополнение: *"For a big table I'd check that an index serves the filter, with EXPLAIN."* См. [Индексы и EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+## Чтение пачками
+
+`fetchall()` строит весь результат списком. Когда Python нужна каждая строка (например, чтобы отправить её в другой сервис), читайте пачками:
+
+```python
+from decimal import Decimal
+
+cur = con.execute("SELECT revenue_usd FROM transactions WHERE channel = ? AND NOT is_test", ["north_market"])
+total, batches = Decimal("0"), 0
+while rows := cur.fetchmany(500):
+    batches += 1
+    for (price,) in rows:
+        total += price
+print(batches, total)
+```
+
+```text
+9 56826.77
+```
+
+Это 4 442 строки в 9 пачках, и итог совпадает с `SUM(revenue_usd)` в SQL. Настоящую сумму, конечно, считают в SQL — цикл только показывает приём.
+
+Экономит ли `fetchmany` память, зависит от драйвера. `sqlite3` читает строки по мере запроса. Обычный курсор psycopg получает весь результат ещё во время `execute`, поэтому для потоковой выдачи нужен именованный (серверный) курсор. Модуль этого сайта тоже держит результат в памяти. Та же идея работает для записи: вставляйте пачками по несколько сотен строк через `executemany` (см. [Итерация и генераторы](/python/iteration-and-generators/)).
+
+## Транзакции из кода
+
+Записи, которые должны пройти или не пройти вместе, идут в одной транзакции. Обычный пример — аванс и его проводка в журнале:
+
+```python
+import sqlite3
+
+con = sqlite3.connect(":memory:")
+con.execute("CREATE TABLE advances (advance_id TEXT PRIMARY KEY, amount_usd TEXT)")
+con.execute("CREATE TABLE ledger_entries (entry_id TEXT PRIMARY KEY, advance_id TEXT, amount_usd TEXT)")
+
+
+def record_advance(con, advance_id, amount, entry_id):
+    with con:                                   # фиксация в конце, откат при исключении
+        con.execute("INSERT INTO advances VALUES (?, ?)", [advance_id, amount])
+        con.execute("INSERT INTO ledger_entries VALUES (?, ?, ?)", [entry_id, advance_id, amount])
+
+
+record_advance(con, "adv_1", "100.00", "le_1")
+try:
+    record_advance(con, "adv_2", "50.00", "le_1")      # le_1 уже есть
+except sqlite3.IntegrityError as e:
+    print("rolled back:", e)
+
+print(con.execute("SELECT advance_id FROM advances").fetchall())
+print(con.execute("SELECT entry_id, advance_id FROM ledger_entries").fetchall())
+```
+
+```text
+rolled back: UNIQUE constraint failed: ledger_entries.entry_id
+[('adv_1',)]
+[('le_1', 'adv_1')]
+```
+
+Вторая проводка не прошла, поэтому откатился и второй аванс. Аванса без проводки нет. Тот же приём в других библиотеках: `with conn.transaction():` в psycopg 3, `with engine.begin() as conn:` в SQLAlchemy.
+
+Два правила:
+
+- **Никаких вызовов других сервисов внутри транзакции.** Пока транзакция ждёт банк, она держит блокировки и соединение. Если после тайм-аута она откатится, платёж может быть уже отправлен.
+- **Уникальность охраняет база.** Проверка в Python («есть ли выплата с таким ключом?») проигрывает гонку второму воркеру. Уникальный ключ — нет. См. [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/).
+
+## Потоки, процессы и GIL
+
+Поток полезен, пока программа ждёт. Во время сетевого вызова или запроса к базе поток отпускает GIL (global interpreter lock, глобальная блокировка интерпретатора), и работают другие потоки:
+
+```python
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+
+def fetch_product_report(product_id):
+    time.sleep(0.2)                    # вместо сетевого вызова: поток ждёт
+    return product_id, "ok"
+
+
+products = ["prd_01", "prd_02", "prd_03", "prd_04", "prd_05"]
+
+t0 = time.perf_counter()
+results = [fetch_product_report(p) for p in products]
+print(f"one by one: {time.perf_counter() - t0:.1f} s")
+
+t0 = time.perf_counter()
+with ThreadPoolExecutor(max_workers=5) as pool:
+    results = list(pool.map(fetch_product_report, products))
+print(f"5 threads:  {time.perf_counter() - t0:.1f} s")
+print(results[:2])
+```
+
+```text
+one by one: 1.0 s
+5 threads:  0.2 s
+[('prd_01', 'ok'), ('prd_02', 'ok')]
+```
+
+Для тяжёлых вычислений на Python потоки не помогают: в обычной сборке CPython код Python в каждый момент выполняет только один поток. В одном запуске четыре вызова, каждый из которых суммирует 3 миллиона квадратов, заняли 0,6 с по очереди и 0,6 с в четырёх потоках. Для такой работы нужны процессы (`ProcessPoolExecutor`) или перенос работы в SQL. В Python 3.13 появилась необязательная сборка без GIL (free-threaded), но обычная сборка его сохраняет.
+
+У потоков есть и вторая проблема — общее состояние. `count += 1` или «проверить deque, потом добавить» — это несколько шагов, и два потока могут вклиниться между ними. Такой код защищают блокировкой:
+
+```python
+import threading
+
+lock = threading.Lock()
+
+with lock:                 # внутри блока — только один поток за раз
+    ...                    # прочитать, изменить, записать
+```
+
+И ещё: у каждого потока должно быть своё соединение или соединение из пула. Соединение `sqlite3` по умолчанию отказывается работать из другого потока. С psycopg берите пул соединений, чтобы потоки не стояли в очереди к одному соединению.
+
+<Talk q="Your cache (or rate limiter) is called from many threads. Is it safe?">
+
+"Not as written: read, change and write are separate steps, so two threads can interleave. I would protect them with a threading.Lock. If there are several processes or servers, the state has to live outside — Redis with an atomic operation, or a unique constraint in the database."
+
+Блокировка охватывает всё «прочитать — изменить — записать», а не каждую строку отдельно. Ограничитель, о котором обычно спрашивают, — на странице [Окна по времени](/python/time-windows/).
+
+</Talk>
+
+## Практика
+
+На этой странице нет упражнений. Запустите запрос ниже, потом измените его: посчитайте авансы по каналам вместо списка, передайте месяц вторым параметром и попробуйте сломать запрос f-строкой, чтобы увидеть разницу. Полные задачи — на странице [SQL + Python](/python-tasks/sql-and-python/).
+
+<Playground lang="python" code={`import db
+
+con = db.connect()
+rows = con.execute(
+    "SELECT channel, period_month, amount_usd FROM advances WHERE merchant_id = ? ORDER BY period_month, channel",
+    ["mer_01"],
+).fetchall()
+for channel, month, amount in rows:
+    print(channel, month, amount)
+`} />
+
+<Aside type="note" title="На интервью">
+До того как писать запрос, скажите, где будет выполняться каждая часть работы: *"SQL filters the merchant and the month and sums by channel, so Python gets three rows. Only the logic that is hard in SQL stays in Python."* Так видно, что разделение — решение, а не случайность.
+
+Если таблица вырастет до ста миллионов строк, разделение не меняется, добавляется индекс: *"I'd check with EXPLAIN that an index on the product and the start time serves this filter."* Если появится второй воркер, отвечайте через базу: *"One transaction per unit of work, and a unique key stops the duplicate. A check in Python would race."*
+</Aside>
+
+## Что почитать
+
+- [PEP 249: paramstyle](https://peps.python.org/pep-0249/#paramstyle) — пять видов плейсхолдеров в стандарте баз данных Python.
+- [sqlite3: How to use placeholders](https://docs.python.org/3/library/sqlite3.html#sqlite3-placeholders) — `?` и именованные параметры и почему не форматирование строк.
+- [sqlite3: Transaction control](https://docs.python.org/3/library/sqlite3.html#sqlite3-controlling-transactions) — commit, rollback и `with con:`.
+- [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) — вызовы, которые ждут ввода-вывода, в потоках.
+- [Global interpreter lock](https://docs.python.org/3/glossary.html#term-global-interpreter-lock) — статья глоссария: что такое GIL и когда он отпускается.
+
+## Связанные темы
+
+- [Фильтры и даты](/sql/filters-and-dates/) — полуоткрытый интервал дат, который заполняют параметры.
+- [SQL + Python](/python-tasks/sql-and-python/) — полные задачи, где SQL возвращает дни, а Python находит серию.
+- [Понятия баз данных](/sql-patterns/database-concepts/) — транзакции, уровни изоляции и блокировки строк подробнее.
+- [Индексы и EXPLAIN](/sql-patterns/indexes-and-explain/) — как сделать быстрым фильтр, который остаётся в SQL.
+- [Итерация и генераторы](/python/iteration-and-generators/) — пачки и потоки данных на стороне Python.

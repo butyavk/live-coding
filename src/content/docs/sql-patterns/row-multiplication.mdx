@@ -1,0 +1,202 @@
+---
+title: Row multiplication
+description: Why joining two "many" tables to the same key multiplies rows and inflates sums, how to spot it by counting rows, and the cure of aggregating first.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Many report tasks put two facts about one key side by side: products and advances per merchant, revenue and payouts per merchant. Both facts live in "many" tables. Join them directly and every row of one side pairs with every row of the other. The query runs, the sums grow, and nothing warns you.
+
+<Aside type="tip" title="TL;DR">
+- Two tables with many rows per key, joined to that key, give every pair of rows: 2 products × 7 advances = 14 rows.
+- Spot it: count rows before and after each join. A sum two or ten times too big is the usual sign.
+- Cure: aggregate each side to one row per key in its own CTE, then join the CTEs.
+- Check: the total of the result equals a plain `SUM` over the source table, without any join.
+- `COUNT(DISTINCT)` and `SUM(DISTINCT)` hide the symptom. They do not cure it.
+</Aside>
+
+## Two "many" sides of one key
+
+A join returns one row for every pair of rows that match the condition. A join to the "one" side is safe: each transaction finds exactly one product, so the row count stays the same ([Joins](/sql/joins/) shows the check). A join to a "many" side repeats rows, and that is often what you want.
+
+The trouble starts when two "many" tables hang off the same key and have no link to each other. A merchant has several products and several advances. An advance does not belong to a product. So the join cannot match them one to one: it matches every product of the merchant with every advance of the same merchant.
+
+<Trap id="fanout" q="mer_09 has two products and seven advances worth 1122.81 in total. How many rows does this query return, and what sum?">
+
+14 rows and 2245.62, exactly twice the real total. Products and advances are not linked to each other, so the join pairs every product with every advance: 2 × 7. Reduce each table to one row per merchant first, in a CTE or a subquery, and join after that.
+
+</Trap>
+
+## The symptom: some numbers look right
+
+Here is the same mistake for every merchant with an advance:
+
+```sql
+SELECT m.id AS merchant_id,
+       COUNT(p.id)       AS products,
+       SUM(v.amount_usd) AS advanced_usd
+FROM merchants m
+JOIN products p ON p.merchant_id = m.id
+JOIN advances v ON v.merchant_id = m.id
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+| merchant_id | products | advanced_usd |
+|---|---|---|
+| mer_01 | 6 | 359.72 |
+| mer_03 | 7 | 779.13 |
+| mer_04 | 6 | 934.77 |
+| mer_07 | 6 | 431.66 |
+| mer_09 | 14 | 2245.62 |
+| mer_11 | 12 | 2392.46 |
+
+Four merchants have one product, so their sums are correct. Only mer_09 and mer_11, with two products each, get double sums. This is why the bug survives a quick look: the first rows seem fine. The `products` column is wrong everywhere: it counts pairs, not products.
+
+Two quick "fixes" make it worse, because they hide the problem:
+
+- `COUNT(DISTINCT p.id)` repairs the `products` column (1, 1, 1, 1, 2, 2). The sum for mer_09 stays 2245.62.
+- `SUM(DISTINCT v.amount_usd)` adds each different amount once. mer_09 has two advances of 95.14 and two of 124.88, so the result is 902.79 instead of 1122.81. Equal amounts are normal in money data: the two of 124.88 are for July and for August.
+
+## How to spot it
+
+Count the rows before and after the join. If the join was meant to add columns, the count must not change:
+
+```sql
+SELECT (SELECT COUNT(*) FROM advances) AS advances,
+       COUNT(*)                        AS rows_after_join,
+       SUM(v.amount_usd)               AS advanced_usd
+FROM advances v
+JOIN products p ON p.merchant_id = v.merchant_id;
+```
+
+| advances | rows_after_join | advanced_usd |
+|---|---|---|
+| 38 | 51 | 7143.36 |
+
+38 advances became 51 rows, and the total grew from 4824.32 to 7143.36. Before each join, ask one question: "For one row on the left, how many rows match on the right?" One means safe. Many means aggregate first.
+
+The bigger the "many" sides, the bigger the error. Put September transactions and all advances together in one join:
+
+```sql
+SELECT p.merchant_id,
+       SUM(t.revenue_usd) AS net_usd,
+       SUM(v.amount_usd)  AS advanced_usd,
+       COUNT(*)           AS joined_rows
+FROM transactions t
+JOIN products p ON p.id = t.product_id
+JOIN advances v ON v.merchant_id = p.merchant_id
+WHERE NOT t.is_test
+  AND t.start_time >= TIMESTAMP '2026-09-01'
+  AND t.start_time <  TIMESTAMP '2026-10-01'
+GROUP BY p.merchant_id
+ORDER BY p.merchant_id;
+```
+
+| merchant_id | net_usd | advanced_usd | joined_rows |
+|---|---|---|---|
+| mer_01 | 1588.86 | 7554.12 | 126 |
+| mer_03 | 2728.74 | 15582.60 | 140 |
+| mer_04 | 933.84 | 37390.80 | 240 |
+
+These are the first three of six rows. mer_01 has 21 transactions and 6 advances, so 126 rows. Revenue is multiplied by 6 and advances by 21. When a number is ten times larger than you expect, suspect row multiplication first.
+
+## The cure: aggregate each side, then join
+
+Give each "many" table its own CTE that returns one row per key. Then join the CTEs. Every join is now one to one, and nothing can multiply.
+
+```sql
+WITH revenue AS (
+    SELECT p.merchant_id, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY p.merchant_id
+),
+advanced AS (
+    SELECT merchant_id, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    GROUP BY merchant_id
+)
+SELECT v.merchant_id,
+       COALESCE(r.net_usd, 0) AS net_usd,
+       v.advanced_usd
+FROM advanced v
+LEFT JOIN revenue r ON r.merchant_id = v.merchant_id
+ORDER BY v.merchant_id;
+```
+
+| merchant_id | net_usd | advanced_usd |
+|---|---|---|
+| mer_01 | 264.81 | 359.72 |
+| mer_03 | 389.82 | 779.13 |
+| mer_04 | 155.64 | 934.77 |
+| mer_07 | 225.80 | 431.66 |
+| mer_09 | 569.73 | 1122.81 |
+| mer_11 | 359.53 | 1196.23 |
+
+Two details matter here:
+
+- **Which table goes in `FROM`.** The task says "per merchant with an advance", so the rows come from `advanced`. Revenue is joined with `LEFT JOIN` and `COALESCE`, so a merchant with advances and no sales stays in the result with 0. See [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+- **Filters stay inside their CTE.** The September filter belongs to revenue only. Advances are counted for all time.
+
+### Check without the join
+
+The result must add up to the source tables. Compute the totals with no join that could multiply:
+
+```sql
+SELECT (SELECT SUM(amount_usd) FROM advances) AS advanced_usd,
+       (SELECT SUM(t.revenue_usd)
+        FROM transactions t
+        JOIN products p ON p.id = t.product_id
+        WHERE p.merchant_id IN (SELECT merchant_id FROM advances)
+          AND NOT t.is_test
+          AND t.start_time >= TIMESTAMP '2026-09-01'
+          AND t.start_time <  TIMESTAMP '2026-10-01') AS net_usd;
+```
+
+| advanced_usd | net_usd |
+|---|---|
+| 4824.32 | 1965.33 |
+
+The six rows above add up to the same 4824.32 and 1965.33. `IN (SELECT …)` only tests membership, so it never adds rows. `EXISTS` behaves the same way.
+
+<Talk q="Your totals are much higher than the finance dashboard. What do you check first?">
+
+"I check the joins first. I count the rows before and after each join, and I check one merchant with a separate simple query. If two tables have many rows per merchant, I aggregate each of them to one row per merchant and join after that."
+
+</Talk>
+
+## Practice
+
+<Drill id="s-fanout">
+
+Products and advances are not linked, so a direct join of the three tables gives products × advances, and the sum grows. Each side becomes one row per merchant first, then the two CTEs are joined. `LEFT JOIN` from the advances is a safeguard: advances decide the rows, and `products` must not drop one. In this dataset every merchant has at least one product, so an inner join returns the same rows and Check cannot tell them apart. Say why you chose `LEFT JOIN`: a merchant with an advance but no product yet must stay in the result.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Name the problem before you write the second join: "Products and advances both have many rows per merchant, so I aggregate each side first." After the run, prove it with one number: "The advances add up to 4824.32 in the result and in the table."
+
+If you are asked to do it without CTEs, move the same aggregates into subqueries in `FROM`; the rule is still "aggregate, then join". Do not use `COUNT(DISTINCT)` to make one column look right: it leaves the multiplied sum in place. To practise finding this bug in a query someone else wrote, try [Debug a report](/sql-tasks/debug-a-report/).
+</Aside>
+
+## Further reading
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — how a join builds every matching pair of rows.
+- [WITH queries](https://www.postgresql.org/docs/current/queries-with.html) — CTEs, the usual place for the per-key aggregates.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — `SUM`, `COUNT` and what `DISTINCT` does inside them.
+
+## Related topics
+
+- [Joins](/sql/joins/) — the "one" and "many" sides, and the row count check for a single join.
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — named steps for the aggregates, and `EXISTS` for "has at least one".
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — keep every key, even when one side has no rows.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — balances and flows, where a multiplied sum is a real money error.
+- [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/) — two sources per key, aggregated first and then compared.

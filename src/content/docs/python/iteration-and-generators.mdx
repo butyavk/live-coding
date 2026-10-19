@@ -1,0 +1,226 @@
+---
+title: Iteration and generators
+description: "Neighbouring pairs with zip and pairwise, batches of n, generators and yield for input that does not fit in memory, and why groupby needs sorted input."
+sidebar:
+  order: 13
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Many tasks are loops over events in order: compare each payment with the previous one, send rows in chunks, group neighbours by key. The standard library turns each of these into one line. Generators add one more thing: the loop keeps working when the input is too large for memory, which is the usual follow-up question.
+
+<Aside type="tip" title="TL;DR">
+- Neighbours: `zip(xs, xs[1:])` or `itertools.pairwise(xs)`. Positions: `enumerate(xs, 1)`.
+- `zip` stops at the shortest input without a word. `zip(a, b, strict=True)` raises if the lengths differ.
+- Batches of n: a `range` with step n and slices, or `itertools.batched(xs, n)` in Python 3.12+. `n <= 0` is an error, not an endless loop.
+- A generator (`yield`) produces one item at a time, so memory stays flat even on a 50-million-line file. It can be read only once.
+- `itertools.groupby` groups only *neighbouring* equal keys: sort by the same key first.
+</Aside>
+
+## Pairs: zip, enumerate, pairwise
+
+The gap between consecutive payments is a classic: renewals that came late, sessions with a pause, events out of order. Pair each item with the next one:
+
+```python
+from datetime import date
+from itertools import pairwise
+
+renewals = [date(2026, 6, 3), date(2026, 7, 3), date(2026, 8, 3), date(2026, 9, 14)]
+
+print([(b - a).days for a, b in zip(renewals, renewals[1:])])
+print([(b - a).days for a, b in pairwise(renewals)])
+
+for n, (a, b) in enumerate(pairwise(renewals), start=2):
+    if (b - a).days > 35:
+        print(f"payment {n} came {(b - a).days} days after the previous one")
+```
+
+```text
+[30, 31, 42]
+[30, 31, 42]
+payment 4 came 42 days after the previous one
+```
+
+- `zip(xs, xs[1:])` works everywhere but copies the list. `pairwise` (Python 3.10+) works on any iterable, a generator included, and copies nothing.
+- `enumerate(..., start=2)` numbers the second item of each pair, so the message shows the number a person would count. Use `enumerate` instead of `range(len(xs))`.
+- Both versions need the input sorted by time. Sort first if the task does not promise it.
+
+`zip` has a quiet trap: it stops at the shortest input.
+
+```python
+products = ["prd_01", "prd_02", "prd_03"]
+revenue = ["114.93", "88.92"]
+print(list(zip(products, revenue)))
+print(list(zip(products, revenue, strict=True)))
+```
+
+```text
+[('prd_01', '114.93'), ('prd_02', '88.92')]
+Traceback (most recent call last):
+  ...
+ValueError: zip() argument 2 is shorter than argument 1
+```
+
+`prd_03` disappeared without an error. When two lists must have the same length, pass `strict=True` (Python 3.10+).
+
+## Batches of n
+
+Inserts, API calls and messages often go in chunks: 500 rows per `INSERT`, 100 ids per request. For a list, a `range` with step n and slices is enough, and the drill below asks for it. For anything else, there are two tools:
+
+```python
+from itertools import batched, islice
+
+ids = ["t1", "t2", "t3", "t4", "t5"]
+print(list(batched(ids, 2)))
+
+
+def chunks(iterable, n):
+    it = iter(iterable)
+    while batch := list(islice(it, n)):
+        yield batch
+
+
+print(list(chunks(ids, 2)))
+print(list(chunks((f"t{i}" for i in range(1, 6)), 2)))
+```
+
+```text
+[('t1', 't2'), ('t3', 't4'), ('t5',)]
+[['t1', 't2'], ['t3', 't4'], ['t5']]
+[['t1', 't2'], ['t3', 't4'], ['t5']]
+```
+
+- `itertools.batched` (Python 3.12+) returns tuples, works on any iterable, and raises `ValueError: n must be at least one` for `n = 0`. Python 3.13 adds `strict=True`, which raises if the last batch is short.
+- `chunks` does the same in older versions. `islice` takes up to n items from the same iterator each time, so it also works on a generator, as the third line shows.
+- With `n = 0`, `chunks` silently returns nothing. Check `n` first and raise `ValueError`, as the drill does.
+
+## Generators and yield
+
+A list holds every item at once. A generator produces the next item only when the loop asks for it:
+
+```python
+import sys
+
+squares_list = [i * i for i in range(1_000_000)]
+squares_gen = (i * i for i in range(1_000_000))
+print(sys.getsizeof(squares_list), sys.getsizeof(squares_gen))
+print(sum(squares_gen), sum(squares_gen))
+```
+
+```text
+8448728 200
+333332833333500000 0
+```
+
+The list's array alone takes 8.4 MB (the numbers themselves take more). The generator takes 200 bytes, whatever the length. The second line shows the price: a generator runs only once. The second `sum` gets nothing and returns 0. `len()` does not work on it either.
+
+A function with `yield` is a generator too. This is the usual shape for a file that does not fit in memory: read a line, parse it, pass it on, keep only the totals:
+
+```python
+import io
+from collections import defaultdict
+from decimal import Decimal
+
+f = io.StringIO("cus_01,9.99\ncus_02,4.99\ncus_01,0.01\n\ncus_03,49.99\n")      # stands for open("payments.csv")
+
+
+def read_payments(lines):
+    for line in lines:                  # a file object yields one line at a time
+        line = line.strip()
+        if not line:
+            continue
+        customer_id, amount = line.split(",")
+        yield customer_id, Decimal(amount)
+
+
+totals = defaultdict(Decimal)
+for customer_id, amount in read_payments(f):
+    totals[customer_id] += amount
+print(dict(totals))
+```
+
+```text
+{'cus_01': Decimal('10.00'), 'cus_02': Decimal('4.99'), 'cus_03': Decimal('49.99')}
+```
+
+Memory now depends on the number of customers, not on the number of lines. Parsing and summing stay separate, so each part is easy to test with a short list instead of a file. `next(gen)` takes one item by hand, which helps when you debug.
+
+<Talk q="The input file has 50 million lines and does not fit in memory. What changes in your code?">
+
+"I process it as a stream: iterate over the file line by line or use a generator with yield, and keep only the aggregates — a dict of totals, not the rows. If I need grouping by a key with many values, I push the work to the database or process it in chunks."
+
+Add the cost: one pass, O(n) time, memory O(k) for k keys. If even the totals do not fit, the data belongs in the database (see [Python and SQL](/python/python-and-sql/)).
+
+</Talk>
+
+## groupby needs sorted input
+
+`itertools.groupby` starts a new group every time the key changes. It does not look back, so equal keys that are not neighbours land in different groups:
+
+```python
+from itertools import groupby
+from operator import itemgetter
+
+rows = [("north_market", 8), ("south_market", 9), ("north_market", 3), ("web", 4)]
+
+print([(channel, len(list(g))) for channel, g in groupby(rows, key=itemgetter(0))])
+
+rows.sort(key=itemgetter(0))
+print([(channel, sum(n for _, n in g)) for channel, g in groupby(rows, key=itemgetter(0))])
+```
+
+```text
+[('north_market', 1), ('south_market', 1), ('north_market', 1), ('web', 1)]
+[('north_market', 11), ('south_market', 9), ('web', 4)]
+```
+
+`north_market` appears twice in the first result, and no error warns you. Sort by the same key first: that costs O(n log n). A `defaultdict` needs no sorting and is O(n), so it is the usual choice (see [dict and Counter](/python/dicts-and-counting/)). `groupby` fits when the input is already sorted, for example rows from SQL with `ORDER BY`, and you want to handle one group at a time without keeping the others.
+
+## A few more from itertools
+
+```python
+from itertools import accumulate, chain, islice, count
+from decimal import Decimal
+
+daily = [Decimal("10.00"), Decimal("4.99"), Decimal("0.01")]
+print(list(accumulate(daily)))                                   # running total
+print(list(chain.from_iterable([["prd_01"], ["prd_02", "prd_03"]])))   # flatten one level
+print(list(islice(count(1), 3)))                                 # first 3 of an endless iterator
+```
+
+```text
+[Decimal('10.00'), Decimal('14.99'), Decimal('15.00')]
+['prd_01', 'prd_02', 'prd_03']
+[1, 2, 3]
+```
+
+Not sure what else the module has? `dir(itertools)` lists every function, and the end of its documentation page has recipes (see [Testing and complexity](/python/testing-and-complexity/)).
+
+## Practice
+
+<Drill id="y-batches">
+
+A `range` with step n and a slice for each start. For a stream that does not fit in memory, use a generator with `yield` or `itertools.batched` (Python 3.12+). `batched` gives tuples, and the task asks for lists: `[list(b) for b in batched(items, n)]`. `n <= 0` is an error, not an endless loop, so check it first and raise `ValueError`.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+For every loop over the input, say how much of it stays in memory, not only how long it takes: *"This reads one line at a time and keeps a dict of totals, so memory grows with the number of customers, not with the size of the file."* That sentence often answers the 50 GB question before anyone asks it.
+
+When an output looks wrong, read it aloud and name the cause: *"north_market is here twice, so groupby got unsorted input. I'll sort by channel first, or use a defaultdict."*
+</Aside>
+
+## Further reading
+
+- [itertools.batched](https://docs.python.org/3/library/itertools.html#itertools.batched), [itertools.pairwise](https://docs.python.org/3/library/itertools.html#itertools.pairwise) and [itertools.groupby](https://docs.python.org/3/library/itertools.html#itertools.groupby) — each with an equivalent in plain Python.
+- [itertools recipes](https://docs.python.org/3/library/itertools.html#itertools-recipes) — short ready-made helpers built from the module's functions.
+- [Functional Programming HOWTO: Generators](https://docs.python.org/3/howto/functional.html#generators) — how `yield` pauses and resumes a function.
+- [zip()](https://docs.python.org/3/builtins/functions.html#zip) — the built-in function and its `strict` argument.
+
+## Related topics
+
+- [dict and Counter](/python/dicts-and-counting/) — grouping without sorting, the usual alternative to `groupby`.
+- [Python and SQL](/python/python-and-sql/) — `fetchmany` and `executemany` with the batches from this page.
+- [Intervals](/python/intervals/) — sort by start, then one pass over neighbours.
+- [Testing and complexity](/python/testing-and-complexity/) — naming the memory cost along with the time.

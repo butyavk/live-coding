@@ -1,0 +1,210 @@
+---
+title: Когорты и удержание
+description: Клиенты по месяцу первой оплаты, удержание через EXISTS, доля без целочисленного деления и когортная таблица «месяцы на месяцы».
+sidebar:
+  order: 10
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+«Из клиентов, которые впервые заплатили в июне, сколько заплатили и в июле?» — это вопрос о когорте. Он решается в три шага: найти первый платный месяц каждого клиента за всё время, проверить, платил ли каждый в следующем месяце, потом поделить. Две ошибки ломают его молча: первая покупка, посчитанная внутри окна отчёта, и `JOIN`, который считает платежи вместо клиентов.
+
+<Aside type="tip" title="Коротко">
+- Когорта — клиенты, у которых **первая** платная транзакция пришлась на месяц: `MIN(start_time)` по всем их платежам, а не только по месяцам отчёта.
+- Удержан — значит, есть хотя бы одна платная транзакция в следующем месяце: `EXISTS (SELECT 1 …)`, связанный с внешним клиентом.
+- `JOIN` с платежами следующего месяца размножает строки: клиент с двумя платежами посчитается дважды.
+- Доля — `ROUND(1.0 * retained / cohort, 3)`; `1.0 *` спасает от целочисленного деления.
+- Когортная таблица: сначала одна строка на (клиент, месяц), потом группировка по месяцу когорты и номеру месяца.
+</Aside>
+
+## Шаг 1: когорта
+
+Платная транзакция — не триал, не тестовая покупка и не промо-доступ. Когорту задаёт первая такая транзакция каждого клиента:
+
+```sql
+WITH paid AS (
+    SELECT customer_id, start_time
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (
+    SELECT customer_id, MIN(start_time) AS first_at   -- за всё время
+    FROM paid
+    GROUP BY customer_id
+),
+cohort AS (
+    SELECT customer_id
+    FROM first_paid
+    WHERE first_at >= TIMESTAMP '2026-06-01' AND first_at < TIMESTAMP '2026-07-01'
+)
+SELECT COUNT(*) AS cohort
+FROM cohort;
+```
+
+В июньской когорте 111 клиентов.
+
+Частая ошибка — отфильтровать платежи до июня ещё до `MIN`. Тогда каждый, кто платил в июне, получает июнь как «первый» месяц, включая тех, кто впервые заплатил год назад. В такой когорте 393 клиента, и большинство из них не новые.
+
+Спросите, с какого момента есть данные. Учебные данные начинаются 1 января 2025. Клиент, который впервые заплатил раньше, в первые месяцы выглядел бы новым, поэтому ранним когортам доверия меньше, чем когортам 2026 года.
+
+## Шаг 2: удержание через EXISTS
+
+Для каждого клиента когорты вопрос звучит как «да или нет»: есть ли хотя бы одна платная транзакция в июле? Именно на это отвечает `EXISTS`. Запрос продолжает те же три CTE:
+
+```sql
+SELECT COUNT(*) AS cohort,
+       COUNT(*) FILTER (WHERE EXISTS (
+           SELECT 1
+           FROM paid p
+           WHERE p.customer_id = c.customer_id          -- связь с внешним клиентом
+             AND p.start_time >= TIMESTAMP '2026-07-01'
+             AND p.start_time <  TIMESTAMP '2026-08-01'
+       )) AS retained
+FROM cohort c;
+```
+
+| cohort | retained |
+|---|---|
+| 111 | 47 |
+
+`EXISTS` даёт true или false для каждой внешней строки и никогда не размножает строки. `SELECT 1` — договорённость: неважно, что выбирает подзапрос, важно только, нашлась ли строка. Подробнее об `EXISTS` — в [подзапросах и CTE](/sql/subqueries-and-cte/).
+
+Две ошибки дают здесь неверное число:
+
+- **JOIN вместо EXISTS.** Соединение когорты с июльскими платежами даёт 53 строки, потому что часть клиентов платила в июле дважды. `COUNT(*)` тогда скажет 53. `COUNT(DISTINCT c.customer_id)` снова даст 47, но только потому, что `DISTINCT` прячет лишние строки. Почему так — в [размножении строк](/sql-patterns/row-multiplication/).
+- **Нет связи с внешней строкой.** Без `p.customer_id = c.customer_id` подзапрос спрашивает «платил ли в июле хоть кто-нибудь?». Ответ «да» для всех, и retained становится 111, то есть 100 %. Доля ровно 100 % или 0 % — повод проверить запрос до «готово» (проверка правдоподобия из [протокола интервью](/start/interview-protocol/)).
+
+## Шаг 3: доля
+
+В PostgreSQL целое, делённое на целое, — целое: `47 / 111` даёт 0. Сначала умножьте на `1.0`: `ROUND(1.0 * 47 / 111, 3)` даёт 0,423. Та же ловушка есть на странице [условная агрегация](/sql/conditional-aggregation/).
+
+Чтобы писать `EXISTS` один раз, а не дважды (для `retained` и для доли), посчитайте его колонкой в ещё одном CTE: одна строка на клиента с булевым `retained`. Итоговый `SELECT` тогда считает `COUNT(*) FILTER (WHERE retained)` и делит.
+
+### Что значит «удержан»: спросите
+
+«Заплатил снова в следующем месяце» подходит для месячных тарифов (plan). Годовой подписчик в следующем месяце не платит, но и не ушёл. Разделим июньскую когорту по тарифу первой оплаты:
+
+```sql
+WITH paid AS (
+    SELECT customer_id, start_time, plan_period
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (                                  -- первая оплата и её тариф
+    SELECT DISTINCT ON (customer_id) customer_id, start_time AS first_at, plan_period
+    FROM paid
+    ORDER BY customer_id, start_time
+)
+SELECT f.plan_period,
+       COUNT(*) AS cohort,
+       COUNT(*) FILTER (WHERE EXISTS (
+           SELECT 1
+           FROM paid p
+           WHERE p.customer_id = f.customer_id
+             AND p.start_time >= TIMESTAMP '2026-07-01'
+             AND p.start_time <  TIMESTAMP '2026-08-01'
+       )) AS retained
+FROM first_paid f
+WHERE f.first_at >= TIMESTAMP '2026-06-01'
+  AND f.first_at <  TIMESTAMP '2026-07-01'
+GROUP BY f.plan_period
+ORDER BY f.plan_period;
+```
+
+| plan_period | cohort | retained |
+|---|---|---|
+| P1M | 50 | 40 |
+| P1W | 12 | 7 |
+| P1Y | 49 | 0 |
+
+Снова заплатили 40 из 50 месячных клиентов и ни один из 49 годовых — как и следовало ожидать. Поэтому до запроса спросите: *"Does retained mean a new payment, or an active subscription?"* Для активной подписки проверка превращается в «активна на момент», как на странице [календари и активные периоды](/sql-patterns/calendars-and-active-periods/).
+
+## Когортная таблица: месяцы на месяцы
+
+Вопрос-продолжение часто просит все когорты и несколько месяцев сразу. Каждая строка — месяц когорты, каждая колонка — число месяцев с первой оплаты:
+
+```sql
+WITH paid AS (                                   -- одна строка на (клиент, месяц)
+    SELECT DISTINCT customer_id,
+           CAST(date_trunc('month', start_time) AS DATE) AS month
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (
+    SELECT customer_id, MIN(month) AS cohort_month
+    FROM paid
+    GROUP BY customer_id
+),
+grid AS (
+    SELECT f.cohort_month,
+           CAST(12 * (EXTRACT(YEAR FROM p.month) - EXTRACT(YEAR FROM f.cohort_month))
+                + EXTRACT(MONTH FROM p.month) - EXTRACT(MONTH FROM f.cohort_month) AS INT) AS month_number,
+           p.customer_id
+    FROM first_paid f
+    JOIN paid p ON p.customer_id = f.customer_id
+)
+SELECT cohort_month,
+       COUNT(*) FILTER (WHERE month_number = 0) AS m0,
+       COUNT(*) FILTER (WHERE month_number = 1) AS m1,
+       COUNT(*) FILTER (WHERE month_number = 2) AS m2,
+       COUNT(*) FILTER (WHERE month_number = 3) AS m3,
+       ROUND(1.0 * COUNT(*) FILTER (WHERE month_number = 3)
+                 / COUNT(*) FILTER (WHERE month_number = 0), 3) AS m3_share
+FROM grid
+WHERE cohort_month >= DATE '2026-01-01' AND cohort_month < DATE '2026-07-01'
+GROUP BY cohort_month
+ORDER BY cohort_month;
+```
+
+| cohort_month | m0 | m1 | m2 | m3 | m3_share |
+|---|---|---|---|---|---|
+| 2026-01-01 | 102 | 40 | 28 | 24 | 0.235 |
+| 2026-02-01 | 72 | 42 | 29 | 24 | 0.333 |
+| 2026-03-01 | 103 | 46 | 27 | 24 | 0.233 |
+| 2026-04-01 | 108 | 44 | 33 | 22 | 0.204 |
+| 2026-05-01 | 106 | 55 | 41 | 38 | 0.358 |
+| 2026-06-01 | 111 | 47 | 36 | 26 | 0.234 |
+
+Как это устроено:
+
+- **В `paid` одна строка на клиента и месяц** благодаря `DISTINCT`. Поэтому `JOIN` в `grid` здесь безопасен: он не может размножить клиента внутри месяца.
+- **`m0` — размер когорты**, и июньская строка повторяет числа выше: 111 и 47. Чтобы получить долю, делите любую клетку на `m0`.
+- **`month_number`** считает целые месяцы между началами двух месяцев. `EXTRACT` возвращает `numeric`, поэтому результат приводится к `INT`.
+- **Клетки в будущем.** У свежей когорты поздние колонки — месяцы, которые ещё не наступили, и `COUNT` даёт для них 0, а это читается как «все ушли». Эта таблица кончается июньской когортой, поэтому её `m3` — сентябрь, последний месяц данных. У более поздних когорт показывайте такие клетки как NULL, а не 0.
+
+На интервью часто хватает длинной формы (`cohort_month`, `month_number`, `customers`); развёрнутая таблица — для чтения.
+
+## Практика
+
+<Drill id="s-retention">
+
+Когорта строится по первой покупке — `MIN` по клиенту за всё время, — потом проверка «был ли платёж в следующем месяце». Порядок шагов: `paid` → `first_paid` → `cohort` → `flagged` → подсчёт. `EXISTS` со связью с внешним клиентом считает каждого клиента один раз. Он написан один раз — в `flagged`, как флаг `retained` на клиента, — и итоговый запрос считает этот флаг и для `retained`, и для доли. Для доли нужно `1.0 *` перед делением.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Результат решает одно слово в определении, поэтому произносите его аккуратно:
+
+- не «the June cohort is everyone who paid in June» (393 клиента),
+- а «everyone whose **first** paid transaction over all time was in June» (111).
+
+С удержанием так же: «Retained means at least one paid transaction in July. I only need to know that such a row exists, so EXISTS, not a join.» Когда пришло число, сравните его с ожиданием: «Monthly plans keep 40 of 50, yearly plans none. That fits, because yearly subscribers don't pay every month.»
+
+Просьба показать все когорты сразу — это когортная таблица выше. Вопрос про годовые тарифы — повод уточнить, не должно ли «удержан» значить «подписка активна».
+</Aside>
+
+## Что почитать
+
+- [EXISTS](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-EXISTS) — подзапрос, который отвечает только «есть ли хоть одна строка».
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — `FILTER (WHERE …)` у агрегата.
+- [date_trunc](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC) — начало месяца как ключ когорты.
+- [WITH queries](https://www.postgresql.org/docs/current/queries-with.html) — шаги CTE, из которых строится когорта.
+
+## Связанные темы
+
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — `EXISTS`, `NOT EXISTS` и CTE по шагам.
+- [Фильтры и даты](/sql/filters-and-dates/) — месяцы полуоткрытым интервалом и `date_trunc`.
+- [Размножение строк](/sql-patterns/row-multiplication/) — почему `JOIN` считает платежи, а не клиентов.
+- [Условная агрегация](/sql/conditional-aggregation/) — `COUNT(*) FILTER` и ловушка целочисленного деления.
+- [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/) — «активна на момент», для удержания по подписке.
+- [Конверсия и отток](/sql-tasks/funnels-and-churn/) — конверсия триалов и отток, другая сторона удержания.

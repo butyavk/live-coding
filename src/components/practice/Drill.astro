@@ -1,0 +1,99 @@
+---
+// A drill: one SQL query (s-…) or one Python function (y-…) to write, checked against the
+// reference recorded at build time. Children are the explanation, shown with the answer. The
+// answer body is left out of the site search (data-pagefind-ignore), so a search does not show it.
+//   <Drill id="s-left-zero">Why the reference is written this way…</Drill>
+import { Code } from '@astrojs/starlight/components';
+import { getDrill, inline, localeOf, ruFor, schemaForEditor } from './lib/data';
+import { strings } from './lib/i18n';
+import Ctx from './parts/Ctx.astro';
+import ResultTable from './parts/ResultTable.astro';
+import Workbench from './parts/Workbench.astro';
+import './practice.css';
+
+interface Props {
+  id: string;
+}
+const { id } = Astro.props;
+const locale = localeOf(Astro);
+const T = strings(locale);
+const d = getDrill(id);
+const isSql = d.kind === 'sql';
+const starter = isSql ? (d.data.starter ?? '') : d.data.starter;
+const cfg = isSql
+  ? { kind: 'drill-sql', id, starter, ordered: !!d.data.ordered, check: d.data.check !== false && !!d.expected, expected: d.expected ? { cols: d.expected.cols, rows: d.expected.rows } : null, edge: d.edge, schema: schemaForEditor() }
+  : { kind: 'drill-py', id, starter, harness: d.harness };
+const ru = ruFor(id, locale);
+// The output contract, as in a task: which columns, and the order when the order is checked.
+const contract = isSql && d.expected && d.data.check !== false ? { cols: d.expected.cols.join(', '), order: d.data.ordered && d.expected.n > 1 ? d.orderBy : '' } : null;
+const firstTest = !isSql ? d.data.tests[0] : null;
+---
+<section class="lcp lcp-drill" data-lcp={cfg.kind} data-id={id}>
+  <script type="application/json" data-lcp-cfg set:html={JSON.stringify(cfg).replace(/</g, '\\u003c')} />
+  <header class="lcp-head not-content">
+    <span class="lcp-badge">{isSql ? T.sql : T.python}</span>
+    <span class="lcp-kind">{isSql ? T.drillSql : T.drillPy}</span>
+    {d.data.core && <span class="lcp-tag">{T.core}</span>}
+    <span class="lcp-solved" data-solved hidden>✓ {T.solved}</span>
+  </header>
+  <p class="lcp-q" lang="en" set:html={inline(d.data.q)} />
+  {ru?.q && (
+    <details class="lcp-tr not-content">
+      <summary>{T.translation}</summary>
+      <p lang="ru" set:html={inline(ru.q)} />
+    </details>
+  )}
+  {contract && (
+    <p class="lcp-small not-content lcp-spec">
+      <span><strong>{T.outputCols}</strong> <code>{contract.cols}</code></span>
+      {contract.order && <span><strong>{T.orderBy}</strong> <code>ORDER BY {contract.order}</code></span>}
+    </p>
+  )}
+  {isSql && <Ctx ctx={d.ctx} locale={locale} />}
+  {!isSql && (
+    <details class="lcp-ctx not-content">
+      <summary>{T.dataAndExample}</summary>
+      <div class="lcp-ctx-body">
+        {d.data.pre && <p class="lcp-small">{T.pre}</p>}
+        {d.data.pre && <Code code={d.data.pre} lang="python" />}
+        {firstTest && (
+          <p class="lcp-small"><strong>{T.example}</strong> <code>{firstTest.call}</code> → <code>{firstTest.raises ? `raises ${firstTest.raises}` : firstTest.expect}</code></p>
+        )}
+        <p class="lcp-small lcp-muted">{T.nChecks(d.data.tests.length)}</p>
+      </div>
+    </details>
+  )}
+  <Workbench locale={locale} lang={isSql ? 'sql' : 'python'} code={starter} check={isSql ? cfg.check : true} />
+  <details class="lcp-answer" data-answer>
+    <summary class="not-content">{T.showAnswer}</summary>
+    <div class="lcp-answer-body" data-pagefind-ignore>
+      <p class="lcp-label not-content">{T.reference}</p>
+      <Code code={d.data.ref.trimEnd()} lang={isSql ? 'sql' : 'python'} />
+      {isSql && d.expected && (
+        <div class="not-content">
+          <p class="lcp-label">{T.expectedOutput}</p>
+          <ResultTable cols={d.expected.cols} rows={d.expected.sample} rowsLabel={`${T.rows(d.expected.n)}${d.expected.n > d.expected.sample.length ? ` (${T.shownFirst(d.expected.sample.length)})` : ''}`} />
+        </div>
+      )}
+      {!isSql && (
+        <div class="not-content">
+          <p class="lcp-label">{T.expectedValues}</p>
+          <ul class="lcp-checks">
+            {d.expectedOut.map(([call, val]) => (
+              <li class="lcp-pass"><span class="lcp-icon" aria-hidden="true">✓</span> <code>{call}</code> → <code>{val}</code></li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {Astro.slots.has('default') && (
+        <div class="lcp-explain">
+          <slot />
+        </div>
+      )}
+    </div>
+  </details>
+</section>
+
+<script>
+  import './lib/client';
+</script>

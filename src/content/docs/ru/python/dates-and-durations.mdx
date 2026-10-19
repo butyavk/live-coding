@@ -1,0 +1,173 @@
+---
+title: Даты и периоды
+description: date, datetime и timedelta в задачах интервью, прибавление месяцев через calendar.monthrange, продления от исходной даты, ISO-строки и время с поясом и без.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Подписки продлеваются каждый месяц, возвраты приходят через несколько дней после покупки, у вебхуков ISO-метки времени. Поэтому в типичной задаче на Python есть дата: прибавить месяц, посчитать дни между двумя событиями, сгруппировать по месяцу. Стандартной библиотеки на всё это хватает. Ловушки — месяц, который не равен 30 дням, «уползающая» дата продления и два вида `datetime`, которые нельзя сравнивать.
+
+<Aside type="tip" title="Коротко">
+- `date` — для дней, `datetime` — для моментов, `timedelta` — для длительностей. `(b - a).days` округляет вниз.
+- Месяц — не фиксированное число дней: год и месяц через `//` и `%`, день — `min(d.day, calendar.monthrange(y, m)[1])`.
+- Продления считают от исходной даты (`add_months(start, k)`), а не от прошлого продления.
+- ISO-строки: `datetime.fromisoformat(s)`; суффикс `Z` он понимает с Python 3.11 (в старых версиях сначала `s.replace("Z", "+00:00")`). Ключ месяца: `strftime("%Y-%m")`.
+- Время с поясом (aware) и без пояса (naive) не смешиваются. Спросите *"Are all timestamps in UTC?"* и сделайте все значения aware.
+</Aside>
+
+## date, datetime и timedelta
+
+| Тип | Что это | Пример |
+|---|---|---|
+| `date` | календарный день | `date(2026, 9, 30)` |
+| `datetime` | момент: день и время, с поясом или без | `datetime(2026, 9, 1, 10, 0)` |
+| `timedelta` | длительность: дни, секунды, микросекунды | `timedelta(days=30)` |
+
+```python
+from datetime import date, datetime, time, timedelta
+
+start = datetime(2026, 9, 1, 10, 0)
+end = datetime(2026, 9, 3, 9, 0)
+
+print(end - start)                       # 1 day, 23:00:00 -- это timedelta
+print((end - start).days)                # 1 -- целые дни, вниз
+print((start - end).days)                # -2 -- вниз, а не к нулю
+print((end - start).total_seconds())     # 169200.0
+print(start + timedelta(days=30))        # 2026-10-01 10:00:00
+print(start.date(), start.replace(day=1, hour=0))   # 2026-09-01 2026-09-01 00:00:00
+print(datetime.combine(date(2026, 9, 30), time()))  # 2026-09-30 00:00:00 -- полночь даты
+print(date(2026, 9, 30) - date(2026, 9, 1))         # 29 days, 0:00:00
+```
+
+Разность двух datetime — это `timedelta`. Его `.days` — число целых дней с округлением вниз: 47 часов — это 1 день, а минус 47 часов — −2 дня. Если в задаче нужны часы или доли дня, берите `total_seconds()`.
+
+`date` и `datetime` тоже не смешивают: `date(2026, 9, 1) < datetime(2026, 9, 1, 10)` даёт `TypeError: '<' not supported between instances of 'datetime.date' and 'datetime.datetime'`. Сначала приведите одну сторону: `.date()` или `datetime.combine(d, time())`.
+
+## Прибавить месяцы
+
+В `timedelta` нет месяцев, потому что в месяце от 28 до 31 дня:
+
+```python
+import calendar
+from datetime import date, timedelta
+
+print(date(2026, 1, 31) + timedelta(days=30))   # 2026-03-02 -- не «через месяц»
+print(calendar.monthrange(2026, 2))             # (calendar.SUNDAY, 28)
+print(calendar.monthrange(2028, 2))             # (calendar.TUESDAY, 29) -- високосный год
+
+d, n = date(2026, 11, 15), 3
+total = d.month - 1 + n                         # месяцы с нуля: 10 + 3 = 13
+print(d.year + total // 12, total % 12 + 1)     # 2027 2
+```
+
+`calendar.monthrange(year, month)` возвращает два значения: день недели первого числа и число дней в месяце. Нужно второе, `[1]`. (С Python 3.12 день недели печатается как `calendar.SUNDAY`, но это по-прежнему число 6.)
+
+Прибавление `n` месяцев — три шага:
+
+1. Считать месяцы с нуля: `total = d.month - 1 + n`.
+2. Год — `d.year + total // 12`, месяц — `total % 12 + 1`. Это работает и для отрицательного `n`, потому что `//` округляет вниз.
+3. Прижать день к длине нового месяца: `min(d.day, calendar.monthrange(year, month)[1])`. 31 января плюс месяц — 28 февраля, а в високосный год 29 февраля.
+
+### Продления — от исходной даты
+
+Месячная подписка, начатая 31 января, в коротких месяцах продлевается в последний день месяца. Если считать каждое продление от предыдущего, день «уползает» на 28-е и уже не возвращается:
+
+| Продление | От прошлого продления | От исходной даты |
+|---|---|---|
+| 0 | 2026-01-31 | 2026-01-31 |
+| 1 | 2026-02-28 | 2026-02-28 |
+| 2 | 2026-03-28 | 2026-03-31 |
+| 3 | 2026-04-28 | 2026-04-30 |
+
+Правая колонка — `add_months(start, k)` для `k = 0, 1, 2, 3`. Какое правило в биллинге — вопрос к интервьюеру: *"Do renewals count from the original date or from the last renewal?"*
+
+## ISO-строки и часовые пояса
+
+API и вебхуки передают время строками ISO 8601, часто с `Z` для UTC:
+
+```python
+from datetime import datetime, timezone
+
+a = datetime.fromisoformat("2026-09-01T10:00:00Z")          # "Z" понимается с Python 3.11
+b = datetime.fromisoformat("2026-09-03T09:00:00+00:00")
+print(a, a.tzinfo)                         # 2026-09-01 10:00:00+00:00 UTC
+print(b - a, (b - a).days)                 # 1 day, 23:00:00 1
+print((b - a).total_seconds() / 86400)     # 1.9583333333333333
+print(a.isoformat(), a.strftime("%Y-%m"))  # 2026-09-01T10:00:00+00:00 2026-09
+
+s = "2026-09-01T10:00:00Z"
+print(datetime.fromisoformat(s.replace("Z", "+00:00")) == a)   # True -- работает в любой версии
+```
+
+До Python 3.11 `fromisoformat` не понимал `Z`. Вариант с `.replace("Z", "+00:00")` работает в любой версии, поэтому он надёжен, когда неизвестно, какой Python в редакторе. ISO-даты в одном формате, например `'2026-09-01'`, правильно сортируются и сравниваются и как обычный текст. Строки с разными смещениями — нет, поэтому перед сравнением их разбирают.
+
+### Время с поясом и без
+
+Datetime с `tzinfo` — **aware**: это точный момент. Без него — **naive**: «10:00 где-то». Python отказывается их смешивать:
+
+```python
+aware = datetime(2026, 9, 1, 10, tzinfo=timezone.utc)
+naive = datetime(2026, 9, 1, 10)
+
+print(aware == naive)                                # False -- без ошибки, просто никогда не равны
+print(naive.replace(tzinfo=timezone.utc) == aware)   # True -- если известно, что это UTC
+naive < aware   # TypeError: can't compare offset-naive and offset-aware datetimes
+aware - naive   # TypeError: can't subtract offset-naive and offset-aware datetimes
+```
+
+`<` и `-` громко падают, а `==` молча возвращает `False`, так что поиск по времени может промахнуться без всякой ошибки. Делайте все значения aware на входе в код: разбирайте строку со смещением или добавляйте UTC через `replace(tzinfo=timezone.utc)`, если точно известно, что источник в UTC. «Сейчас» — `datetime.now(timezone.utc)`. `datetime.utcnow()` возвращает naive-значение и устарел с Python 3.12.
+
+Местный день может отличаться от дня по UTC. 23:30 UTC 30 сентября в Токио — уже 1 октября:
+
+```python
+from datetime import timedelta
+
+tokyo = timezone(timedelta(hours=9))             # фиксированное смещение: в Токио нет летнего времени
+late = datetime(2026, 9, 30, 23, 30, tzinfo=timezone.utc)
+print(late.astimezone(tokyo))                    # 2026-10-01 08:30:00+09:00
+```
+
+Храните и считайте в UTC. В местный пояс переводите только для показа или для группировки по местному дню покупателя — и только если этого требует задача. Для поясов с летним временем берите `zoneinfo.ZoneInfo("Europe/Berlin")` вместо фиксированного смещения. (В браузерном редакторе на этом сайте у `zoneinfo` нет данных о поясах, поэтому пробуйте его в локальном Python.)
+
+## Практика
+
+<Drill id="y-months">
+
+В `timedelta` нет месяцев. Год и месяц считаем через `//` и `%` от месяца, отсчитанного с нуля, а день прижимаем к `calendar.monthrange(year, month)[1]`. Тот же код работает и для отрицательного `n`, потому что `//` округляет вниз. Продления считают от исходной даты, а не от прошлого продления — иначе 31-е навсегда «уползёт» на 28-е.
+
+</Drill>
+
+<Drill id="y-iso">
+
+`datetime.fromisoformat` разбирает ISO 8601, а с Python 3.11 читает суффикс `Z` как UTC, так что хватает простого вызова. В старых версиях сначала замените суффикс: `s.replace("Z", "+00:00")`. Разность двух datetime — `timedelta`, а `.days` даёт целые дни вниз: два часа — это 0 дней, как в третьей проверке. `total_seconds() // 86400` даёт то же число, но как float, `1.0`, а проверки ждут `int`. Aware и naive datetime не смешивайте: их вычитание даёт `TypeError`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+В датах прячутся допущения. Спросите о каждом вслух, и пусть ответ меняет код:
+
+- *"Are all timestamps in UTC?"* Если да, делайте каждое значение aware на входе и никогда не сравнивайте его с naive.
+- *"Do renewals count from the original date or from the last one?"* От ответа зависит, что станет с 31-м числом.
+- *"Is the end of the period included?"* Потом скажите, какое сравнение используете, например `<` для невключённого конца.
+
+Если речь зашла о месяцах, хватает одной фразы: *"timedelta has no months, so I compute the year and the month myself and clamp the day to the end of the month."* Для часовых поясов — ещё одной: *"I keep UTC inside and convert with zoneinfo only to show a time or to group by a local day."*
+</Aside>
+
+## Что почитать
+
+- [timedelta objects](https://docs.python.org/3/library/datetime.html#timedelta-objects) — что хранит длительность и как работают `.days` и `total_seconds()`.
+- [datetime.fromisoformat](https://docs.python.org/3/library/datetime.html#datetime.datetime.fromisoformat) — какие форматы понимает и что изменилось в 3.11.
+- [Aware and naive objects](https://docs.python.org/3/library/datetime.html#aware-and-naive-objects) — два вида datetime.
+- [strftime() and strptime() format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes) — `%Y`, `%m`, `%d` и остальные коды.
+- [calendar.monthrange](https://docs.python.org/3/library/calendar.html#calendar.monthrange) — день недели первого числа и число дней в месяце.
+- [zoneinfo](https://docs.python.org/3/library/zoneinfo.html) — часовые пояса IANA с летним временем, например `Europe/Berlin`.
+
+## Связанные темы
+
+- [Интервалы](/python/intervals/) — полуоткрытые периоды, пересечения и слияние.
+- [Окна по времени](/python/time-windows/) — «последние N секунд» через `deque`.
+- [Фильтры и даты](/sql/filters-and-dates/) — полуоткрытые диапазоны дат и месяцы в SQL.
+- [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/) — каждый день, даже пустой, и «активна на момент».
+- [События и время](/python-tasks/events-and-time/) — даты продлений по ISO-длительностям как полная задача.

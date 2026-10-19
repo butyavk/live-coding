@@ -1,0 +1,24 @@
+-- Q10. Churn rate per product — August 2026
+-- Level: hard. Target time: 15 min.
+--
+-- TASK
+--   Take the paid subscriptions that were active on August 1, 2026. How many of them ended during August and were not renewed (churned)? Show it per product: active on August 1, churned, churn rate. Worst products first.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: What is one subscription?
+--   A: All its paid periods: the first purchase and every renewal share the same original_transaction_id. Use only paid rows: not trial, not refunded, not a test purchase, not promo.
+--   Q: Active on August 1?
+--   A: The first start_time of the subscription <= 2026-08-01 and the last end_time of the subscription > 2026-08-01.
+--   Q: Churned in August?
+--   A: Active on August 1 and no longer active on 2026-09-01 00:00: the last end_time of the subscription <= 2026-09-01.
+--   Q: Rate?
+--   A: churned / active_at_start, rounded to 4 decimals.
+--   Q: Do you also need every month of the year?
+--   A: Not now. Say how you would extend it: a calendar of months instead of one date.
+--
+-- OUTPUT COLUMNS: product_id, active_at_start, churned, churn_rate
+-- ORDER BY: churn_rate DESC, product_id
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q10.sql   Check: pytest -k q10
+
+-- your query below

@@ -1,0 +1,124 @@
+---
+title: Subscriptions over time
+description: "Four SQL tasks where a subscription is a period: active at a moment, active on every day, customers who came back after a break, and each customer's status."
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+A subscription is a period, not a single moment. Q03 and Q04 count the periods active at a moment, Q06 measures the break between two periods, and Q07 reads the latest row of each customer. The traps sit at the boundaries: the end of a period, a refund, an empty day, two rows with the same time. The background is on [Calendars and active periods](/sql-patterns/calendars-and-active-periods/), [Top N per group](/sql-patterns/top-n-per-group/) and [Shares and running totals](/sql-patterns/running-totals-and-shares/), where `LAG` is explained.
+
+<Aside type="tip" title="How to practise">
+Before you write the `WHERE`, draw one period on paper. Mark a moment inside it, one exactly at `end_time` and one after a refund, and say for each whether it counts. Then write the condition and run the query after every step.
+</Aside>
+
+## Q03. Active paid subscriptions on a date
+
+<Task id="q03" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** How many paying subscribers each product had on 1 September. This number is the base of MRR and churn. A period is active at moment `m` if `m` is inside `[start_time, end_time)`.
+
+**Steps.** One `WHERE` and one `GROUP BY product_id`:
+
+- active: `start_time <= m AND end_time > m`;
+- paid: not a trial, not a test purchase, not promo access;
+- a refund before the moment cancels the period: `refunded_at IS NULL OR refunded_at > m`.
+
+**Traps.**
+
+- `end_time >= m` counts a period that ended exactly at that midnight, and `refunded_at >= m` keeps one refunded exactly then. No practice row sits on this boundary. The hidden edge-case data that Check also uses has both cases, so either mistake fails there.
+- A plain `refunded_at IS NULL` drops periods refunded after 1 September. At that moment they were still active. Here it loses 4 subscriptions: 1064 instead of 1068.
+
+**Check.** The first row is prd_08 with 69. The sum over all products is 1068, the same as the first day of Q04.
+
+**Follow-up.** "And for every day of September?" That is Q04: a calendar and the same count for each day.
+
+**In production.** `start_time <= m AND end_time > m` is two ranges. A B-tree on `start_time` cuts off the future periods, but every past period must still be read. For "active at a moment", a range column `tsrange(start_time, end_time)` with a GiST index and the `@>` operator answers the question directly.
+
+</Reveal>
+
+## Q04. Daily active subscriptions — September 2026
+
+<Task id="q04" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The same metric as Q03, but for each day. This is the line on an "active subscriptions" chart.
+
+**Steps.** A calendar of days from `generate_series`, and for each day the count from Q03. There are two ways:
+
+- simpler: a subquery in `SELECT`, `(SELECT COUNT(*) FROM transactions t WHERE … d …)`, once per day;
+- classic, as in the reference: the calendar `LEFT JOIN transactions` on the condition "active on this day", then `COUNT(t.transaction_id)`.
+
+**Traps.**
+
+- With `LEFT JOIN`, every condition on `transactions` goes into `ON`, not into `WHERE`. Otherwise the empty days disappear.
+- `COUNT(t.transaction_id)`, not `COUNT(*)`: an empty day has one row with NULLs, and `COUNT(*)` shows 1 for it.
+
+**Check.** 30 rows. 1 September — 1068, 2 September — 1063, 30 September — 1044. Every practice day has more than 1000 active subscriptions, so neither trap changes the result here. The hidden edge-case data has a day when nothing is active: there a `WHERE` loses the day, `COUNT(*)` shows 1, and Check fails.
+
+**Follow-up.** "And on a billion rows?" Do not recompute history for every day on every run.
+
+**In production.** Keep a daily snapshot table: one row per day and product, written by a job once a day. The report then reads 30 rows instead of scanning transactions 30 times. The same count in Python, in `O(n + days)`, is task P05 on [Events and time](/python-tasks/events-and-time/).
+
+</Reveal>
+
+## Q06. Customers who came back after a break
+
+<Task id="q06" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Win-back: customers who left for more than 30 days and then returned. Marketing uses it to see which products bring people back.
+
+**Steps.**
+
+1. A CTE with `LAG(end_time) OVER (PARTITION BY customer_id, product_id ORDER BY start_time, transaction_id)`: the end of the previous period of the same customer in the same product.
+2. In the next step, `WHERE start_time > prev_end + INTERVAL '30 days'`.
+
+**Traps.**
+
+- A window function cannot be used in the `WHERE` of the same `SELECT`. The filter goes into the next step.
+- The gap in days is the difference of two `DATE` values, `CAST(start_time AS DATE) - CAST(prev_end AS DATE)`, which is an integer. The difference of two timestamps is an `interval`.
+- `transaction_id` in the window's `ORDER BY` decides which row is "previous" when two rows start at the same time. The hidden edge-case data has such customers: a weekly and a monthly plan bought at the same moment, then a return after a break. With the weekly plan first (it has the smaller id), the break runs from the end of the monthly plan: 45 days. In the other order it would run from the end of the weekly plan: 68 days, while the customer still had the monthly plan. Without the tie-breaker the database picks the order by chance, and Check fails there.
+- The first row of each customer has no previous row, so `prev_end` is NULL. The comparison gives NULL, and the row drops out by itself. Mention it, so it does not look like luck.
+
+**Check.** 121 rows. The first one: cus_00338 in prd_03 lapsed on 2025-02-09 and came back on 2025-05-07, 87 days later.
+
+**In production.** The window sorts the rows of each `(customer_id, product_id)` by time. For one customer, an index on `(customer_id, product_id, start_time)` finds those rows already in that order. For a pass over the whole table it does not help: EXPLAIN here shows a sequential scan and a sort even with that index, because the query reads every row anyway. A covering index with every column the query reads, `(customer_id, product_id, start_time, transaction_id) INCLUDE (end_time, is_test)`, does give an index-only scan with no sort, after `VACUUM`. Check EXPLAIN before you promise that an index removes a sort.
+
+</Reveal>
+
+## Q07. Current status of every customer
+
+<Task id="q07" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A snapshot of who pays now, who is on a trial and who has left, per product. It is the base of a subscriber dashboard.
+
+**Steps.**
+
+1. `ROW_NUMBER() OVER (PARTITION BY customer_id, product_id ORDER BY start_time DESC, transaction_id DESC)`; `rn = 1` is the customer's latest row.
+2. A `CASE` on that row, with `end_time` and `refunded_at` only: `end_time` after today and no refund → 'trial' or 'active'; everything else → 'expired'.
+3. `GROUP BY product_id, status`.
+
+**Traps.**
+
+- The status comes from the latest row, not from any row of the customer.
+- The order of the `CASE` branches matters: 'trial' before 'active'. In the other order, the only trial in the practice data (in prd_08) becomes 'active', and the result has 40 rows instead of 41.
+- Without `transaction_id DESC`, two rows with the same `start_time` give a random "latest" row. The hidden edge-case data has such pairs, a trial and a paid month bought at the same moment, so the random pick changes the counts there.
+
+**Without a window.** `MAX(start_time)` per (customer, product) in a CTE, then a `JOIN` back to `transactions`. It works until two rows share the latest time: then the join returns both, and the customer is counted twice. The practice data has no such pair. Check's hidden edge-case data has them, so this version fails there.
+
+**Check.** 41 rows: 20 products × ('active', 'expired'), plus one 'trial'. In total there are 2490 customer–product pairs: 1044 active, 1445 expired and 1 trial.
+
+**Follow-up.** "What about 50 million customers?" Keep a table of current statuses, one row per customer and product, updated from webhooks with `INSERT … ON CONFLICT DO UPDATE`.
+
+**In production.** The real answer is the table of current statuses from the follow-up: the service should not compute a status from history every time. An index on `(customer_id, product_id, start_time DESC)` finds one customer's latest row quickly. For the whole table it does not remove the sort: the query reads every row and every column, and EXPLAIN here shows a sequential scan and a sort even with that index.
+
+</Reveal>

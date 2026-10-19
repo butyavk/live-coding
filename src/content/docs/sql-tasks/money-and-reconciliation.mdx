@@ -1,0 +1,134 @@
+---
+title: Money and reconciliation
+description: "Four SQL tasks about money: duplicate webhooks, channel payouts against expected proceeds, advances that break the rules, and balances from a ledger."
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Money tasks compare two sources and expect every cent to add up: webhooks that arrive twice, payouts from the partner marketplaces against what the sales say, advances that break the rules, and what each merchant still owes. The habits: one row per real event before you count, `UNION ALL` and `FULL OUTER JOIN` for two sources, a status computed before you filter on it, and a balance as the sum of signed entries. They build on [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/), [Money and ledgers](/sql-patterns/money-and-ledgers/) and [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/); the advances program is described on the [dataset page](/start/dataset/).
+
+<Aside type="tip" title="How to practise">
+These are the longest SQL tasks, 8 to 30 minutes. Write the plan first as SQL comments, one line per CTE, and fill them in from the top. When a number looks wrong, run that CTE alone for one merchant before you change anything else.
+</Aside>
+
+## Q11. Duplicate webhooks
+
+<Task id="q11" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The channels deliver webhooks at least once, so one event can arrive twice. We need to know how many real events there were and how many extra deliveries.
+
+**Steps.**
+
+1. Number the copies of each event before grouping: `ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY received_at)`. `rn = 1` is the event, `rn > 1` is a duplicate.
+2. `GROUP BY` the day of `occurred_at` and the type, with `COUNT(*) FILTER (WHERE rn = 1)` and `COUNT(*) FILTER (WHERE rn > 1)`.
+
+**Traps.**
+
+- The day is the day of `occurred_at`, when the event happened, not of `received_at`. In the practice data every copy of a September event arrives on the day the event happened, so grouping by `received_at` looks right. The hidden edge-case data that Check also uses has copies that arrive after midnight, and that version fails there.
+- Count the extra copies, not the events that had copies: an event delivered three times has two duplicates. No practice event arrived more than twice; the hidden data has one that did.
+- The range is 1–29 September, as the task says: `occurred_at < '2026-09-30'`.
+
+**A shorter way.** Here a duplicate is an exact copy, with the same type and `occurred_at`, so all copies fall into the same group. Then `COUNT(DISTINCT event_id)` and `COUNT(*) - COUNT(DISTINCT event_id)` give the same 87 rows. But `DISTINCT` finds repeats only inside one group. If copies could differ, for example when you group by `received_at`, it would count one event in two groups. If you take this route, name the assumption.
+
+**Check.** 87 rows; in total 580 events and 25 duplicates. In the whole table there are 1285 deliveries of 1226 events, and no event arrived more than twice.
+
+**Follow-up.** "How do we stop duplicates?" At ingest: `UNIQUE (event_id)` and `INSERT … ON CONFLICT (event_id) DO NOTHING`.
+
+**In production.** That is the real fix. With a unique index on `event_id`, a duplicate never gets into the table, and this query is no longer needed.
+
+</Reveal>
+
+## Q12. Reconcile channel payouts with expected proceeds
+
+<Task id="q12" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Compare what a partner marketplace should have paid with what arrived. The advances program depends on it: an advance is paid against a marketplace payout that has not arrived yet.
+
+**Steps.**
+
+1. `movements`: sales and refunds with a minus sign in one feed (`UNION ALL`). A sale counts in the month of `start_time`, a refund in the month of `refunded_at`.
+2. `expected` per (merchant, channel, month), rounded, above 0 only.
+3. `paid` from `channel_payouts`: the sum and the number of rows.
+4. `FULL OUTER JOIN` on all three keys, with `COALESCE` for the key columns.
+5. A `CASE` with the statuses in priority order. Keep every row that is not 'matched'.
+
+**Traps.**
+
+- You need a `FULL JOIN`: either side can be missing. A `LEFT JOIN` from `expected` loses a payout that nobody expected. The practice data has none, but the hidden edge-case data that Check also uses has one, and the `CASE` must label it 'unexpected_payout'.
+- 'not_due_yet': the payout does not have to be there yet. The August North Market payout is due on 3 October (1 September + 32 days), so on 30 September it is not missing. The August South Market payout was due on 15 September.
+- Ignore expected proceeds of 0 or less: `HAVING ROUND(SUM(net), 2) > 0`. In the hidden edge-case data one month has a refund and no sales, so its expected proceeds are negative. Without the `HAVING` that month gets a 'mismatch' against −27.99 instead of 'unexpected_payout'.
+- When one side is missing, its column stays NULL, as the task says. `COALESCE(paid_usd, 0)` looks tidy, but 0 reads as "a payout of zero", not "no payout", and Check fails.
+- With NULLs, compute the status first, then filter on it. `WHERE NOT (payouts = 1 AND ABS(expected_usd - paid_usd) <= 1.00)` looks the same, but for a missing payout the condition is NULL, and those rows disappear: 12 rows instead of 32.
+
+**Check.** 32 rows: 12 'not_due_yet', 11 'mismatch', 8 'missing_payout' and 1 'duplicate_payout' (mer_02, north_market, June: 363.75 expected, 727.50 paid in two rows).
+
+**In production.** A unique key on `channel_payouts (merchant_id, channel, period_month)` would stop the duplicate payout when it is written. For the expected amounts, an index on `transactions(start_time)`.
+
+</Reveal>
+
+## Q13. Check merchant advances
+
+<Task id="q13" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Risk control: advances above the limit, advances made before the merchant joined the program, and duplicates by `idempotency_key`.
+
+**Steps.**
+
+1. `expected` as in Q12, without the date filter.
+2. `checked`: one row per advance with three boolean flags.
+3. `UNION ALL` over the flags: one output row per broken rule.
+
+**Traps.**
+
+- An advance can have no expected proceeds. Use a `LEFT JOIN` and `COALESCE(e.expected_usd, 0)`. An inner join drops the advance with all its flags, and without `COALESCE` the limit is NULL, so `over_limit` is never true.
+- Subtract refunds in the month of the refund, as in Q12. In the hidden edge-case data one advance is over the limit only because a refund in that month lowers the expected proceeds; without the refunds it looks fine, and Check fails.
+- Keep the one-cent tolerance from the task: `amount_usd > ROUND(0.70 * expected, 2) + 0.01`. Rounding can move an amount one cent above the limit: adv_0003 is 96.34 against a limit of 96.33. Without the `+ 0.01`, the query returns 10 rows instead of 3; with `amount_usd > 0.70 * expected` and no `ROUND`, 22.
+- "Not enrolled" is `advances_enrolled_at IS NULL`. A comparison with NULL is never true, so it needs its own branch. Every practice advance belongs to an enrolled merchant. The hidden edge-case data has one that does not, so Check fails without the `IS NULL` branch.
+- A duplicate is `ROW_NUMBER() OVER (PARTITION BY idempotency_key ORDER BY created_at, advance_id) > 1`. The second key follows the task's tie rule; no two copies here share a `created_at`. `GROUP BY idempotency_key HAVING COUNT(*) > 1` would flag both copies, and the first one is legitimate.
+
+**Check.** Three rows:
+
+- adv_0007 (mer_03), 'before_enrollment': made on 2 June, and the merchant enrolled on 19 June.
+- adv_0024 (mer_07), 'over_limit': 38.13, while the limit is 70% of 45.87, that is 32.11.
+- adv_0028 (mer_09), 'duplicate': the same key as adv_0027, created 41 seconds later, most likely a retry.
+
+**In production.** A unique index on `idempotency_key`: the duplicate advance is never written. This is more reliable than any check after the fact.
+
+</Reveal>
+
+## Q14. Outstanding balance per merchant
+
+<Task id="q14" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A ledger is a journal of money movements: the advance and the fee are positive, repayments are negative. The balance is not stored anywhere; it is the sum of the entries. This is the usual design for money.
+
+**Steps.**
+
+1. A CTE `per_advance`: `GROUP BY merchant_id, advance_id` → the sum of the entries and the date of the `advance` entry.
+2. Per merchant: `SUM`, `COUNT(*) FILTER (WHERE outstanding_usd > 0)`, `MIN(advanced_at) FILTER (WHERE outstanding_usd > 0)`, and `HAVING SUM(outstanding_usd) > 0`.
+
+**Traps.**
+
+- Whether an advance is open is decided by the sum of all its entries, not by one entry.
+- "The oldest open advance" is a `MIN` over open advances only. Without the filter, mer_11 gets 2026-07-02, an advance that is already repaid; the right answer is 2026-08-02.
+- The date of an advance is the `created_at` of its `advance` entry: `MIN(created_at) FILTER (WHERE entry_type = 'advance')`. The task promises that the fee has the same time and repayments come later, so a plain `MIN` gives the same date. The filter does not depend on that promise.
+- Only entries before 30 September 00:00 count: `created_at < '2026-09-30'`. The hidden edge-case data has a repayment exactly at that moment, so a query without the filter, or with `<=`, fails there.
+
+**Check.** 6 merchants. The first is mer_11: 619.68, 3 open advances, the oldest from 2026-08-02.
+
+**Follow-up.** "How do you issue a new advance safely?" Check the debt and write the new entries in one transaction, with the merchant's row locked by `SELECT … FOR UPDATE`. Otherwise two workers can both pass the limit check at the same time (see [Database concepts](/sql-patterns/database-concepts/)).
+
+**In production.** An index on `ledger_entries (merchant_id, created_at)`. Many systems also keep the balance in its own column and update it in the same transaction as the ledger entry.
+
+</Reveal>

@@ -1,0 +1,64 @@
+---
+title: Recipes for a sheet of paper
+description: Twenty-nine one-line recipes for SQL and Python live coding, each with its trap and a link to the page that teaches it. Copy them by hand.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Each line is a recipe: what to write, the trap next to it, and a link to the topic page that explains it. Copy the list by hand onto one sheet of paper, SQL on the front and Python on the back. Copying it is the revision.
+
+<Aside type="tip" title="TL;DR">
+- 15 SQL recipes and 14 Python recipes, one line each.
+- Lines marked ★ come up in almost every task. Copy them first if time is short.
+- After copying, cover the code and say each ★ line from memory. Then write the query or the function in an empty editor and run it.
+</Aside>
+
+## SQL
+
+1. ★ **One month** — `ts >= TIMESTAMP '2026-08-01' AND ts < TIMESTAMP '2026-09-01'`. Not `BETWEEN`: it loses the last day after 00:00. A month as a column is `CAST(date_trunc('month', ts) AS DATE)`; `EXTRACT(MONTH FROM ts)` merges the years. → [Filters and dates](/sql/filters-and-dates/)
+2. ★ **Every X, even with zero** — `FROM x LEFT JOIN y ON …`, every condition on `y` inside `ON`, `COUNT(y.col)`, `COALESCE(…, 0)`. A condition on `y` in `WHERE` removes the zeros; `COUNT(*)` gives 1 instead of 0. → [LEFT JOIN and zeros](/sql/left-join-and-zeros/)
+3. ★ **Two tables to one key** — reduce each table to one row per key in its own CTE (or the rows multiply). Then `FROM` the table that defines the rows, `LEFT JOIN` the other one, `COALESCE`. A plain `JOIN` drops unmatched rows on both sides. → [Row multiplication](/sql-patterns/row-multiplication/)
+4. ★ **Best or latest per group** — reduce to (group, item), then `ROW_NUMBER() OVER (PARTITION BY group ORDER BY x DESC, id)`, and `rn = 1` in the outer query. A window cannot go in the `WHERE` of the same `SELECT`. `DESC` applies to one column. To keep ties, use `RANK()`. → [Top N per group](/sql-patterns/top-n-per-group/)
+5. ★ **Share** — of the total: `x / SUM(x) OVER ()`; within a group: `OVER (PARTITION BY group)`. Partitioning by a key that has one row per group gives every row 100%. → [Shares and running totals](/sql-patterns/running-totals-and-shares/)
+6. ★ **Several counters** — `COUNT(*) FILTER (WHERE …)`, several in one `GROUP BY`. A rate is `1.0 * a / NULLIF(b, 0)`: an integer divided by an integer is an integer. → [CASE, FILTER and rates](/sql/conditional-aggregation/)
+7. ★ **Never happened** — `NOT EXISTS (…)` or `LEFT JOIN … WHERE y.id IS NULL`. Not `NOT IN`: one `NULL` in the list, and the result is empty. → [CTE and EXISTS](/sql/subqueries-and-cte/)
+8. ★ **Duplicates** — deliveries are `COUNT(*)`, events are `COUNT(DISTINCT id)`. If a copy can land in another group, first `ROW_NUMBER() OVER (PARTITION BY id …)` and keep `rn = 1`. The cure is `UNIQUE` plus `ON CONFLICT DO NOTHING`. → [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/)
+9. **Flow or balance** — a flow (revenue for a month) has a date filter. A balance (what a merchant owes, an account balance) is a `SUM` over all time up to "today". → [Money and ledgers](/sql-patterns/money-and-ledgers/)
+10. **Active at moment m** — `start_time <= m AND end_time > m AND (refunded_at IS NULL OR refunded_at > m)`. The brackets around `OR` are required. → [Calendars and active periods](/sql-patterns/calendars-and-active-periods/)
+11. **Two feeds** (sales and refunds) — `UNION ALL`, each branch with its own date, then one `GROUP BY`. Not `UNION`: it merges equal amounts. → [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/)
+12. **Reconcile two sources** — each side to one row per key, then `FULL OUTER JOIN`, `COALESCE` of the keys and a `CASE` for the status. Filters go inside the CTEs. → [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/)
+13. **At least one row** (a cohort) — `EXISTS (SELECT 1 …)` with a condition that links it to the outer row. A `JOIN` would multiply the rows. A cohort is defined by the `MIN` over all time. → [Cohorts and retention](/sql-patterns/cohorts-and-retention/)
+14. **Every day, even empty** — `generate_series`, then `LEFT JOIN`, then `COALESCE`. → [Calendars and active periods](/sql-patterns/calendars-and-active-periods/)
+15. **Once in the database** — `PRIMARY KEY` or `UNIQUE` plus `INSERT … ON CONFLICT DO NOTHING`. An upsert is `ON CONFLICT (key) DO UPDATE SET v = t.v + EXCLUDED.v`. → [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/)
+
+## Python
+
+1. ★ **Group and sum** — `defaultdict(Decimal)`, and return `dict(d)`. Money is a `Decimal` made from a string. → [dict and Counter](/python/dicts-and-counting/)
+2. ★ **Sort by several keys** — `key=lambda r: (-r.amount, r.id)`. `reverse=True` would reverse the `id` too. → [Sorting and top-k](/python/sorting-and-top-k/)
+3. ★ **Top k** — `heapq.nsmallest(k, rows, key=…)`: `O(n log k)`. On equal counts, `Counter.most_common` keeps the order of first appearance, not the alphabet. → [Sorting and top-k](/python/sorting-and-top-k/)
+4. ★ **Seen before, duplicates** — a `set` and one pass. `x in list` inside a loop is `O(n²)`. → [Sets and duplicates](/python/sets-and-duplicates/)
+5. ★ **Latest record per key** — a `dict` of "best so far". Compare the timestamps, not the order of arrival. → [dict and Counter](/python/dicts-and-counting/)
+6. ★ **Allocate a payout** — `pay = min(left, due)`, `if pay > 0`, stop when `left == 0`. A negative input raises `ValueError`. → [Money and Decimal](/python/money-and-decimal/)
+7. ★ **Round money** — `quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`. `round()` on a `Decimal` is banker's rounding: 0.125 → 0.12. → [Money and Decimal](/python/money-and-decimal/)
+8. ★ **Overlap of `[a, b)` and `[c, d)`** — `a < d and c < b`. To merge periods: sort by start, then one pass. → [Intervals](/python/intervals/)
+9. **Split an amount into parts** — work in whole cents: `divmod(cents, n)`, then one extra cent to each of the first parts. → [Money and Decimal](/python/money-and-decimal/)
+10. **Time window** (a rate limiter) — a `deque`; drop from the left while `times[0] <= now - window`. Do not record refused requests. → [Time windows](/python/time-windows/)
+11. **Add months** — year and month with `//` and `%`, the day is `min(day, monthrange(y, m)[1])`. Count each renewal from the original date, not from the previous one. → [Dates and durations](/python/dates-and-durations/)
+12. **Reconcile two dicts** — `a.keys() - b.keys()`, `a.keys() & b.keys()`, then `sorted`. → [Sets and duplicates](/python/sets-and-duplicates/)
+13. **Decorator** — `@functools.wraps(func)` on the `wrapper`; keep state in an attribute such as `wrapper.calls`. A decorator with a parameter needs one more level. → [Decorators](/python/decorators/)
+14. **Input and time** — `Decimal("abc")` raises `InvalidOperation`: turn it into `ValueError`, and reject `NaN` with `is_finite()`. Pass the clock in as a `clock` parameter. Aware and naive datetimes cannot be compared. → [Errors and validation](/python/errors-and-validation/), [Classes and state](/python/classes-and-state/)
+
+## How to use the sheet
+
+- **Copy, do not print.** By hand you read every symbol, and small details such as the brackets in SQL recipe 10 stay with you.
+- **Recall before you read.** Cover the right part of a line, say the trap out loud, then check.
+- **Run the ★ lines.** Turn each ★ recipe into a full query or function in an empty editor and run it on the [practice dataset](/start/dataset/).
+- **Read it on the morning of the interview,** together with [common mistakes](/reference/common-mistakes/).
+
+## Related topics
+
+- [SQL cheat sheet](/reference/sql-cheatsheet/) — the same recipes with syntax, the order of execution and the traps to check before "done".
+- [Python cheat sheet](/reference/python-cheatsheet/) — the standard-library tools behind the Python recipes.
+- [Common mistakes](/reference/common-mistakes/) — what goes wrong when a recipe is forgotten under time pressure.
+- [Flashcards](/reference/flashcards/) — the recipes as questions to answer from memory.

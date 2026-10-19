@@ -1,0 +1,64 @@
+---
+title: Приёмы на листок
+description: Двадцать девять приёмов SQL и Python для лайвкодинга, каждый одной строкой, с ловушкой и ссылкой на страницу, где он разобран. Переписать от руки.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Каждая строка — приём: что написать, где ловушка и ссылка на тематическую страницу, где он разобран. Перепишите список от руки на один лист: на лицевой стороне SQL, на обратной — Python. Переписывание и есть повторение.
+
+<Aside type="tip" title="Коротко">
+- 15 приёмов SQL и 14 приёмов Python, по одной строке.
+- Строки со ★ нужны почти в каждой задаче. Если времени мало, переписывайте их первыми.
+- Переписав, закройте код и произнесите каждую строку со ★ по памяти. Потом напишите запрос или функцию с пустого окна и запустите.
+</Aside>
+
+## SQL
+
+1. ★ **Один месяц** — `ts >= TIMESTAMP '2026-08-01' AND ts < TIMESTAMP '2026-09-01'`. Не `BETWEEN`: он теряет последний день после 00:00. Месяц колонкой — `CAST(date_trunc('month', ts) AS DATE)`; `EXTRACT(MONTH FROM ts)` склеит разные годы. → [Фильтры и даты](/sql/filters-and-dates/)
+2. ★ **Все X, даже с нулём** — `FROM x LEFT JOIN y ON …`, все условия на `y` — внутри `ON`, `COUNT(y.col)`, `COALESCE(…, 0)`. Условие на `y` в `WHERE` убивает нули; `COUNT(*)` даёт 1 вместо 0. → [LEFT JOIN и нули](/sql/left-join-and-zeros/)
+3. ★ **Две таблицы к одному ключу** — каждую таблицу свернуть до строки на ключ в своём CTE (иначе строки размножатся). Потом `FROM` той таблицы, что задаёт строки результата, `LEFT JOIN` другой и `COALESCE`. Обычный `JOIN` теряет строки без пары с обеих сторон. → [Размножение строк](/sql-patterns/row-multiplication/)
+4. ★ **Лучший или последний в группе** — свернуть до (группа, элемент), потом `ROW_NUMBER() OVER (PARTITION BY группа ORDER BY x DESC, id)` и `rn = 1` во внешнем запросе. Окно нельзя поставить в `WHERE` того же `SELECT`. `DESC` действует на одну колонку. Оставить ничьи — `RANK()`. → [Лучший в группе](/sql-patterns/top-n-per-group/)
+5. ★ **Доля** — от итога: `x / SUM(x) OVER ()`; внутри группы: `OVER (PARTITION BY группа)`. `PARTITION BY` ключом, у которого одна строка на группу, даст каждой строке 100 %. → [Доли и нарастающий итог](/sql-patterns/running-totals-and-shares/)
+6. ★ **Несколько счётчиков** — `COUNT(*) FILTER (WHERE …)`, несколько в одной группировке. Доля — `1.0 * a / NULLIF(b, 0)`: целое, делённое на целое, — целое. → [CASE, FILTER и доли](/sql/conditional-aggregation/)
+7. ★ **Никогда не было** — `NOT EXISTS (…)` или `LEFT JOIN … WHERE y.id IS NULL`. Не `NOT IN`: один `NULL` в списке — и результат пустой. → [CTE и EXISTS](/sql/subqueries-and-cte/)
+8. ★ **Дубли** — доставки считает `COUNT(*)`, события — `COUNT(DISTINCT id)`. Если копия может попасть в другую группу, сначала `ROW_NUMBER() OVER (PARTITION BY id …)` и `rn = 1`. Лечение — `UNIQUE` и `ON CONFLICT DO NOTHING`. → [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/)
+9. **Поток или остаток** — у потока (выручка за месяц) есть фильтр по датам. Остаток — например, долг продавца (merchant) или баланс счёта — это `SUM` за всё время до «сегодня». → [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/)
+10. **Активна на момент m** — `start_time <= m AND end_time > m AND (refunded_at IS NULL OR refunded_at > m)`. Скобки вокруг `OR` обязательны. → [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/)
+11. **Две ленты** (продажи и возвраты) — `UNION ALL`, у каждой ветки своя дата, потом одна группировка. Не `UNION`: он склеит одинаковые суммы. → [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/)
+12. **Сверка двух источников** — каждую сторону до строки на ключ, потом `FULL OUTER JOIN`, `COALESCE` ключей и `CASE` для статуса. Фильтры — внутри CTE. → [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/)
+13. **Есть хоть одна строка** (когорта) — `EXISTS (SELECT 1 …)` с условием, которое связывает его с внешней строкой. `JOIN` размножил бы строки. Когорту задаёт `MIN` за всё время. → [Когорты и удержание](/sql-patterns/cohorts-and-retention/)
+14. **Каждый день, даже пустой** — `generate_series`, потом `LEFT JOIN`, потом `COALESCE`. → [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/)
+15. **Один раз в базе** — `PRIMARY KEY` или `UNIQUE` и `INSERT … ON CONFLICT DO NOTHING`. Upsert — `ON CONFLICT (key) DO UPDATE SET v = t.v + EXCLUDED.v`. → [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/)
+
+## Python
+
+1. ★ **Сгруппировать и сложить** — `defaultdict(Decimal)`, наружу — `dict(d)`. Деньги — `Decimal` из строки. → [dict и Counter](/python/dicts-and-counting/)
+2. ★ **Сортировка по нескольким ключам** — `key=lambda r: (-r.amount, r.id)`. `reverse=True` перевернул бы и `id`. → [Сортировка и топ-k](/python/sorting-and-top-k/)
+3. ★ **Топ-k** — `heapq.nsmallest(k, rows, key=…)`: `O(n log k)`. При равных счётчиках `Counter.most_common` оставляет порядок появления, а не алфавит. → [Сортировка и топ-k](/python/sorting-and-top-k/)
+4. ★ **Уже видели, дубли** — `set` и один проход. `x in list` в цикле — это `O(n²)`. → [Множества и дубли](/python/sets-and-duplicates/)
+5. ★ **Последняя запись по ключу** — `dict` «лучшее на сейчас». Сравнивать время события, а не порядок прихода. → [dict и Counter](/python/dicts-and-counting/)
+6. ★ **Распределить выплату** — `pay = min(left, due)`, `if pay > 0`, стоп при `left == 0`. Отрицательная сумма на входе — `ValueError`. → [Деньги и Decimal](/python/money-and-decimal/)
+7. ★ **Округлить деньги** — `quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`. `round()` у `Decimal` — банковское округление: `0.125` → `0.12`. → [Деньги и Decimal](/python/money-and-decimal/)
+8. ★ **Пересечение `[a, b)` и `[c, d)`** — `a < d and c < b`. Слить периоды — сортировка по началу и один проход. → [Интервалы](/python/intervals/)
+9. **Разделить сумму на части** — в целых центах: `divmod(cents, n)`, остаток — по центу первым частям. → [Деньги и Decimal](/python/money-and-decimal/)
+10. **Окно по времени** (ограничитель частоты) — `deque`; слева выбрасывать, пока `times[0] <= now - window`. Отказ не записывать. → [Окна по времени](/python/time-windows/)
+11. **Прибавить месяцы** — год и месяц через `//` и `%`, день — `min(day, monthrange(y, m)[1])`. Каждое продление считать от исходной даты, а не от предыдущей. → [Даты и периоды](/python/dates-and-durations/)
+12. **Сверка двух dict** — `a.keys() - b.keys()`, `a.keys() & b.keys()`, потом `sorted`. → [Множества и дубли](/python/sets-and-duplicates/)
+13. **Декоратор** — `@functools.wraps(func)` на `wrapper`; состояние — в атрибуте, например `wrapper.calls`. Декоратору с параметром нужен ещё один уровень. → [Декораторы](/python/decorators/)
+14. **Ввод и время** — `Decimal("abc")` бросает `InvalidOperation`: превратить его в `ValueError`, а `NaN` отсечь через `is_finite()`. Часы передавать параметром `clock`. Aware- и naive-datetime между собой не сравниваются. → [Ошибки и проверка ввода](/python/errors-and-validation/), [Классы и состояние](/python/classes-and-state/)
+
+## Как работать с листком
+
+- **Переписывать, а не печатать.** От руки приходится прочитать каждый символ, и мелочи вроде скобок из приёма SQL 10 запоминаются.
+- **Вспомнить, потом прочитать.** Закройте правую часть строки, назовите ловушку вслух, потом сверьтесь.
+- **Запустить строки со ★.** Превратите каждый приём со ★ в полный запрос или функцию с пустого окна и запустите на [учебных данных](/start/dataset/).
+- **Прочитать утром в день интервью** — вместе с [частыми ошибками](/reference/common-mistakes/).
+
+## Связанные темы
+
+- [Шпаргалка SQL](/reference/sql-cheatsheet/) — те же приёмы с синтаксисом, порядком выполнения и ловушками, которые стоит проверить до «готово».
+- [Шпаргалка Python](/reference/python-cheatsheet/) — инструменты стандартной библиотеки, на которых стоят приёмы Python.
+- [Частые ошибки](/reference/common-mistakes/) — что ломается, когда приём забывается под давлением времени.
+- [Карточки](/reference/flashcards/) — те же приёмы в виде вопросов, на которые отвечают по памяти.

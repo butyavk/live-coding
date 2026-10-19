@@ -1,0 +1,218 @@
+---
+title: Группировка и подсчёт
+description: GROUP BY и HAVING в задачах на отчёты. Порядок выполнения запроса, почему псевдоним не виден в WHERE, три вида COUNT и гранулярность результата.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Большинство задач на отчёты звучат как «по каналам продаж», «по месяцам» или «по клиентам». `GROUP BY` превращает много строк в одну строку на группу. Типичные ошибки — не та гранулярность, подсчёт строк вместо клиентов и условие не в той части запроса.
+
+<Aside type="tip" title="Коротко">
+- Сначала назовите гранулярность: «одна строка на канал и месяц». Это и есть список `GROUP BY`.
+- Каждая колонка в `SELECT` либо в `GROUP BY`, либо внутри агрегата.
+- `WHERE` фильтрует строки до группировки, `HAVING` — группы после неё.
+- `COUNT(*)` считает строки, `COUNT(col)` — значения не NULL, `COUNT(DISTINCT col)` — разные значения.
+- Псевдоним из `SELECT` работает в `ORDER BY`, но не в `WHERE` и не в `HAVING`. Для равенства — второй ключ сортировки.
+</Aside>
+
+## Одна строка на что
+
+Прежде чем писать запрос, скажите, что такое одна строка результата. «Выручка по каналам» — одна строка на канал. «Транзакции по каналу и периоду тарифа» — одна строка на пару. Эта гранулярность и задаёт список `GROUP BY`. Каждая колонка в `SELECT` должна быть в этом списке или внутри агрегата: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`.
+
+```sql
+SELECT channel, plan_period, COUNT(*) AS transactions
+FROM transactions
+WHERE NOT is_test
+  AND channel IN ('promo', 'web')
+  AND start_time >= TIMESTAMP '2026-08-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+GROUP BY channel, plan_period
+ORDER BY channel, plan_period;
+```
+
+| channel | plan_period | transactions |
+|---|---|---|
+| promo | P1M | 6 |
+| promo | P1Y | 2 |
+| web | P1M | 37 |
+| web | P1W | 6 |
+| web | P1Y | 8 |
+
+Группа существует, только если в ней есть строки. У промо-доступа в августе нет недельного тарифа, поэтому строки `promo, P1W` с нулём нет. Чтобы показать такие нули, начинают со списка всех групп — см. [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+
+<Trap id="group-missing" q="Выполнится ли запрос?">
+
+Нет: `column "transactions.channel" must appear in the GROUP BY clause or be used in an aggregate function`. В одной стране много каналов — какой из них показать в строке? Добавьте `channel` в `GROUP BY` или поместите его внутрь агрегата.
+
+</Trap>
+
+В одном случае PostgreSQL смягчает правило. Если группировать по первичному ключу таблицы, остальные колонки этой таблицы можно показывать в `SELECT`, не перечисляя: `GROUP BY m.id` достаточно, чтобы вывести `m.name`. Перечислить обе (`GROUP BY m.id, m.name`) тоже правильно, и так работает в любой базе.
+
+## Порядок выполнения запроса
+
+Запрос пишут в одном порядке, а выполняется он в другом:
+
+| Шаг | Часть запроса | С чем работает |
+|---|---|---|
+| 1 | `FROM`, `JOIN` | строки таблиц |
+| 2 | `WHERE` | одна строка за раз |
+| 3 | `GROUP BY` | строки, которые становятся группами |
+| 4 | `HAVING` | одна группа за раз, с её агрегатами |
+| 5 | `SELECT` | колонки результата; здесь рождаются псевдонимы |
+| 6 | `ORDER BY` | результат, включая псевдонимы |
+| 7 | `LIMIT` | отсортированный результат |
+
+Псевдоним появляется на шаге 5, поэтому `WHERE` и `HAVING` его ещё не видят.
+
+<Trap id="where-alias" q="Выполнится ли запрос?">
+
+Нет: `column "proceeds" does not exist`. `WHERE` выполняется раньше `SELECT`, псевдонима ещё нет. Повторите выражение в `WHERE` или посчитайте его в CTE и фильтруйте снаружи.
+
+</Trap>
+
+<Trap id="having-alias" q="А этот — с псевдонимом в HAVING?">
+
+Нет: `column "n" does not exist`. В PostgreSQL в `HAVING` пишут само выражение: `HAVING COUNT(*) > 1000`. В `ORDER BY` псевдоним можно: сортировка идёт после `SELECT`.
+
+</Trap>
+
+`ORDER BY` выполняется после `SELECT` и видит псевдонимы. PostgreSQL принимает псевдоним или номер колонки и в `GROUP BY`. Это удобство диалекта, и на `WHERE` и `HAVING` оно не распространяется.
+
+```sql
+SELECT channel AS s, COUNT(*) AS n
+FROM transactions
+GROUP BY s
+ORDER BY n DESC;
+```
+
+| s | n |
+|---|---|
+| north_market | 4594 |
+| south_market | 2855 |
+| web | 740 |
+| promo | 105 |
+
+## WHERE или HAVING
+
+Условие на отдельные строки идёт в `WHERE`: тестовые покупки, даты, канал. Условие на агрегат группы — в `HAVING`: «больше 300 транзакций». Продукты, у которых не меньше 15 возвратов, без тестовых покупок:
+
+```sql
+SELECT product_id, COUNT(*) AS refunds
+FROM transactions
+WHERE NOT is_test
+  AND refunded_at IS NOT NULL
+GROUP BY product_id
+HAVING COUNT(*) >= 15
+ORDER BY refunds DESC, product_id;
+```
+
+| product_id | refunds |
+|---|---|
+| prd_08 | 17 |
+| prd_20 | 17 |
+| prd_04 | 16 |
+
+`HAVING channel = 'web'` тоже выполнится. Но сначала он сгруппирует все каналы, а потом выбросит большинство групп. Если условие не использует агрегат, ему место в `WHERE`.
+
+## Три вида COUNT
+
+- `COUNT(*)` считает строки.
+- `COUNT(col)` считает строки, где `col` не NULL.
+- `COUNT(DISTINCT col)` считает разные значения, кроме NULL.
+
+<Trap id="count-forms" q="Чем отличаются три счётчика?">
+
+8032 строки, из них 180 с возвратом, 4 канала. `COUNT(*)` считает строки, `COUNT(колонка)` — строки, где колонка не NULL, `COUNT(DISTINCT колонка)` — разные значения.
+
+</Trap>
+
+Клиент может покупать много раз. «Сколько клиентов» — это `COUNT(DISTINCT customer_id)`, а не `COUNT(*)`.
+
+<Trap id="distinct-users" q="Грузия, сентябрь, без тестовых покупок: транзакции и клиенты. Почему числа разные?">
+
+39 транзакций и 35 клиентов: часть клиентов платила за месяц больше одного раза. «Сколько клиентов» — это `COUNT(DISTINCT customer_id)`. Перед подсчётом спросите, кто клиент: человек во всех продуктах сразу или клиент одного продукта.
+
+</Trap>
+
+Если клиент — это клиент одного продукта, считают пары: `COUNT(DISTINCT (customer_id, product_id))`. В учебных данных каждый `customer_id` покупает только один продукт, поэтому обе формы дают одно число. Но вопрос всё равно показывает, что вы об этом подумали.
+
+### Уникальные счётчики не складываются
+
+Клиент, который платил и в июне, и в июле, — по одному клиенту в каждом месяце:
+
+```sql
+SELECT CAST(date_trunc('month', start_time) AS DATE) AS month,
+       COUNT(DISTINCT customer_id) AS customers
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time >= TIMESTAMP '2026-06-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+GROUP BY 1
+ORDER BY 1;
+```
+
+| month | customers |
+|---|---|
+| 2026-06-01 | 393 |
+| 2026-07-01 | 399 |
+| 2026-08-01 | 432 |
+
+В сумме три месяца дают 1224, а тот же фильтр без `GROUP BY` возвращает 691 разного клиента. Для квартала считайте уникальные значения за весь квартал. Никогда не складывайте уникальные счётчики меньших групп.
+
+## Равенство в ORDER BY
+
+С одним `ORDER BY gross_usd DESC` две равные суммы выходят в случайном порядке, и `LIMIT` может отрезать не ту. Добавьте второй ключ: `ORDER BY gross_usd DESC, channel`. `DESC` относится только к колонке прямо перед ним, поэтому `ORDER BY paid_at DESC, payout_id` сортирует `payout_id` по возрастанию.
+
+## Практика
+
+<Drill id="s-group">
+
+Одна строка на канал — `GROUP BY channel`. Второй ключ сортировки (`channel`) решает равные суммы. Строка `promo` остаётся в результате с 0,00: транзакции промо-доступа — настоящие строки, и отчёт честно их показывает.
+
+</Drill>
+
+<Drill id="s-having">
+
+`WHERE` отбирает платные строки за девять месяцев до группировки, `HAVING` — страны после неё. В `HAVING` пишут само выражение `COUNT(*)`: псевдоним там PostgreSQL не видит.
+
+</Drill>
+
+<Drill id="s-distinct">
+
+Клиент мог купить за месяц несколько раз, поэтому нужен `COUNT(DISTINCT customer_id)`. Скажите вслух, кто клиент: человек во всех продуктах сразу или клиент одного продукта.
+
+</Drill>
+
+<Drill id="s-arppu">
+
+ARPPU — средняя выручка на платящего пользователя, здесь — на платящего клиента: `SUM(revenue_usd) / COUNT(DISTINCT customer_id)`. `revenue_usd` — `numeric`, поэтому деление сохраняет дробную часть. Если бы обе стороны были целыми, понадобилось бы `1.0 *` впереди. `ROUND` — последним, на готовом значении.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Назовите гранулярность до того, как напишете `GROUP BY`: «One row per channel and month, so I group by both.» Потом сверьте с ней результат: четыре канала и девять месяцев дают не больше 36 строк.
+
+Изменение задачи часто звучит одной короткой фразой:
+
+- **Интервьюер:** «Now only channels with more than 100 customers.»
+- **Вы:** «That's a condition on the groups, so I add HAVING COUNT(DISTINCT customer_id) > 100. The rest stays the same.»
+</Aside>
+
+## Что почитать
+
+- [GROUP BY and HAVING clauses](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-GROUP) — группы и условия на группы.
+- [SELECT](https://www.postgresql.org/docs/current/sql-select.html) — описание начинается с пронумерованного порядка обработки запроса.
+- [GROUP BY in SELECT](https://www.postgresql.org/docs/current/sql-select.html#SQL-GROUPBY) — имена и номера колонок результата, группировка по первичному ключу.
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — `COUNT(*)`, `DISTINCT` и `FILTER` внутри агрегата.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — полный список.
+
+## Связанные темы
+
+- [Фильтры и даты](/sql/filters-and-dates/) — что идёт в `WHERE` до любой группировки.
+- [Логика NULL](/sql/null-logic/) — почему `COUNT(col)` пропускает строки и почему пустой `SUM` — NULL.
+- [Условная агрегация](/sql/conditional-aggregation/) — несколько счётчиков в одном `GROUP BY`.
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — `COUNT(*)` против `COUNT(DISTINCT id)`, когда события приходят дважды.
+- [Лучший в группе](/sql-patterns/top-n-per-group/) — когда нужна лучшая строка каждой группы, а не сводка.

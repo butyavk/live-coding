@@ -1,0 +1,18 @@
+---
+import Default from '@astrojs/starlight/components/Footer.astro';
+import TopicNav from '../site/TopicNav.astro';
+const isRu = Astro.locals.starlightRoute?.locale === 'ru';
+---
+<TopicNav />
+<Default><slot /></Default>
+<p class="lcm-attribution">
+  {isRu ? (
+    <>Тексты сайта — по лицензии <a href="https://creativecommons.org/licenses/by/4.0/deed.ru">CC BY 4.0</a>, код — по лицензии MIT. Упражнения выполняются в вашем браузере: PostgreSQL — <a href="https://pglite.dev/">PGlite</a>, Python — <a href="https://pyodide.org/">Pyodide</a>.</>
+  ) : (
+    <>Site content: <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. Code: MIT. The exercises run in your browser: PostgreSQL by <a href="https://pglite.dev/">PGlite</a>, Python by <a href="https://pyodide.org/">Pyodide</a>.</>
+  )}
+</p>
+<style>
+  .lcm-attribution { margin-top: 1.5rem; font-size: var(--sl-text-xs); color: var(--sl-color-gray-3); line-height: 1.5; }
+  .lcm-attribution a { color: inherit; }
+</style>

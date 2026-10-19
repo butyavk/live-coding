@@ -1,0 +1,126 @@
+---
+title: Events and time
+description: "Four Python tasks about time: an idempotent webhook processor, merging access periods, renewal dates from ISO 8601 durations and fast daily counts."
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Python rounds often deal with events and periods in time: webhooks that arrive twice or late, access periods that overlap, renewal dates at the end of a month, a fast count of active subscriptions per day. Each task is a small class or function, and its bugs hide at the boundaries: equal timestamps, touching periods, 31 January, a subscription that starts at 10:00. The tasks build on [Sets and duplicates](/python/sets-and-duplicates/), [Intervals](/python/intervals/) and [Dates and durations](/python/dates-and-durations/). To rehearse under real conditions, the [mock interview](/start/mock-interview/) page gives you a random task with the clock running and the hints hidden.
+
+<Aside type="tip" title="How to practise">
+Check runs the task's pytest tests in the browser. Before you code, write each edge case of the statement as a comment with its expected answer, as in step 3 of the [protocol](/start/interview-protocol/), and say it out loud. The tests check the same cases, so a failure then points at a case you already named.
+
+One test of P05 compares your function with SQL Q04 on the practice database. Calling the database from Python needs a recent Chrome or Edge (WebAssembly JSPI). In other browsers that test is skipped with a message, and the other tests run as usual.
+</Aside>
+
+## P02. Idempotent webhook processor
+
+<Task id="p02" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The sales channels send events at least once and not always in order. A repeat must change nothing, and an old event must not overwrite a newer status.
+
+**Steps.** Keep a `set` of processed `event_id`s and a `dict` from customer to (ts, status). For each event:
+
+1. A known id → return `False`.
+2. Check the type first: an unknown type → `ValueError`.
+3. Mark the id as processed.
+4. Apply the status only if `ts >=` the ts of the last applied event; return `True` either way.
+
+**Traps.**
+
+- Marking the id before the type check. A broken event then counts as processed and can never be handled again.
+- `>` instead of `>=` breaks the rule "with equal ts, the later-processed event wins".
+- A late, older event still returns `True`: it is processed, it just does not change the status.
+
+**Complexity.** O(1) per event on average. Memory grows with the number of event ids, which the task allows.
+
+**In production.** Deduplication is a unique key in the database (`INSERT … ON CONFLICT DO NOTHING`) or ids kept with a TTL, not a `set` in the memory of one process. Several workers and a restart would both break the in-memory version.
+
+</Reveal>
+
+## P03. Merge subscription periods
+
+<Task id="p03" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Support wants to see when a customer had access. An upgrade or promo access on top of a paid plan creates overlaps. They must not be counted twice, especially if `total_access` is used to compute compensation.
+
+**Steps.**
+
+1. Validate every period before sorting: `end <= start` → `ValueError`.
+2. Sort by start.
+3. One pass: if the next start is `<=` the end of the last merged period, extend that period to `max(end)`; otherwise start a new one.
+4. `total_access` is the sum of `end - start` over the merged periods, with `timedelta(0)` as the start value.
+
+**Traps.**
+
+- Touching periods (`end` equals the next `start`) also merge, so the comparison is `<=`, not `<`.
+- You need `max(end)`: a period inside another one must not shorten the merged period.
+- `sum()` of timedeltas needs the start value `timedelta(0)`. The default start is the integer 0, and `0 + timedelta` raises `TypeError`.
+
+**Complexity.** `O(n log n)` for the sort; the pass itself is `O(n)`. A million periods is fine, while comparing every pair, `O(n²)`, is not.
+
+</Reveal>
+
+## P04. Renewal dates from ISO 8601 durations
+
+<Task id="p04" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Renewal dates for ISO 8601 periods. A customer who bought on 31 January expects renewals on 28 February and 31 March, not on 28 March.
+
+**The idea.** Compute each date from the original start, as start + k periods, and clamp it to the last day of the month. If you add one month to the previous date instead, the day drifts:
+
+| Method | Renewal dates |
+|---|---|
+| start + k months | Jan 31, Feb 28, Mar 31, Apr 30 |
+| previous date + 1 month | Jan 31, Feb 28, Mar 28, Apr 28 |
+
+**Steps.**
+
+1. Parse strictly: first check `isinstance(duration, str)`, then `re.fullmatch(r"P([1-9]\d*)([DWMY])", duration)`. Anything else → `ValueError`.
+2. Days and weeks are a `timedelta`.
+3. Months: count the target year and month, then `calendar.monthrange(year, month)[1]` gives the last day, and the day is the smaller of the two. A year is 12 months.
+
+**Traps.**
+
+- `timedelta` has no months, and `dt.replace(month=2)` on 31 January raises `ValueError`. Python 3.14, the one on this site, says `day 31 must be in range 1..28 for month 2 in year 2026`; older versions say `day is out of range for month`. The wording differs by version, so test for `ValueError`, not for the message.
+- `re.match` instead of `re.fullmatch` accepts "P1M2D", because the start of the string matches.
+- `None`, `12` or `b"P1M"` must give `ValueError`, not `TypeError`. `re.fullmatch` raises `TypeError` for anything that is not a `str`, so check the type first. `duration or ""` is not enough: it fixes only `None`.
+
+**Follow-up.** "How would you support P1M2D?" Parse the parts one by one and add the larger units first: years and months, then weeks and days.
+
+</Reveal>
+
+## P05. Daily active subscriptions, fast
+
+<Task id="p05" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The same question as SQL Q04 on [Subscriptions over time](/sql-tasks/subscriptions-over-time/), but on 200,000 subscriptions over a year. "Every day × every subscription" is 73 million checks, so it needs a faster algorithm.
+
+**Steps.** A difference array, also called a sweep line:
+
+1. For each subscription, find the first midnight at or after `start`: the first active day. Find the first midnight at or after `end`: the first day it is no longer active. If they are the same day, the subscription is never active at a midnight; skip it.
+2. Add +1 on the first day and −1 on the second, in a `dict` from day to change.
+3. Walk the days from `first_day` to `last_day` with a running sum. The changes before `first_day` go into the starting value.
+
+**Traps.**
+
+- A subscription that starts at 10:00 is active only from the next day. One that starts exactly at midnight is active on that day.
+- Subscriptions that started before the range still count: add their changes to the starting value, do not drop them.
+- Every day of the range must be in the result, even with 0.
+
+**Check.** On the practice data the result equals Q04: 1 September — 1068, 2 September — 1063.
+
+**Complexity.** `O(n + days)` instead of `O(n × days)`, with memory for one change per distinct day. Sorting the changes instead of bucketing them gives `O(n log n)`, which is also fine.
+
+</Reveal>

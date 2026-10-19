@@ -1,0 +1,256 @@
+---
+title: Тесты и сложность
+description: "Что сказать, когда код заработал: стоимость операций dict, set, list и сортировки, какие случаи тестировать, основы pytest и поиск сигнатуры без AI."
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+
+Когда код прошёл пример, интервью не заканчивается. Почти каждый интервьюер задаёт ещё два вопроса: насколько это быстро и как вы бы это протестировали? Если ответы отрепетированы, каждый занимает минуту. Без подготовки рабочее решение заканчивается паузой или расплывчатым «должно работать».
+
+<Aside type="tip" title="Коротко">
+- Поиск в dict и set — O(1) в среднем; `x in list` — O(n); сортировка — O(n log n); добавление и извлечение из кучи — O(log n).
+- Называйте время и память вместе: «O(n log n) из-за сортировки, O(k) памяти на итоги».
+- Тесты — в постоянном порядке: пример из условия, пусто или ноль, ровно на границе, больше чем нужно, равенство, плохой ввод, который должен упасть.
+- В pytest хватает трёх инструментов: обычный `assert`, `pytest.raises` и `@pytest.mark.parametrize`.
+- Забыли сигнатуру? `help(...)`, `dir(module)` и docs.python.org разрешены. Это не AI.
+</Aside>
+
+## Стоимость частых операций
+
+Доказательство интервьюеру не нужно. Нужна правильная оценка каждого шага и понимание, какой шаг главный.
+
+| Операция | Стоимость | Почему |
+|---|---|---|
+| `d[k]`, `k in d`, `d[k] = v` | O(1) в среднем | хеш-таблица |
+| `x in s`, `s.add(x)` | O(1) в среднем | хеш-таблица без значений |
+| `x in lst`, `lst.index(x)`, `lst.remove(x)` | O(n) | перебирает элементы по одному |
+| `lst.append(x)`, `lst.pop()` | O(1) амортизированно | работает с концом списка |
+| `lst.pop(0)`, `lst.insert(0, x)` | O(n) | сдвигает все элементы |
+| `deque.append(x)`, `deque.popleft()` | O(1) | оба конца дешёвые |
+| `sorted(xs)`, `xs.sort()` | O(n log n) | |
+| `heapq.heappush`, `heapq.heappop` | O(log n) | |
+| `heapq.nsmallest(k, xs)` | O(n log k) | топ-k без полной сортировки |
+| `bisect.bisect_left(xs, x)` | O(log n) | список должен быть отсортирован |
+| `a & b` для множеств | O(min(len(a), len(b))) | перебирает меньшее множество |
+| `a - b` для множеств | O(len(a)) | перебирает все элементы `a` |
+
+Для dict и set важно «в среднем». В худшем случае, когда у многих ключей одинаковый хеш, поиск стоит O(n). С обычными ключами (строки, числа, кортежи) говорите «O(1) в среднем» и идите дальше.
+
+### Где прячется O(n²)
+
+В медленном коде редко видны два вложенных цикла. Чаще второй цикл спрятан в `in` по списку. Одно и то же удаление дублей, дважды:
+
+```python
+import time
+
+ids = [f"evt_{i}" for i in range(20_000)] * 2      # 40 000 событий, каждый id дважды
+
+
+def unique_with_list(ids):
+    seen, out = [], []
+    for x in ids:
+        if x not in seen:          # O(n): проход по списку
+            seen.append(x)
+            out.append(x)
+    return out
+
+
+def unique_with_set(ids):
+    seen, out = set(), []
+    for x in ids:
+        if x not in seen:          # O(1) в среднем
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+for f in (unique_with_list, unique_with_set):
+    t0 = time.perf_counter()
+    n = len(f(ids))
+    print(f"{f.__name__}: {n} ids, {time.perf_counter() - t0:.3f} s")
+```
+
+Один запуск напечатал:
+
+```text
+unique_with_list: 20000 ids, 4.369 s
+unique_with_set: 20000 ids, 0.008 s
+```
+
+Секунды зависят от машины, а разница в сотни раз — нет. Другие скрытые циклы: `lst.pop(0)` или `lst.count(x)` внутри цикла и `sum(...)` по растущему списку на каждом шаге.
+
+### Как это сказать
+
+Общая стоимость — стоимость самого дорогого шага. Сортировка и потом один проход — это O(n log n) + O(n), то есть O(n log n). Для памяти считайте то, что храните помимо входа: dict итогов — O(k) для k ключей, set увиденных id — O(n), генератор, который читает по одной строке, — O(1) (см. [Итерация и генераторы](/python/iteration-and-generators/)).
+
+<Talk q="What is the cost of a lookup in a dict, a set and a list? And of sorting?">
+
+"A dict or set lookup is O(1) on average, because they are hash tables. `x in list` is O(n): it checks every element, so inside a loop it becomes O(n²). Sorting is O(n log n)."
+
+Отсюда правило: «уже видел?» — set, «найти по ключу» — dict.
+
+</Talk>
+
+## Как тестировать функцию на интервью
+
+В начале задачи вы записали пример и граничные случаи (см. [протокол](/start/interview-protocol/)). Теперь они становятся тестами, в постоянном порядке:
+
+1. **Пример из условия** — с точным ожидаемым результатом.
+2. **Пусто или ноль**: `[]`, `0`, пустая строка. Результат должен быть пустым, а не падением.
+3. **Ровно на границе**: запрос ровно через `window` секунд, период, который кончается там, где начинается следующий, платёж, равный долгу.
+4. **Больше чем нужно или частично**: платёж больше всех долгов, последняя неполная пачка.
+5. **Равенство**: одинаковые счётчики или одинаковое время — в том порядке, который требует условие.
+6. **Плохой ввод, который должен упасть**: отрицательная сумма, `n = 0`, строка, которая не число.
+
+Время и случайность передаются параметрами: `now`, функция `clock`, `random.Random` с фиксированным seed. Тогда тест сам выставляет время и никогда не спит. Часы снаружи показаны на странице [Классы и состояние](/python/classes-and-state/).
+
+### pytest: три инструмента
+
+Функция комиссии в духе программы авансов: 3 % от аванса и минимум 1.00, который даёт тестам второе правило. Функция и её тесты:
+
+```python
+# fee.py
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def advance_fee(amount: Decimal) -> Decimal:
+    """3 % от аванса, округление half up до центов, но не меньше 1.00."""
+    if amount <= 0:
+        raise ValueError(f"amount must be positive, got {amount}")
+    fee = (amount * Decimal("0.03")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return max(fee, Decimal("1.00"))
+```
+
+```python
+# test_fee.py
+from decimal import Decimal as D
+
+import pytest
+
+from fee import advance_fee
+
+
+def test_example_from_the_task():
+    assert advance_fee(D("500.00")) == D("15.00")
+
+
+@pytest.mark.parametrize("amount, expected", [
+    (D("20.00"), D("1.00")),    # ниже минимума: 0.60 превращается в 1.00
+    (D("33.33"), D("1.00")),    # 0.9999 округляется ровно до минимума
+    (D("34.00"), D("1.02")),    # чуть выше
+    (D("35.50"), D("1.07")),    # 1.065: half up, а не к чётному
+])
+def test_edges(amount, expected):
+    assert advance_fee(amount) == expected
+
+
+@pytest.mark.parametrize("bad", [D("0"), D("-5.00")])
+def test_bad_amount_raises(bad):
+    with pytest.raises(ValueError, match="positive"):
+        advance_fee(bad)
+```
+
+`pytest -q` печатает:
+
+```text
+.......                                                                  [100%]
+7 passed in 0.01s
+```
+
+- **`assert`** — обычное сравнение Python. Если оно не выполнилось, pytest показывает обе стороны.
+- **`pytest.raises(ValueError, match="positive")`** проходит, только если блок бросил эту ошибку. `match` — регулярное выражение, которое проверяется по тексту сообщения.
+- **`@pytest.mark.parametrize`** превращает один тест в таблицу случаев. Каждая строка выводится отдельно, поэтому видно, какой случай сломался.
+
+Строка с округлением здесь не зря. Замените строку с `quantize` на `round(amount * Decimal("0.03"), 2)` и запустите снова:
+
+```text
+>       assert advance_fee(amount) == expected
+E       AssertionError: assert Decimal('1.06') == Decimal('1.07')
+E        +  where Decimal('1.06') = advance_fee(Decimal('35.50'))
+
+test_fee.py:20: AssertionError
+=========================== short test summary info ============================
+FAILED test_fee.py::test_edges[amount3-expected3] - AssertionError: assert De...
+1 failed, 6 passed in 0.02s
+```
+
+`round()` у `Decimal` округляет половину к чётному, поэтому 1.065 становится 1.06 (см. [Деньги и Decimal](/python/money-and-decimal/)). Остальные шесть случаев проходят, и ошибку ловит только тест ровно на половине цента.
+
+Полезные флаги: `pytest -x` останавливается на первой ошибке, `pytest -k fee` запускает только тесты с «fee» в имени, `pytest -vv` печатает каждый случай и полные различия. В редакторе на интервью нет pytest? Обычные `assert` под `if __name__ == "__main__":` работают везде. На этом сайте кнопка «Проверить» запускает тесты упражнения и печатает сообщения в стиле pytest.
+
+<Talk q="How would you test this function?">
+
+"With pytest: the example from the task, then the edge cases — empty input, zero, exactly on a boundary, more than enough, equal keys, and a bad input that must raise. Time and randomness I inject, so the test does not sleep or flake."
+
+Сначала назовите все случаи, потом напишите два-три из них. Все шесть в коде интервьюеру нужны редко.
+
+</Talk>
+
+## Как быстро найти без AI
+
+На лайвкодинге AI обычно запрещён, а документация разрешена. Быстрее всего помогает сам Python. Это работает и в общем онлайн-редакторе, и в каждом редакторе на этом сайте.
+
+```python
+import heapq
+help(heapq.nsmallest)
+```
+
+```text
+Help on function nsmallest in module heapq:
+
+nsmallest(n, iterable, key=None)
+    Find the n smallest elements in a dataset.
+
+    Equivalent to:  sorted(iterable, key=key)[:n]
+```
+
+```python
+import itertools
+print([name for name in dir(itertools) if not name.startswith("_")])
+```
+
+```text
+['accumulate', 'batched', 'chain', 'combinations', 'combinations_with_replacement', 'compress', 'count', 'cycle', 'dropwhile', 'filterfalse', 'groupby', 'islice', 'pairwise', 'permutations', 'product', 'repeat', 'starmap', 'takewhile', 'tee', 'zip_longest']
+```
+
+`dir()` отвечает на вопрос «что есть в модуле?». `help()` — «что функция принимает и что возвращает?». `print(Decimal.quantize.__doc__)` печатает тот же текст, что `help`, но без постраничного просмотра. (Вывод выше — из Python 3.12.)
+
+Страницы документации, которые стоит знать:
+
+- Страница модуля: `docs.python.org/3/library/<module>.html` — heapq, itertools, collections, datetime, decimal, bisect, functools. Ищите на ней имя функции через Ctrl+F. Многие страницы заканчиваются примерами и рецептами.
+- [Sorting HOWTO](https://docs.python.org/3/howto/sorting.html): функции-ключи, несколько ключей, устойчивая сортировка.
+- Страница decimal: поиск по «quantize» или по «two decimal places» в её разделе FAQ.
+- Страница datetime: таблица «strftime() and strptime() Format Codes».
+
+Говорите, что делаете: *"Let me quickly check the docs for the exact signature."* Короткий поиск выглядит лучше молчания; не молчите дольше 30 секунд.
+
+## Практика
+
+На этой странице нет упражнений: практика — говорить вслух. Возьмите упражнение, которое вы решили на странице [Сортировка и топ-k](/python/sorting-and-top-k/) или [Множества и дубли](/python/sets-and-duplicates/). Когда проверка пройдёт, назовите одной фразой стоимость по времени и памяти. Потом перечислите для него шесть видов тестовых случаев. На всё — одна минута.
+
+<Aside type="note" title="На интервью">
+Последние минуты задачи часто идут по одному сценарию. Отрепетируйте его в таком порядке:
+
+1. Стоимость одной фразой: *"It's O(n log n) because of the sort; the loop after it is O(n). Memory is O(k) for the totals."*
+2. Тесты — запущенные, а не только перечисленные: *"Let me run the edge cases: empty input, a tie, exactly on the boundary."*
+3. Вопрос о масштабе, если он прозвучит: назовите главный шаг и то, что его заменит. Set вместо списка, куча вместо полной сортировки или база вместо цикла на Python.
+
+Говорите «готово» только после шага 2.
+</Aside>
+
+## Что почитать
+
+- [TimeComplexity](https://wiki.python.org/moin/TimeComplexity) — таблица стоимости операций list, deque, set и dict в вики Python.
+- [How to write and report assertions in tests](https://docs.pytest.org/en/stable/how-to/assert.html) — сообщения `assert` и `pytest.raises` с `match`.
+- [How to parametrize fixtures and test functions](https://docs.pytest.org/en/stable/how-to/parametrize.html) — `@pytest.mark.parametrize`.
+- [help()](https://docs.python.org/3/builtins/functions.html#help) и [dir()](https://docs.python.org/3/builtins/functions.html#dir) — две встроенные функции для быстрого поиска.
+
+## Связанные темы
+
+- [Множества и дубли](/python/sets-and-duplicates/) — почему `seen` — это set, а не список.
+- [Сортировка и топ-k](/python/sorting-and-top-k/) — O(n log n) у сортировки против O(n log k) у кучи.
+- [Итерация и генераторы](/python/iteration-and-generators/) — как не расходовать память на большом входе.
+- [Отладка](/python-tasks/debugging/) — прочитать упавший тест и найти ошибку, на которую он указывает.
+- [Думать вслух](/start/think-aloud/) — фразы для шагов проверки и обсуждения.

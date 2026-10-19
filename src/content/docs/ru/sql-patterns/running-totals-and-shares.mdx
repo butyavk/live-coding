@@ -1,0 +1,303 @@
+---
+title: Доли и нарастающий итог
+description: Обернуть работающий запрос и добавить окно сверху — доля от итога и внутри группы, нарастающий итог, рамки для скользящего среднего и LAG для изменения.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+«А теперь добавьте долю каждого канала продаж в итоге». «Покажите нарастающий итог по дням». «И изменение к прошлому месяцу». Такие продолжения приходят, когда отчёт уже работает, и обычно на них остаётся несколько минут. Не переписывайте запрос. Оберните его в CTE и добавьте сверху одно окно: строки останутся, и каждая строка увидит свою группу или соседей.
+
+<Aside type="tip" title="Коротко">
+- Главный приём: работающий запрос целиком уходит в `WITH base AS (…)`, окно — в новый `SELECT … FROM base`.
+- Доля от итога: `100.0 * x / SUM(x) OVER ()`. Доля внутри группы: `OVER (PARTITION BY g)`.
+- Нарастающий итог: `SUM(x) OVER (ORDER BY day)`. `PARTITION BY` начинает его заново в каждой группе.
+- Скользящее среднее за 7 строк: `AVG(x) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`. Это среднее за 7 дней, только если каждый день — строка.
+- Предыдущее значение: `LAG(x) OVER (ORDER BY month)`; изменение — `x - LAG(x) OVER (…)`. У первой строки — NULL.
+</Aside>
+
+## Главный приём: обернуть то, что есть
+
+1. Весь работающий запрос — в `WITH base AS (…)`. Внутри ничего не меняется, разве что его `ORDER BY` больше не нужен.
+2. Сверху новый `SELECT … FROM base` с оконной функцией.
+3. Если нужен фильтр по окну (`rn = 1`), ещё один шаг: `WHERE` окно не видит.
+
+Здесь база — сентябрьская выручка (net) по периоду тарифа (plan), а продолжение просит долю каждого периода:
+
+```sql
+WITH by_period AS (
+    SELECT plan_period, COUNT(*) AS transactions, SUM(revenue_usd) AS net_usd
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY plan_period
+)
+SELECT plan_period, transactions, net_usd,
+       SUM(net_usd) OVER () AS total_usd,
+       ROUND(100.0 * net_usd / SUM(net_usd) OVER (), 1) AS share_pct
+FROM by_period
+ORDER BY net_usd DESC, plan_period;
+```
+
+| plan_period | transactions | net_usd | total_usd | share_pct |
+|---|---|---|---|---|
+| P1Y | 79 | 3449.35 | 5961.81 | 57.9 |
+| P1M | 304 | 2282.23 | 5961.81 | 38.3 |
+| P1W | 80 | 230.23 | 5961.81 | 3.9 |
+
+- `SUM(net_usd)` без `OVER` свернул бы результат в одну строку. `OVER ()` значит «сумма по всем строкам, но строки оставь»: каждая строка видит итог 5961,81.
+- Округлённые доли дают в сумме 100,1, а не 100. Это округление, а не ошибка; скажите об этом при проверке.
+- Пишите `100.0`, а не `100`. С целыми колонками, например счётчиками, `100 * a / b` — целочисленное деление (см. [Условная агрегация](/sql/conditional-aggregation/)).
+
+### Что видит окно
+
+Окно считается после `WHERE`, но до `ORDER BY` и `LIMIT`. Поэтому с `LIMIT 2` доли остаются 57,9 и 38,3: это всё ещё доли от полного итога. А фильтр в том же `SELECT`, например `WHERE plan_period <> 'P1W'`, убирает строку раньше окна. Итог уменьшается, и доли становятся 60,2 и 39,8. Решите, от какого итога задача просит долю, и фильтруйте на нужном шаге.
+
+Без окна итог — скалярный подзапрос: `100.0 * net_usd / (SELECT SUM(net_usd) FROM by_period)`. Длиннее, но числа те же.
+
+## Доля внутри группы
+
+`PARTITION BY` даёт каждой группе свой итог. Доля каждого продукта в сентябрьской выручке его продавца (merchant):
+
+```sql
+WITH per_product AS (
+    SELECT p.merchant_id, t.product_id, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY p.merchant_id, t.product_id
+)
+SELECT merchant_id, product_id, net_usd,
+       ROUND(100.0 * net_usd / SUM(net_usd) OVER (PARTITION BY merchant_id), 1) AS share_in_merchant_pct
+FROM per_product
+WHERE merchant_id IN ('mer_02', 'mer_06')
+ORDER BY merchant_id, net_usd DESC;
+```
+
+| merchant_id | product_id | net_usd | share_in_merchant_pct |
+|---|---|---|---|
+| mer_02 | prd_02 | 542.84 | 45.7 |
+| mer_02 | prd_13 | 377.79 | 31.8 |
+| mer_02 | prd_16 | 266.75 | 22.5 |
+| mer_06 | prd_18 | 313.80 | 56.7 |
+| mer_06 | prd_06 | 239.90 | 43.3 |
+
+`WHERE` здесь фильтрует по ключу партиции, поэтому у каждого продавца остаются все продукты, и доли по-прежнему дают 100 на продавца.
+
+Перед тем как писать `PARTITION BY`, спросите себя: «доля от чего?» Если партиционировать тем же ключом, что и `GROUP BY` перед этим, в каждой группе окажется одна строка, и каждая доля станет 100 %. В отчёте по каналам продаж ещё хуже: у `promo` выручка 0, получается 0 / 0, и запрос падает с `division by zero`. Если итог группы может быть нулём, делите на `NULLIF(SUM(x) OVER (…), 0)`.
+
+## Нарастающий итог
+
+С `ORDER BY` внутри `OVER` функция `SUM` складывает строки от начала группы до текущей. Авансы по продавцу и месяцу и нарастающий итог, который для каждого продавца начинается заново:
+
+```sql
+WITH monthly AS (
+    SELECT merchant_id, period_month, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    WHERE merchant_id IN ('mer_01', 'mer_03')
+    GROUP BY merchant_id, period_month
+)
+SELECT merchant_id, period_month, advanced_usd,
+       SUM(advanced_usd) OVER (PARTITION BY merchant_id ORDER BY period_month) AS running_usd
+FROM monthly
+ORDER BY merchant_id, period_month;
+```
+
+| merchant_id | period_month | advanced_usd | running_usd |
+|---|---|---|---|
+| mer_01 | 2026-06-01 | 89.18 | 89.18 |
+| mer_01 | 2026-07-01 | 145.09 | 234.27 |
+| mer_01 | 2026-08-01 | 125.45 | 359.72 |
+| mer_03 | 2026-05-01 | 214.13 | 214.13 |
+| mer_03 | 2026-06-01 | 220.06 | 434.19 |
+| mer_03 | 2026-07-01 | 169.50 | 603.69 |
+| mer_03 | 2026-08-01 | 175.44 | 779.13 |
+
+Проверка: последнее значение нарастающего итога у каждого продавца равно его обычному `SUM(amount_usd)` — 359,72 и 779,13.
+
+### Рамки: что значит «до текущей строки»
+
+Набор строк, который оконная функция видит для каждой строки, — её **рамка** (frame). С `ORDER BY` и без явной рамки PostgreSQL берёт `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Строки с одинаковым значением `ORDER BY` — «равные» (peers), и в рамку они попадают вместе. Без помесячной агрегации у mer_01 по два аванса в каждом месяце:
+
+```sql
+SELECT advance_id, channel, period_month, amount_usd,
+       SUM(amount_usd) OVER (ORDER BY period_month) AS default_frame,
+       SUM(amount_usd) OVER (ORDER BY period_month, advance_id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_frame
+FROM advances
+WHERE merchant_id = 'mer_01'
+ORDER BY period_month, advance_id;
+```
+
+| advance_id | channel | period_month | amount_usd | default_frame | rows_frame |
+|---|---|---|---|---|---|
+| adv_0001 | north_market | 2026-06-01 | 68.38 | 89.18 | 68.38 |
+| adv_0004 | south_market | 2026-06-01 | 20.80 | 89.18 | 89.18 |
+| adv_0002 | north_market | 2026-07-01 | 48.75 | 234.27 | 137.93 |
+| adv_0005 | south_market | 2026-07-01 | 96.34 | 234.27 | 234.27 |
+
+Это первые четыре строки из шести. Рамка по умолчанию даёт обеим июньским строкам 89,18 — итог всего месяца. `ROWS` с уникальным порядком считает строку за строкой. Ни то ни другое не ошибка, но нужно знать, что именно получится. Простое правило: сначала свернуть до одной строки на значение `ORDER BY`, как в помесячном запросе выше. Тогда обе рамки дают одно и то же.
+
+### Скользящее среднее
+
+У рамки может быть и подвижное начало: `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` — текущая строка и шесть перед ней. Дневная выручка (net) всех продавцов вместе и скользящее среднее за 7 дней:
+
+```sql
+WITH daily AS (
+    SELECT CAST(start_time AS DATE) AS day, SUM(revenue_usd) AS net_usd
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT day, net_usd,
+       COUNT(*) OVER w AS days_in_frame,
+       ROUND(AVG(net_usd) OVER w, 2) AS avg_7d_usd
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+```
+
+| day | net_usd | days_in_frame | avg_7d_usd |
+|---|---|---|---|
+| 2026-09-01 | 201.82 | 1 | 201.82 |
+| 2026-09-02 | 108.93 | 2 | 155.38 |
+| 2026-09-06 | 293.87 | 6 | 226.36 |
+| 2026-09-07 | 105.91 | 7 | 209.15 |
+| 2026-09-08 | 57.89 | 7 | 188.59 |
+
+Показаны пять строк из десяти. Конструкция `WINDOW` даёт окну имя один раз, и две функции могут им пользоваться.
+
+- Первые шесть дней усредняют меньше семи дней. Спросите, нужно ли это задаче или до седьмого дня должно быть NULL (`CASE WHEN COUNT(*) OVER w = 7 THEN … END`).
+- `ROWS` считает строки, а не дни. Если в какой-то день продаж не было, строки нет, и «6 preceding» уходит на восемь дней назад. Здесь продажи есть каждый день. У одного продавца их часто нет: сначала постройте календарь, см. [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/).
+
+PostgreSQL умеет мерить рамку и в днях: `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` берёт строки, у которых `day` не больше чем на шесть дней раньше текущего. Для этого в `ORDER BY` должна быть ровно одна колонка, здесь `day`. Пропущенный день тогда не растянет рамку. Но календарь это не заменяет: `AVG` делит на число строк, которые есть, а не на семь, и у дня без продаж по-прежнему нет своей строки. У mer_01 нет продаж с 5 по 8 сентября. Его среднее за 7 дней на 9 сентября:
+
+| рамка | только дни с продажами | на календаре |
+|---|---|---|
+| `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` | 6.99 | 3.99 |
+| `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` | 9.32 | 3.99 |
+
+Без календаря `ROWS` дотягивается до 1 сентября, а `RANGE` усредняет только три дня с продажами: 3, 4 и 9 сентября. На календаре обе рамки дают 3,99, а у 8 сентября появляется своя строка — 3,00. Так что нулевые дни в среднее приносит календарь с `COALESCE(…, 0)`. `RANGE` с интервалом лишь гарантирует, что пропуск не расширит рамку.
+
+## LAG: предыдущее значение и изменение
+
+`LAG(x)` возвращает `x` из предыдущей строки в порядке окна. `LEAD(x)` — из следующей. Выплаты South Market продавцу mer_01, у каждой — предыдущая и изменение:
+
+```sql
+SELECT period_month, amount_usd,
+       LAG(amount_usd) OVER (ORDER BY period_month)              AS prev_usd,
+       amount_usd - LAG(amount_usd) OVER (ORDER BY period_month) AS change_usd
+FROM channel_payouts
+WHERE merchant_id = 'mer_01'
+  AND channel = 'south_market'
+ORDER BY period_month;
+```
+
+| period_month | amount_usd | prev_usd | change_usd |
+|---|---|---|---|
+| 2026-01-01 | 29.71 | NULL | NULL |
+| 2026-02-01 | 41.59 | 29.71 | 11.88 |
+| 2026-03-01 | 103.63 | 41.59 | 62.04 |
+| 2026-04-01 | 35.65 | 103.63 | -67.98 |
+
+Это первые четыре строки из семи. У первого месяца предыдущей строки нет, поэтому там NULL, и изменение тоже NULL. `LAG(x, 1, 0)` поставил бы туда 0, но тогда январь покажет изменение +29,71, которого не было. Обычно честный ответ — NULL. Для нескольких каналов сразу добавьте `PARTITION BY channel`.
+
+`LAG` берёт предыдущую **строку**, а не предыдущий день или месяц. У mer_01 нет продаж с 5 по 8 сентября:
+
+```sql
+WITH daily AS (
+    SELECT CAST(t.start_time AS DATE) AS day, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE p.merchant_id = 'mer_01'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT day, net_usd,
+       LAG(day)     OVER (ORDER BY day) AS prev_day,
+       LAG(net_usd) OVER (ORDER BY day) AS prev_usd
+FROM daily
+ORDER BY day;
+```
+
+| day | net_usd | prev_day | prev_usd |
+|---|---|---|---|
+| 2026-09-01 | 6.99 | NULL | NULL |
+| 2026-09-02 | 0.00 | 2026-09-01 | 6.99 |
+| 2026-09-03 | 13.98 | 2026-09-02 | 0.00 |
+| 2026-09-04 | 6.99 | 2026-09-03 | 13.98 |
+| 2026-09-09 | 6.99 | 2026-09-04 | 6.99 |
+
+Для 9 сентября «предыдущий день» — 4 сентября. Если задача говорит «по сравнению с предыдущим днём», сначала заполните календарь. Без окна пропуски обрабатывает и соединение таблицы с собой по `cur.month = prev.month + INTERVAL '1 month'`: у пропущенного месяца просто не найдётся пары.
+
+## Как это выглядит на интервью
+
+Базовая задача — [Q01, выручка по каналам продаж](/sql-tasks/revenue-reports/): число транзакций, gross и net по каждому каналу за сентябрь. Вы задаёте обычные вопросы, пишете запрос и вслух его проверяете. Потом интервьюер говорит: «Nice. Finance also wants each channel's share of the total net revenue.»
+
+1. **Сначала вопрос:** «In percent, rounded to one decimal? And the total is all channels together, including promo?»
+2. **План вслух:** «I'll keep my query as a CTE and add one column on top: net divided by the total. The total comes from a window over all rows, so I keep one row per channel.»
+3. **Обернуть:** запрос Q01 становится первым CTE, а доля — одна новая колонка во внешнем `SELECT`.
+4. **Проверка:** «The shares add up to 100: 49.5 plus 38 plus 12.5.»
+
+Первое упражнение ниже — ровно этот шаг.
+
+<Talk q="What if I add LIMIT 2 to the query with the shares?">
+
+"The window is computed before ORDER BY and LIMIT, so the two rows keep their shares of the full total. Only a filter in WHERE of the same SELECT would change the total."
+
+</Talk>
+
+## Практика
+
+<Drill id="s-share">
+
+Доля от итога — `SUM(…) OVER ()` по всем строкам результата. `PARTITION BY channel` дал бы каждому каналу 100 %, потому что на канал одна строка, и поделил бы `promo` на ноль. Без окна делите на скалярный подзапрос, который суммирует `net_usd` по тому же CTE.
+
+</Drill>
+
+<Drill id="s-running">
+
+Нарастающий итог — `SUM(…) OVER (ORDER BY day)` поверх дневных сумм. Задача просит только дни с продажами. У mer_04 нет продаж 14, 18 и 19 сентября, поэтому в результате четыре строки, и итог перескакивает с 17 на 20 сентября. Если бы задача говорила «каждый день», начинать пришлось бы с календаря через `generate_series`, как в упражнении про [календари](/sql-patterns/calendars-and-active-periods/). В скрытых данных есть продажа поздно вечером 20 сентября, поэтому интервал должен быть полуоткрытым.
+
+</Drill>
+
+<Drill id="s-lag">
+
+Предыдущая строка — `LAG(x) OVER (ORDER BY month)`. `WHERE` выполняется до окна, поэтому фильтр по 2026 году в `WHERE` прячет от `LAG` декабрь 2025 года, и январь получает NULL. Посчитайте месяцы с декабря 2025 года, возьмите `LAG` и только потом во внешнем запросе оставьте 2026 год: у января предыдущее значение — декабрьские 4676,54. Без окна — соединить `monthly` с собой по `m.month = p.month + INTERVAL '1 month'`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Скажите одну фразу перед тем, как набрать конструкцию, о которой она:
+
+- перед `PARTITION BY`: «This is the share of all channels, not of each channel.»
+- перед скользящим средним: «First one row per day, so that seven rows are seven days.»
+- перед `LAG`: «LAG takes the previous row, so I check that no month is missing.»
+
+Если просят обойтись без окна, итог становится скалярным подзапросом, а `LAG` — соединением таблицы с собой по предыдущему месяцу.
+</Aside>
+
+## Что почитать
+
+- [Window functions tutorial](https://www.postgresql.org/docs/current/tutorial-window.html) — `SUM() OVER`, партиции и рамка по умолчанию на примерах.
+- [Window function calls](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — полный синтаксис рамок: `ROWS`, `RANGE`, `GROUPS`, `PRECEDING`.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `LAG`, `LEAD`, `FIRST_VALUE` и их аргументы.
+- [WINDOW clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-WINDOW) — как один раз назвать окно и использовать его снова.
+
+## Связанные темы
+
+- [Топ-N в группе](/sql-patterns/top-n-per-group/) — оконные функции с нуля и фильтр по окну на следующем шаге.
+- [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/) — строка на каждый день, чтобы рамки и `LAG` считали дни.
+- [Условная агрегация](/sql/conditional-aggregation/) — доли, коэффициенты и целочисленное деление.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — текущий остаток — это нарастающий итог по проводкам.
+- [Конверсия и отток](/sql-tasks/funnels-and-churn/) — Q09, нарастающая выручка и среднее за 7 дней по продавцу.
+- [Когорты и удержание](/sql-patterns/cohorts-and-retention/) — доли когорты месяц за месяцем.

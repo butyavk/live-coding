@@ -1,0 +1,256 @@
+---
+title: Testing and complexity
+description: "What to say after the code works: the cost of dict, set, list and sorting, which cases to test, pytest basics, and finding a signature without AI."
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+
+When the code passes the example, the interview is not over. Almost every interviewer asks two more questions: how fast is it, and how would you test it? Each answer takes a minute if you have practised it. Without practice, a working solution ends with silence or a vague "it should be fine".
+
+<Aside type="tip" title="TL;DR">
+- A dict or set lookup is O(1) on average; `x in list` is O(n); sorting is O(n log n); a heap push or pop is O(log n).
+- Name time and memory together: *"O(n log n) because of the sort, O(k) memory for the totals."*
+- Test in a fixed order: the example from the task, empty or zero, exactly on a boundary, more than enough, ties, bad input that must raise.
+- pytest needs three tools: plain `assert`, `pytest.raises` and `@pytest.mark.parametrize`.
+- Forgot a signature? `help(...)`, `dir(module)` and docs.python.org are allowed. They are not AI.
+</Aside>
+
+## The cost of common operations
+
+Interviewers do not want a proof. They want the right cost for each step and the step that dominates.
+
+| Operation | Cost | Why |
+|---|---|---|
+| `d[k]`, `k in d`, `d[k] = v` | O(1) average | hash table |
+| `x in s`, `s.add(x)` | O(1) average | hash table without values |
+| `x in lst`, `lst.index(x)`, `lst.remove(x)` | O(n) | checks elements one by one |
+| `lst.append(x)`, `lst.pop()` | O(1) amortised | works at the end |
+| `lst.pop(0)`, `lst.insert(0, x)` | O(n) | shifts every element |
+| `deque.append(x)`, `deque.popleft()` | O(1) | both ends are cheap |
+| `sorted(xs)`, `xs.sort()` | O(n log n) | |
+| `heapq.heappush`, `heapq.heappop` | O(log n) | |
+| `heapq.nsmallest(k, xs)` | O(n log k) | top-k without a full sort |
+| `bisect.bisect_left(xs, x)` | O(log n) | the list must be sorted |
+| `a & b` on sets | O(min(len(a), len(b))) | checks the smaller set |
+| `a - b` on sets | O(len(a)) | checks every item of `a` |
+
+"On average" matters for dict and set. In the worst case, when many keys have the same hash, a lookup is O(n). With ordinary keys (strings, numbers, tuples) say "O(1) on average" and move on.
+
+### Where O(n²) hides
+
+Slow code rarely has two visible nested loops. More often the second loop hides inside `in` on a list. The same deduplication, twice:
+
+```python
+import time
+
+ids = [f"evt_{i}" for i in range(20_000)] * 2      # 40,000 events, each id twice
+
+
+def unique_with_list(ids):
+    seen, out = [], []
+    for x in ids:
+        if x not in seen:          # O(n) scan of the list
+            seen.append(x)
+            out.append(x)
+    return out
+
+
+def unique_with_set(ids):
+    seen, out = set(), []
+    for x in ids:
+        if x not in seen:          # O(1) on average
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+for f in (unique_with_list, unique_with_set):
+    t0 = time.perf_counter()
+    n = len(f(ids))
+    print(f"{f.__name__}: {n} ids, {time.perf_counter() - t0:.3f} s")
+```
+
+One run printed:
+
+```text
+unique_with_list: 20000 ids, 4.369 s
+unique_with_set: 20000 ids, 0.008 s
+```
+
+The seconds depend on the machine. The gap of several hundred times does not. Other hidden loops: `lst.pop(0)` or `lst.count(x)` inside a loop, and `sum(...)` over a growing list on every step.
+
+### How to say it
+
+The total cost is the cost of the most expensive step. A sort followed by one pass is O(n log n) + O(n), which is O(n log n). For memory, count what you keep besides the input: a dict of totals is O(k) for k keys, a set of seen ids is O(n), a generator that reads one line at a time is O(1) (see [Iteration and generators](/python/iteration-and-generators/)).
+
+<Talk q="What is the cost of a lookup in a dict, a set and a list? And of sorting?">
+
+"A dict or set lookup is O(1) on average, because they are hash tables. `x in list` is O(n): it checks every element, so inside a loop it becomes O(n²). Sorting is O(n log n)."
+
+The rule that follows: "have I seen it?" is a set, "find it by key" is a dict.
+
+</Talk>
+
+## How to test a function in an interview
+
+At the start of the task you wrote down an example and the edge cases (see the [protocol](/start/interview-protocol/)). Now they become tests, in a fixed order:
+
+1. **The example from the task**, with the exact expected output.
+2. **Empty or zero**: `[]`, `0`, an empty string. The result should be empty, not a crash.
+3. **Exactly on a boundary**: a request exactly `window` seconds later, a period that ends where the next one starts, a payment equal to the debt.
+4. **More than enough, or partial**: a payment bigger than all debts, a last batch that is not full.
+5. **Ties**: equal counts or equal timestamps, in the order the task asked for.
+6. **Bad input that must raise**: a negative amount, `n = 0`, a string that is not a number.
+
+Time and randomness come in as parameters: `now`, a `clock` function, a seeded `random.Random`. Then a test sets the time itself and never sleeps. [Classes and state](/python/classes-and-state/) shows the injected clock.
+
+### pytest in three tools
+
+A fee function in the style of the advances program: 3% of the advance, plus a minimum of 1.00 that gives the tests a second rule to meet. The function and its tests:
+
+```python
+# fee.py
+from decimal import Decimal, ROUND_HALF_UP
+
+
+def advance_fee(amount: Decimal) -> Decimal:
+    """3% of the advance, rounded half up to cents, but at least 1.00."""
+    if amount <= 0:
+        raise ValueError(f"amount must be positive, got {amount}")
+    fee = (amount * Decimal("0.03")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return max(fee, Decimal("1.00"))
+```
+
+```python
+# test_fee.py
+from decimal import Decimal as D
+
+import pytest
+
+from fee import advance_fee
+
+
+def test_example_from_the_task():
+    assert advance_fee(D("500.00")) == D("15.00")
+
+
+@pytest.mark.parametrize("amount, expected", [
+    (D("20.00"), D("1.00")),    # below the minimum: 0.60 becomes 1.00
+    (D("33.33"), D("1.00")),    # 0.9999 rounds to exactly the minimum
+    (D("34.00"), D("1.02")),    # just above it
+    (D("35.50"), D("1.07")),    # 1.065: half up, not to even
+])
+def test_edges(amount, expected):
+    assert advance_fee(amount) == expected
+
+
+@pytest.mark.parametrize("bad", [D("0"), D("-5.00")])
+def test_bad_amount_raises(bad):
+    with pytest.raises(ValueError, match="positive"):
+        advance_fee(bad)
+```
+
+`pytest -q` prints:
+
+```text
+.......                                                                  [100%]
+7 passed in 0.01s
+```
+
+- **`assert`** is a plain Python comparison. When it fails, pytest shows both sides.
+- **`pytest.raises(ValueError, match="positive")`** passes only if the block raises this error. `match` is a regular expression checked against the message.
+- **`@pytest.mark.parametrize`** turns one test into a table of cases. Each row is reported on its own, so you see which case broke.
+
+The rounding row earns its place. Replace the `quantize` line with `round(amount * Decimal("0.03"), 2)` and run again:
+
+```text
+>       assert advance_fee(amount) == expected
+E       AssertionError: assert Decimal('1.06') == Decimal('1.07')
+E        +  where Decimal('1.06') = advance_fee(Decimal('35.50'))
+
+test_fee.py:20: AssertionError
+=========================== short test summary info ============================
+FAILED test_fee.py::test_edges[amount3-expected3] - AssertionError: assert De...
+1 failed, 6 passed in 0.02s
+```
+
+`round()` on a `Decimal` rounds half to even, so 1.065 becomes 1.06 (see [Money and Decimal](/python/money-and-decimal/)). The other six cases pass, and only a test exactly on the half cent catches it.
+
+Flags worth knowing: `pytest -x` stops at the first failure, `pytest -k fee` runs only tests with "fee" in the name, `pytest -vv` prints every case and full diffs. No pytest in the interview editor? Plain `assert` lines under `if __name__ == "__main__":` work everywhere. On this site, Check runs each exercise's tests and prints pytest-style messages.
+
+<Talk q="How would you test this function?">
+
+"With pytest: the example from the task, then the edge cases — empty input, zero, exactly on a boundary, more than enough, equal keys, and a bad input that must raise. Time and randomness I inject, so the test does not sleep or flake."
+
+Name all the cases first, then write two or three of them. The interviewer rarely needs all six in code.
+
+</Talk>
+
+## Find it fast without AI
+
+Live-coding rounds usually forbid AI but allow the documentation. The fastest help is inside Python itself. It works in a shared online editor and in every editor on this site.
+
+```python
+import heapq
+help(heapq.nsmallest)
+```
+
+```text
+Help on function nsmallest in module heapq:
+
+nsmallest(n, iterable, key=None)
+    Find the n smallest elements in a dataset.
+
+    Equivalent to:  sorted(iterable, key=key)[:n]
+```
+
+```python
+import itertools
+print([name for name in dir(itertools) if not name.startswith("_")])
+```
+
+```text
+['accumulate', 'batched', 'chain', 'combinations', 'combinations_with_replacement', 'compress', 'count', 'cycle', 'dropwhile', 'filterfalse', 'groupby', 'islice', 'pairwise', 'permutations', 'product', 'repeat', 'starmap', 'takewhile', 'tee', 'zip_longest']
+```
+
+`dir()` answers "what is in this module?". `help()` answers "what does it take and return?". `print(Decimal.quantize.__doc__)` prints the same text as `help`, without the pager. (The output above is from Python 3.12.)
+
+Documentation pages to know:
+
+- A module page: `docs.python.org/3/library/<module>.html`, for heapq, itertools, collections, datetime, decimal, bisect, functools. Search it with Ctrl+F for the function name. Many pages end with examples and recipes.
+- The [Sorting HOWTO](https://docs.python.org/3/howto/sorting.html): key functions, several keys, stable sorting.
+- The decimal page: search for "quantize" or for "two decimal places" in its FAQ.
+- The datetime page: the table "strftime() and strptime() Format Codes".
+
+Say what you are doing: *"Let me quickly check the docs for the exact signature."* A short lookup looks better than silence; never stay silent for more than 30 seconds.
+
+## Practice
+
+This page has no drills: the practice is to say it out loud. Take a drill you have solved in [Sorting and top-k](/python/sorting-and-top-k/) or [Sets and duplicates](/python/sets-and-duplicates/). After Check passes, say its time and memory cost in one sentence. Then list the six kinds of test cases for it. Give yourself one minute.
+
+<Aside type="note" title="In the interview">
+The last minutes of a task often follow the same script. Practise it in this order:
+
+1. The cost, in one sentence: *"It's O(n log n) because of the sort; the loop after it is O(n). Memory is O(k) for the totals."*
+2. The tests, run and not only listed: *"Let me run the edge cases: empty input, a tie, exactly on the boundary."*
+3. The scale question, if it comes: name the step that dominates and what replaces it. A set instead of a list, a heap instead of a full sort, or the database instead of a Python loop.
+
+Say "done" only after step 2.
+</Aside>
+
+## Further reading
+
+- [TimeComplexity](https://wiki.python.org/moin/TimeComplexity) — the Python wiki's table of costs for list, deque, set and dict.
+- [How to write and report assertions in tests](https://docs.pytest.org/en/stable/how-to/assert.html) — assert messages and `pytest.raises` with `match`.
+- [How to parametrize fixtures and test functions](https://docs.pytest.org/en/stable/how-to/parametrize.html) — `@pytest.mark.parametrize`.
+- [help()](https://docs.python.org/3/builtins/functions.html#help) and [dir()](https://docs.python.org/3/builtins/functions.html#dir) — the two built-in functions for a quick lookup.
+
+## Related topics
+
+- [Sets and duplicates](/python/sets-and-duplicates/) — why `seen` is a set and not a list.
+- [Sorting and top-k](/python/sorting-and-top-k/) — O(n log n) for a sort against O(n log k) for a heap.
+- [Iteration and generators](/python/iteration-and-generators/) — keeping memory flat when the input is large.
+- [Debugging](/python-tasks/debugging/) — reading a failing test and finding the bug it points to.
+- [Think aloud](/start/think-aloud/) — phrases for the test and discussion steps.

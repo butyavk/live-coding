@@ -1,0 +1,110 @@
+---
+title: Revenue reports
+description: "Three warm-up SQL tasks on the practice data: revenue by sales channel, the top products of the last 30 days, and monthly revenue per merchant with zeros."
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+A SQL round often opens with a task like these: add up money over a period, by the right key, with the right filters. A few habits decide the result: a half-open date range, no test purchases, the right revenue column (gross or net), a second sort key for ties, and zeros for months without sales. The tasks build on [Filters and dates](/sql/filters-and-dates/), [CASE, FILTER and rates](/sql/conditional-aggregation/) and [LEFT JOIN and zeros](/sql/left-join-and-zeros/). When single tasks feel easy, rehearse a whole round on the [mock interview](/start/mock-interview/) page: a random task, the clock running, the hints hidden.
+
+<Aside type="tip" title="How to practise">
+Start the timer in the task header and talk from the first minute, as in the [protocol](/start/interview-protocol/). Say the grain before you write `GROUP BY`: *"One row per channel, August only."* Check compares your rows with the reference and then runs your query again on hidden edge-case data.
+</Aside>
+
+## Q01. Revenue by channel — August 2026
+
+<Task id="q01" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Finance wants to know how much each sales channel brings in. Gross is what customers paid (`charged_usd`). Net is what is left after refunds (`revenue_usd`, which is 0 for a refunded transaction).
+
+**Steps.** One pass over `transactions`: `WHERE` (no test purchases, August as a half-open interval), then `GROUP BY channel`, then `COUNT(*)` and two `SUM`s.
+
+**Traps.**
+
+- `BETWEEN '2026-08-01' AND '2026-08-31'` stops at 31 August 00:00 and loses the sales of that day: 7 sales, 148.94 net. Use `>=` and `<`.
+- `BETWEEN '2026-08-01' AND '2026-09-01'` fixes that end and breaks the other one: it also counts a sale made exactly at 1 September 00:00, which belongs to September. No practice sale starts at that moment, so the result looks right. Check also runs your query on hidden edge-case data, which has such a sale, and this version fails there.
+- Test purchases never go into business numbers. August has 18 of them, worth 217.83 net.
+- Keep trials and promo access. They cost 0, but they are transactions: August has 57 trials and 8 promo rows. Without them the count would be 485, not 550.
+
+**Check.** The four channels together must give `SUM(revenue_usd)` with the same filter and no grouping: 7082.25 from 550 transactions. The first row is north_market with a net of 4002.23.
+
+**Follow-up.** "Add the share of each channel." Put a window over the grouped query: `SUM(SUM(revenue_usd)) OVER ()` is the total of all groups (see [Shares and running totals](/sql-patterns/running-totals-and-shares/)).
+
+```sql
+SELECT channel,
+       SUM(revenue_usd) AS net_usd,
+       ROUND(100.0 * SUM(revenue_usd) / SUM(SUM(revenue_usd)) OVER (), 1) AS share_pct
+FROM transactions
+WHERE NOT is_test
+  AND start_time >= TIMESTAMP '2026-08-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+GROUP BY channel
+ORDER BY net_usd DESC;
+```
+
+| channel | net_usd | share_pct |
+|---|---|---|
+| north_market | 4002.23 | 56.5 |
+| south_market | 2572.44 | 36.3 |
+| web | 507.58 | 7.2 |
+| promo | 0.00 | 0.0 |
+
+**In production.** The filter is a range on `start_time`, so an index on `transactions(start_time)` serves it. One month is a small part of the table, and the planner will choose an index scan. For a query over the whole table, a sequential scan is the right choice.
+
+</Reveal>
+
+## Q02. Top 5 products in the last 30 days
+
+<Task id="q02" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Which products bring in the most money right now: net revenue over the last 30 days.
+
+**Steps.** `transactions` → `products` → `merchants` (for the names) → the 30 days before "today" → `GROUP BY` the product and both names → `ORDER BY net_usd DESC, product_id` → `LIMIT 5`.
+
+**Traps.**
+
+- "Today" is the literal `TIMESTAMP '2026-09-30'`, not `CURRENT_DATE`. Otherwise the answer changes every day.
+- Give the start of the range an explicit type: `TIMESTAMP '2026-09-30' - INTERVAL '30 days'`.
+- Without a second sort key, `LIMIT` cuts an arbitrary row when two products have the same revenue.
+
+**Check.** The first row is prd_15, Product 15 of the merchant Kite Works: 659.76.
+
+**Follow-up.** "Show the best product of each merchant." Number the products inside each merchant with `ROW_NUMBER() OVER (PARTITION BY merchant_id ORDER BY net_usd DESC)` and keep `rn = 1` in the next step (see [Top N per group](/sql-patterns/top-n-per-group/)).
+
+**In production.** The same index on `start_time`. The joins to `products` and `merchants` go through their primary keys, which already have indexes.
+
+</Reveal>
+
+## Q05. Monthly net revenue per merchant, zero-filled
+
+<Task id="q05" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A report for merchants: revenue per month, where a month without sales shows 0 instead of disappearing.
+
+**Steps.**
+
+1. A CTE `revenue`: net revenue per `merchant_id` and `date_trunc('month', start_time)`, for January–September.
+2. A calendar of months from `generate_series`.
+3. `merchants CROSS JOIN months` gives every pair. Then `LEFT JOIN revenue` and `COALESCE(net_usd, 0)`.
+
+**Traps.**
+
+- Start from `merchants`, not from `transactions`. Otherwise a merchant without sales disappears from the report.
+- Keep the filters on transactions inside the CTE. A `WHERE` on `revenue` after the `LEFT JOIN` removes the zero rows again.
+
+**Check.** 108 rows: 12 merchants × 9 months. In the practice data every merchant sells in every month, so a query without the calendar also returns 108 rows. Check also runs your query on hidden edge-case data, where one merchant has a month with no sales. Without the calendar that row is missing, and Check fails.
+
+**Short on time?** Describe the pattern instead of typing every detail: *"I'll build a calendar with generate_series, cross join it with merchants, and left join the revenue, so missing months become zero."*
+
+**In production.** An index on `start_time` serves the filter by year. For a monthly report, keep monthly totals in a summary table or a materialized view, so the report does not read every transaction.
+
+</Reveal>

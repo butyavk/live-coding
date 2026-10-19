@@ -1,0 +1,26 @@
+-- Q14. Outstanding balance per merchant
+-- Level: medium. Target time: 12 min.
+--
+-- TASK
+--   Using the ledger, show how much each merchant still owes us, how many advances are still open and when the oldest open advance was made.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Ledger signs?
+--   A: advance and fee entries are positive; repayment entries are negative. The balance is the sum.
+--   Q: Open advance?
+--   A: An advance_id whose entries sum to more than 0.
+--   Q: As of when?
+--   A: Entries with created_at < 2026-09-30.
+--   Q: Which merchants?
+--   A: Only those who owe more than 0.
+--   Q: Can an advance be overpaid, so its balance is negative?
+--   A: No. A repayment never exceeds what is owed, so every advance balance is 0 or more.
+--   Q: "When the advance was made" — which date?
+--   A: created_at of the 'advance' entry (the same as advances.created_at). The fee entry is written at the same moment, repayments come later.
+--
+-- OUTPUT COLUMNS: merchant_id, outstanding_usd, open_advances, oldest_open_advance_on (DATE)
+-- ORDER BY: outstanding_usd DESC, merchant_id
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q14.sql   Check: pytest -k q14
+
+-- your query below

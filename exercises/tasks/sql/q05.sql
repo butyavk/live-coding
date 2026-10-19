@@ -1,0 +1,20 @@
+-- Q05. Monthly net revenue per merchant, zero-filled
+-- Level: medium. Target time: 12 min.
+--
+-- TASK
+--   Show net revenue per merchant per month from January to September 2026. Every merchant must have all nine months, with 0 when there was no revenue.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Which month does a transaction belong to?
+--   A: The month of start_time (UTC).
+--   Q: Net revenue?
+--   A: SUM(revenue_usd), test purchases excluded.
+--   Q: Merchants without products or without revenue?
+--   A: Still listed, with 0 in every month.
+--
+-- OUTPUT COLUMNS: merchant_id, month (DATE, first day of month), net_usd
+-- ORDER BY: merchant_id, month
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q05.sql   Check: pytest -k q05
+
+-- your query below

@@ -1,0 +1,30 @@
+---
+// A free editor with Run: SQL on the practice dataset, or Python.
+//   <Playground lang="sql" code="SELECT * FROM merchants LIMIT 5;" />
+import { localeOf, schemaForEditor } from './lib/data';
+import { strings } from './lib/i18n';
+import Workbench from './parts/Workbench.astro';
+import './practice.css';
+
+interface Props {
+  lang: 'sql' | 'python';
+  code?: string;
+}
+const { lang, code = '' } = Astro.props;
+const locale = localeOf(Astro);
+const T = strings(locale);
+const kind = lang === 'sql' ? 'playground-sql' : 'playground-py';
+const cfg = { kind, id: '', starter: code, schema: lang === 'sql' ? schemaForEditor() : undefined };
+---
+<section class="lcp lcp-playground" data-lcp={kind}>
+  <script type="application/json" data-lcp-cfg set:html={JSON.stringify(cfg).replace(/</g, '\\u003c')} />
+  <header class="lcp-head not-content">
+    <span class="lcp-badge">{lang === 'sql' ? T.sql : T.python}</span>
+    <span class="lcp-kind">{lang === 'sql' ? T.playgroundSql : T.playgroundPy}</span>
+  </header>
+  <Workbench locale={locale} lang={lang} code={code} />
+</section>
+
+<script>
+  import './lib/client';
+</script>

@@ -1,0 +1,47 @@
+---
+title: SQL and Python together
+description: "One task that uses both languages: SQL returns the days with sales through a safe parameterised query, and Python finds the longest streak of days."
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+In some interviews the Python code talks to the same database as the SQL part. This task practises the split: SQL filters the data and returns a short result, Python does the logic that is awkward in SQL, and the parameters reach the database safely. It builds on [Python and SQL](/python/python-and-sql/) and on the filters from [Revenue reports](/sql-tasks/revenue-reports/).
+
+<Aside type="tip" title="How to practise">
+Build it in three runs. First the SQL alone for mer_01, printed. Then the streak loop on a hard-coded list of dates. Then the two together, and only then Check.
+
+The tests of P11 call the practice database from Python, except the one that reads your source code. That needs a recent Chrome or Edge (WebAssembly JSPI). In other browsers those tests are skipped with a message.
+</Aside>
+
+## P11. SQL + Python together: longest sales streak
+
+<Task id="p11" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** "The best streak of days with sales." SQL returns a short list of days, and the streak logic is easier to write in Python.
+
+**Steps.**
+
+1. SQL: `SELECT DISTINCT CAST(t.start_time AS DATE)` through `products` to the merchant, with `NOT is_test`, `revenue_usd > 0`, the date range and `ORDER BY day`. The parameters go in as `?` placeholders.
+2. Python: one pass over the sorted days. If a day is the previous day + 1, the current run grows; otherwise a new run starts. Keep the best run and its first day.
+
+**Traps.**
+
+- `last_day` is included, so the SQL needs `start_time < last_day + 1 day`: pass `last_day + timedelta(days=1)`.
+- Parameters only through `?`, never through f-strings or `+`. This prevents SQL injection, and the database can reuse the plan. Two tests check this. One runs your function on a connection that records every query, and fails if the merchant id or a date is inside the SQL text. The other reads your source code, and fails if an f-string, `+`, `%` or `.format()` builds a string that looks like SQL.
+- With runs of the same length, keep the earliest: the comparison is strictly `>`.
+- No sales at all gives `(0, None)`, so start the best run with those values.
+
+**Check.** For mer_01 from 1 to 29 September, SQL returns 14 days, and the answer is `(3, date(2026, 9, 21))`: 21, 22 and 23 September.
+
+**Worth saying.** On a big table the filter and `DISTINCT` stay in the database: it sends 14 rows, not every transaction. The streak can also be found in SQL with the "gaps and islands" pattern; mention it, even if you write it in Python.
+
+**Complexity.** The Python part is `O(d)` for `d` days with sales. The SQL part is one range scan; an index on `(product_id, start_time)` would serve it on a big table.
+
+**In other editors.** With SQLAlchemy the same rule uses named parameters: `conn.execute(sa.text("… WHERE p.merchant_id = :mer"), {"mer": merchant_id})`.
+
+</Reveal>

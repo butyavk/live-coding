@@ -1,0 +1,203 @@
+---
+title: Диалект PostgreSQL
+description: Что ломается, когда запрос пришёл из другой базы или из памяти. Кавычки, касты, ROUND для numeric, целочисленное деление, даты и DISTINCT ON.
+sidebar:
+  order: 8
+---
+import { Aside } from '@astrojs/starlight/components';
+import Trap from '~/components/practice/Trap.astro';
+
+Редакторы на интервью обычно запускают настоящий PostgreSQL. Запрос, написанный по памяти о MySQL, SQL Server, BigQuery или DuckDB, часто падает на мелочах: кавычки, `ROUND`, функция даты. Каждая ошибка стоит минуту-другую, а тихое расхождение — ответа.
+
+<Aside type="tip" title="Коротко">
+- Строки — в одинарных кавычках, двойные — для имён: `channel = 'web'`.
+- `ROUND(x, n)` принимает только `numeric`: `ROUND(x::numeric, 2)`.
+- Целое, делённое на целое, — целое: `1.0 * a / b`.
+- `date_trunc` возвращает метку времени; вместо `DATEADD` — `d + INTERVAL '30 days'`.
+- В первые две минуты выясните, какая база и какая версия в редакторе: `SELECT version();`, если код можно запускать, иначе спросите.
+</Aside>
+
+## Кавычки: строки и имена
+
+В PostgreSQL одинарные кавычки задают строку, а двойные — имя (идентификатор). Слово в двойных кавычках ищется как колонка.
+
+<Trap id="dquote" q="Что не так с этим запросом?">
+
+Ошибка: `column "web" does not exist`. Двойные кавычки в PostgreSQL — имя колонки, строки пишут в одинарных: `channel = 'web'`.
+
+</Trap>
+
+Имена без кавычек приводятся к нижнему регистру. Двойные кавычки сохраняют регистр и разрешают пробелы. Одинарная кавычка внутри строки пишется дважды:
+
+```sql
+SELECT 1 AS Total, 2 AS "Total", 'O''Brien' AS name;
+```
+
+| total | Total | name |
+|---|---|---|
+| 1 | 2 | O'Brien |
+
+Обратные кавычки вокруг имени, как в MySQL и BigQuery, недопустимы вовсе. Запрос падает с `syntax error at or near "FROM"`.
+
+## Касты: `::` и CAST
+
+`CAST(x AS numeric)` — стандартный SQL, `x::numeric` — короткая форма PostgreSQL. Делают они одно и то же. `::` связывает сильнее арифметики, поэтому `7 / 2::numeric` приводит только двойку — и этого хватает, чтобы деление стало точным.
+
+Типизированные литералы — тоже касты: `DATE '2026-09-01'`, `TIMESTAMP '2026-09-01'`, `INTERVAL '30 days'`. Рядом с колонкой дата в кавычках работает и так, а в арифметике дат ей нужен тип (см. [Фильтры и даты](/sql/filters-and-dates/)).
+
+## Числа: целочисленное деление, ROUND и float
+
+```sql
+SELECT 7 / 2                     AS int_div,
+       7 / 2::numeric            AS cast_one,
+       ROUND(2.5)                AS round_numeric,
+       ROUND(2.5::float8)        AS round_float,
+       0.1::float8 + 0.2::float8 AS float_sum,
+       0.1 + 0.2                 AS numeric_sum;
+```
+
+| int_div | cast_one | round_numeric | round_float | float_sum | numeric_sum |
+|---|---|---|---|---|---|
+| 3 | 3.5000000000000000 | 3 | 2 | 0.30000000000000004 | 0.3 |
+
+- `7 / 2` = 3: целочисленное деление отбрасывает дробь. Одна сторона `numeric` это исправляет.
+- `ROUND` для `numeric` округляет половину от нуля: 2,5 становится 3. `ROUND` для `double precision` обычно округляет половину к чётному: здесь 2,5 становится 2.
+- `double precision` не может точно хранить 0,1. Деньги — в `numeric`.
+- `ROUND(x, n)` со знаками после запятой есть только для `numeric`. `AVG` от колонки `numeric` — `numeric`; `PERCENTILE_CONT` и всё, что приведено к `float8`, — нет.
+
+<Trap id="round-double" q="В DuckDB работает. А в PostgreSQL?">
+
+Ошибка: `function round(double precision, integer) does not exist`. В PostgreSQL `ROUND` с числом знаков есть только для `numeric`: `ROUND(x::numeric, 2)`. DuckDB, на котором работает офлайн-папка с упражнениями, здесь мягче и ошибки не покажет.
+
+</Trap>
+
+Деление на ноль в PostgreSQL — ошибка: `SELECT 1 / 0` падает с `division by zero`. Защищайте делитель через `NULLIF(b, 0)`.
+
+## Даты и интервалы
+
+- `date_trunc` возвращает метку времени, а не дату. Для колонки месяца — каст: `CAST(date_trunc('month', ts) AS DATE)`.
+- Нет `DATEADD`, `DATEDIFF` и `DATE_SUB`. Пишите `d + INTERVAL '30 days'`, а для целых дней — `date_b - date_a`. `DATEADD(day, 30, DATE '2026-09-01')` падает с `column "day" does not exist`: PostgreSQL читает `day` как имя колонки.
+- `generate_series` строит календарь, по строке на шаг:
+
+```sql
+SELECT CAST(d AS DATE) AS day
+FROM generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-03', INTERVAL '1 day') AS g(d);
+```
+
+| day |
+|---|
+| 2026-09-01 |
+| 2026-09-02 |
+| 2026-09-03 |
+
+Со строками без типа `generate_series('2026-09-01', '2026-09-03', INTERVAL '1 day')` тоже работает, но возвращает `timestamp with time zone`. С литералами `TIMESTAMP` он возвращает `timestamp without time zone` — тот же тип, что у колонок.
+
+## Возможности PostgreSQL
+
+Некоторые инструменты есть только в PostgreSQL или в немногих базах. Они делают запрос короче, а интервьюер может попросить переносимую форму.
+
+### DISTINCT ON
+
+`DISTINCT ON (ключ)` оставляет первую строку каждого ключа в порядке `ORDER BY`. `ORDER BY` должен начинаться с того же ключа. Последняя транзакция каждого продукта:
+
+```sql
+SELECT DISTINCT ON (product_id)
+       product_id, transaction_id, start_time
+FROM transactions
+WHERE NOT is_test
+ORDER BY product_id, start_time DESC
+LIMIT 3;
+```
+
+| product_id | transaction_id | start_time |
+|---|---|---|
+| prd_01 | t_000027 | 2026-09-28 06:30:16 |
+| prd_02 | t_001542 | 2026-09-24 20:07:27 |
+| prd_03 | t_004259 | 2026-09-25 13:07:30 |
+
+Переносимая форма — `ROW_NUMBER()` в CTE и `WHERE rn = 1` снаружи: см. [Лучший в группе](/sql-patterns/top-n-per-group/).
+
+### FILTER
+
+`COUNT(*) FILTER (WHERE …)` работает в PostgreSQL, DuckDB и SQLite. В других базах пишут `SUM(CASE WHEN … THEN 1 ELSE 0 END)`. См. [Условная агрегация](/sql/conditional-aggregation/).
+
+### ILIKE
+
+`LIKE` в PostgreSQL различает регистр. `ILIKE` его не различает. `name LIKE '%LABS%'` здесь ничего не находит, а `ILIKE` находит двух продавцов (merchants):
+
+```sql
+SELECT id, name
+FROM merchants
+WHERE name ILIKE '%LABS%';
+```
+
+| id | name |
+|---|---|
+| mer_02 | Lumen Labs |
+| mer_03 | Driftwood Labs |
+
+### string_agg
+
+`string_agg(x, ', ' ORDER BY x)` склеивает значения группы в одну строку, как `GROUP_CONCAT` в MySQL. Продукты продавцов, у которых их больше двух:
+
+```sql
+SELECT p.merchant_id, string_agg(p.id, ', ' ORDER BY p.id) AS products
+FROM products p
+GROUP BY p.merchant_id
+HAVING COUNT(*) > 2
+ORDER BY p.merchant_id;
+```
+
+| merchant_id | products |
+|---|---|
+| mer_02 | prd_02, prd_13, prd_16 |
+| mer_12 | prd_12, prd_15, prd_19 |
+
+## Из других баз в PostgreSQL
+
+| По памяти | Ошибка в PostgreSQL | Форма PostgreSQL |
+|---|---|---|
+| `channel = "web"` | `column "web" does not exist` | `channel = 'web'` |
+| `SELECT TOP 3 …` | `syntax error at or near "3"` | `… LIMIT 3` |
+| `DATEADD(day, 30, d)` | `column "day" does not exist` | `d + INTERVAL '30 days'` |
+| `IFNULL(x, y)`, `NVL(x, y)` | `function ifnull(…) does not exist` | `COALESCE(x, y)` |
+| `GROUP_CONCAT(name)` | `function group_concat(text) does not exist` | `string_agg(name, ', ')` |
+| `is_test = 1` | `operator does not exist: boolean = integer` | `is_test` или `NOT is_test` |
+| `ROUND(x::float8, 2)` | `function round(double precision, integer) does not exist` | `ROUND(x::numeric, 2)` |
+
+## Где DuckDB мягче
+
+Офлайн-папка с упражнениями этого сайта запускает те же задачи на DuckDB. DuckDB принимает почти весь синтаксис PostgreSQL, а заодно и некоторые запросы, которые PostgreSQL отвергает. Поэтому запрос, прошедший офлайн, может упасть на интервью:
+
+| Запрос | DuckDB | PostgreSQL |
+|---|---|---|
+| `ROUND(x::float8, 2)` | округляет | ошибка: нет `round(double precision, integer)` |
+| псевдоним из `SELECT` в `WHERE` или `HAVING` | работает | `column "…" does not exist` |
+| `is_test = 1` | работает | `operator does not exist: boolean = integer` |
+| `IFNULL(x, y)` | работает | функции нет |
+| `1 / 0` | по умолчанию `inf`; NULL с `integer_division` | `division by zero` |
+| `7 / 2` | по умолчанию 3.5 | 3 |
+
+Офлайн-папка переключает DuckDB на целочисленное деление (`SET integer_division = true`), поэтому `7 / 2` там тоже 3, а `1 / 0` даёт NULL вместо `inf`. Ни то ни другое не ошибка, так что деление без `NULLIF` офлайн проходит. Остальные различия остаются. Некоторые ошибки падают в обоих движках: двойные кавычки вокруг строки, дата в кавычках минус интервал и колонка, которой нет в `GROUP BY`. Если запрос прошёл офлайн, запустите его ещё раз здесь, на PostgreSQL.
+
+<Aside type="note" title="На интервью">
+Один вопрос в первые две минуты избавляет от нескольких ошибок потом: «Can I run code here, and can I use the docs?» Если код запускать можно, `SELECT version();` покажет базу и её версию; если нельзя, спросите: «Is this PostgreSQL?» От ответа зависят кавычки, `ROUND` и функции дат.
+
+Когда пишете то, что нужно только PostgreSQL, коротко называйте причину: «This is PostgreSQL, so I cast to numeric before ROUND. ROUND with decimal places only takes numeric here.» То же с `DISTINCT ON`: назовите его и предложите форму с `ROW_NUMBER()`, если команда работает с другой базой.
+</Aside>
+
+## Что почитать
+
+- [Identifiers](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-IDENTIFIERS) и [string constants](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-STRINGS) — двойные кавычки для имён, одинарные для строк.
+- [Type casts](https://www.postgresql.org/docs/current/sql-expressions.html#SQL-SYNTAX-TYPE-CASTS) — `CAST` и `::`.
+- [DISTINCT clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-DISTINCT) — `DISTINCT ON` и его правило для `ORDER BY`.
+- [`ILIKE`](https://www.postgresql.org/docs/current/functions-matching.html#FUNCTIONS-LIKE), [`generate_series`](https://www.postgresql.org/docs/current/functions-srf.html#FUNCTIONS-SRF-SERIES) и [`string_agg`](https://www.postgresql.org/docs/current/functions-aggregate.html) — возможности с этой страницы.
+- [PostgreSQL compatibility](https://duckdb.org/docs/current/sql/dialect/postgresql_compatibility.html) — список различий от самого DuckDB.
+
+## Связанные темы
+
+- [Фильтры и даты](/sql/filters-and-dates/) — типизированные литералы, интервалы и `date_trunc`.
+- [Условная агрегация](/sql/conditional-aggregation/) — `FILTER`, целочисленное деление и `NULLIF`.
+- [Лучший в группе](/sql-patterns/top-n-per-group/) — переносимая форма `DISTINCT ON`.
+- [Календари и активные периоды](/sql-patterns/calendars-and-active-periods/) — `generate_series` с `LEFT JOIN`.
+- [Шпаргалка SQL](/reference/sql-cheatsheet/) — синтаксис на одной странице.

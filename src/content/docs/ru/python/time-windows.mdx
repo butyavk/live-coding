@@ -1,0 +1,236 @@
+---
+title: Окна по времени
+description: "Скользящее окно на collections.deque: старое выкидывать слева, отказ не записывать, амортизированное O(1) и цена фиксированного окна и token bucket."
+sidebar:
+  order: 11
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Ограничитель частоты (rate limiter) и «сколько событий за последние N секунд» — классические задачи на Python. Окно движется во времени: новые метки входят справа, старые уходят слева. Это очередь, а очередь в Python — `collections.deque`. Без неё код либо перебирает всю историю на каждом вызове, либо забывает выкидывать старое и растёт без предела.
+
+<Aside type="tip" title="Коротко">
+- Храните времена **принятых** запросов в `deque`. На каждом вызове выкидывайте слева, пока `times[0] <= now - window`.
+- Потом, если `len(times) < limit`, добавьте `now` и пропустите. Иначе откажите и **не** записывайте отказ.
+- Каждая метка входит один раз и выходит один раз: амортизированно O(1) на вызов и не больше `limit` меток на ключ.
+- Передавайте `now` (или часы) параметром, тогда тесты двигают время без `sleep`.
+- До кода спросите: скользящее окно или фиксированное? Входит ли в окно запрос ровно `window` секунд назад? Считаются ли отказы?
+</Aside>
+
+## Окно как очередь
+
+`deque` дёшев с обоих концов. `append` добавляет справа, `popleft` убирает слева, оба за O(1):
+
+```python
+from collections import deque
+
+q = deque([0, 1, 5])
+q.append(10)
+print(q.popleft(), q)
+
+last3 = deque(maxlen=3)
+for t in [0, 1, 5, 10]:
+    last3.append(t)
+print(last3)
+```
+
+```text
+0 deque([1, 5, 10])
+deque([1, 5, 10], maxlen=3)
+```
+
+`maxlen` хранит последние N элементов по количеству, а не по времени, поэтому сам по себе окном по времени не является. `list` тоже сработал бы, но `list.pop(0)` сдвигает все элементы влево. На 100 000 элементов:
+
+```python
+import timeit
+
+n = 100_000
+print(timeit.timeit("while q: q.pop(0)", setup=f"q = list(range({n}))", number=1))
+print(timeit.timeit("while q: q.popleft()", setup=f"from collections import deque; q = deque(range({n}))", number=1))
+```
+
+```text
+0.8637160459998086
+0.0017750160000105097
+```
+
+Суть скользящего окна — две строки:
+
+```python
+while self.times and self.times[0] <= now - self.window:
+    self.times.popleft()                  # O(1); у list.pop(0) было бы O(n)
+```
+
+После цикла в deque остаются только запросы внутри окна, и его длину сравнивают с лимитом. Лимит 2 запроса за 10 секунд, запросы в моменты 0, 1, 5, 10, 11 и 12:
+
+| now | выкинуто слева | deque после вызова | пропущен |
+|---|---|---|---|
+| 0 | — | [0] | True |
+| 1 | — | [0, 1] | True |
+| 5 | — | [0, 1] | False |
+| 10 | 0 | [1, 10] | True |
+| 11 | 1 | [10, 11] | True |
+| 12 | — | [10, 11] | False |
+
+В момент 10 запрос из момента 0 уже вне окна, потому что `0 <= 10 - 10`. Значит, место снова есть.
+
+## Граница: `<=` или `<`
+
+Сравнение решает, считается ли запрос, сделанный ровно `window` секунд назад. С `<=` окно — `(now - window, now]`. С `<` — `[now - window, now]`, и на том же входе ответ другой:
+
+| Условие | Результат для 0, 1, 5, 10, 11, 12 |
+|---|---|
+| `times[0] <= now - window` | True, True, False, True, True, False |
+| `times[0] < now - window` | True, True, False, False, True, True |
+
+Ни одно не ошибочно. Это решение продукта, поэтому спросите: *"Is a request exactly window seconds ago still inside the window?"* Потом запишите ответ комментарием и протестируйте ровно этот случай.
+
+## Отказ не записывать
+
+Если отклонённые запросы попадают в deque, клиент, который продолжает звонить, никогда не выйдет из блокировки. Здесь клиент делает запрос раз в секунду 30 секунд подряд, лимит — 2 за 10 секунд:
+
+```python
+from collections import deque
+
+
+class RateLimiter:
+    def __init__(self, limit, window, record_rejects=False):
+        self.limit, self.window = limit, window
+        self.record_rejects = record_rejects
+        self.times = deque()
+
+    def allow(self, now):
+        while self.times and self.times[0] <= now - self.window:
+            self.times.popleft()
+        ok = len(self.times) < self.limit
+        if ok or self.record_rejects:
+            self.times.append(now)
+        return ok
+
+
+for record in (False, True):
+    rl = RateLimiter(2, 10, record_rejects=record)
+    allowed = [t for t in range(30) if rl.allow(t)]
+    print(f"record_rejects={record}: allowed at {allowed}, deque holds {len(rl.times)}")
+```
+
+```text
+record_rejects=False: allowed at [0, 1, 10, 11, 20, 21], deque holds 2
+record_rejects=True: allowed at [0, 1], deque holds 10
+```
+
+Если записывать отказы, окно всегда заполнено неудачными попытками самого клиента. К тому же deque растёт с каждым вызовом, а не держится на уровне `limit`.
+
+## Сколько это стоит
+
+- **Время: амортизированно O(1) на вызов.** Один вызов может выкинуть много старых меток, например после долгой паузы. Но каждая метка добавляется один раз и удаляется не больше одного раза, поэтому n вызовов делают в сумме не больше n удалений.
+- **Память: не больше `limit` меток на ключ.** Хранятся только принятые запросы, а в окне их не бывает больше `limit`.
+- **Много ключей.** Лимит на продавца или на покупателя — это `defaultdict(deque)`. Память тогда растёт с числом ключей. Удаляйте ключ, когда его deque опустел, или время от времени чистите неактивные ключи.
+
+## Время — параметром
+
+`allow(now)` получает время от вызывающего, а не вызывает `time.time()` внутри. Тест передаёт обычные числа и выполняется мгновенно. В продакшене вызывающий передаёт `time.monotonic()`: системные часы могут прыгнуть назад при коррекции, монотонные — нет. Класс, который принимает функцию `clock`, делает то же самое (см. [Классы и состояние](/python/classes-and-state/)).
+
+Ещё два вопроса из продакшена задают часто:
+
+- **Потоки.** Два потока могут оба увидеть `len(times) < limit` и оба добавить метку. Оберните тело `allow` в `threading.Lock`. Про потоки — на странице [Python и SQL](/python/python-and-sql/).
+- **Несколько серверов.** У каждого процесса свой deque, поэтому настоящий лимит становится `limit`, умноженным на число серверов. Счётчик должен жить в общем хранилище, например в Redis с атомарной операцией.
+
+## Альтернативы и их цена
+
+**Фиксированное окно** (fixed window) считает запросы в окне по часам: секунды 0–9, 10–19 и так далее. Один счётчик на окно, очень дёшево:
+
+```python
+from collections import defaultdict
+
+
+class FixedWindow:
+    def __init__(self, limit, window):
+        self.limit, self.window = limit, window
+        self.counts = defaultdict(int)        # номер окна -> число запросов
+
+    def allow(self, now):
+        bucket = now // self.window           # 0 для 0..9, 1 для 10..19
+        if self.counts[bucket] >= self.limit:
+            return False
+        self.counts[bucket] += 1
+        return True
+
+
+fw = FixedWindow(limit=3, window=10)
+print([fw.allow(t) for t in [9, 9, 9, 10, 10, 10]])
+```
+
+```text
+[True, True, True, True, True, True]
+```
+
+Лимит — 3 за 10 секунд, но за одну секунду на стыке двух окон проходит 6 запросов. Скользящее окно отклонило бы последние три.
+
+**Token bucket** («ведро жетонов») держит до `capacity` жетонов и пополняется со скоростью `rate` жетонов в секунду. Каждый запрос забирает один жетон:
+
+```python
+class TokenBucket:
+    def __init__(self, capacity, rate):
+        self.capacity = capacity              # самый большой всплеск
+        self.rate = rate                      # жетонов в секунду
+        self.tokens = capacity
+        self.last = None
+
+    def allow(self, now):
+        if self.last is not None:
+            self.tokens = min(self.capacity, self.tokens + (now - self.last) * self.rate)
+        self.last = now
+        if self.tokens >= 1:
+            self.tokens -= 1
+            return True
+        return False
+
+
+tb = TokenBucket(capacity=2, rate=0.2)        # в среднем 2 запроса за 10 с
+print([tb.allow(t) for t in [0, 1, 5, 10, 11, 12]])
+```
+
+```text
+[True, True, True, True, False, False]
+```
+
+На том же входе, что и у скользящего окна, ведро пропускает 0, 1 и 5 — три запроса за десять секунд. Оно ограничивает среднюю скорость, а не каждое окно.
+
+| Подход | Состояние на ключ | Точность | Слабое место |
+|---|---|---|---|
+| Скользящее окно (deque времён) | до `limit` меток | точно для любого окна | память растёт с `limit` |
+| Фиксированное окно | один счётчик на окно | грубо | до 2 × `limit` на стыке двух окон |
+| Token bucket | два числа: жетоны и последнее время | ограничивает среднюю скорость | пропускает всплеск до `capacity` |
+
+Промежуточный вариант — скользящий счётчик (sliding window counter): к текущему фиксированному окну добавляется взвешенная доля предыдущего. Он требует двух счётчиков на ключ и даёт приближённый ответ.
+
+## Практика
+
+<Drill id="y-limiter">
+
+Окно по времени — deque времён: слева выкидываем всё, что не позже `now - window`, потом сравниваем длину с лимитом. Каждая запись входит и выходит один раз — O(1) в среднем (амортизированно). Отказ не записываем. Третья проверка, `[8, 9, 10, 18]`, ловит два решения, которые проходят остальные проверки: фиксированное окно пропускает 10, потому что там начинается новое окно, а ограничитель, который записал отказанный запрос в 10, потом отказывает и в 18. На вопрос про потоки — `threading.Lock` вокруг `allow`; между серверами — общий счётчик в Redis.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Сам ограничитель — строк десять; больше времени уходит на вопросы после него. Сначала договоритесь о границе: *"Does a request exactly window seconds old still count?"* Потом держите наготове короткие ответы:
+
+- *"What if the limit is 10,000 per minute?"* — "The deque then holds up to 10,000 times per key. A token bucket keeps two numbers instead, if limiting the average rate is enough."
+- *"What about several servers?"* — "Each process has its own deque, so the counter has to move to shared storage, like Redis."
+- *"And threads?"* — "A lock around the whole allow call, not around single lines."
+</Aside>
+
+## Что почитать
+
+- [collections.deque](https://docs.python.org/3/library/collections.html#collections.deque) — методы, `maxlen` и какие операции стоят O(1).
+- [time.monotonic](https://docs.python.org/3/library/time.html#time.monotonic) — часы, которые никогда не идут назад.
+- [Lock objects](https://docs.python.org/3/library/threading.html#lock-objects) — `threading.Lock` и `with lock:`.
+- [collections.defaultdict](https://docs.python.org/3/library/collections.html#collections.defaultdict) — свой deque на каждый ключ без `if key not in`.
+
+## Связанные темы
+
+- [Классы и состояние](/python/classes-and-state/) — небольшой класс с состоянием и часами снаружи: форма любого ограничителя.
+- [Кэш и лимиты](/python-tasks/caching-and-rate-limits/) — скользящее окно на каждый ключ как полная задача.
+- [Python и SQL](/python/python-and-sql/) — потоки, GIL и когда нужна блокировка.
+- [Тесты и сложность](/python/testing-and-complexity/) — таблица стоимости операций и какие граничные случаи тестировать.

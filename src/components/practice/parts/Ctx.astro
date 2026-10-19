@@ -1,0 +1,36 @@
+---
+// "Tables, columns and how they connect" for a SQL drill or trap: the tables the query reads,
+// the columns it touches with their meaning, three sample rows and the join conditions.
+import type { Ctx, Locale } from '../lib/data';
+import { columnAbout, tableAbout } from '../lib/data';
+import { strings } from '../lib/i18n';
+import ResultTable from './ResultTable.astro';
+
+interface Props {
+  ctx: Ctx;
+  locale: Locale;
+  open?: boolean;
+}
+const { ctx, locale, open = false } = Astro.props;
+const T = strings(locale);
+---
+{ctx.tables.length > 0 && (
+  <details class="lcp-ctx not-content" open={open}>
+    <summary>{T.tables}</summary>
+    <div class="lcp-ctx-body">
+      {ctx.tables.map((t) => (
+        <div class="lcp-ctx-table">
+          <p class="lcp-ctx-name"><code>{t.name}</code> <span>— {tableAbout(t.name, locale)}</span></p>
+          <ul class="lcp-ctx-cols">
+            {t.cols.map((c) => <li><code>{c}</code> — {columnAbout(t.name, c, locale)}</li>)}
+          </ul>
+          {t.sample && t.sample.rows.length > 0 && <ResultTable cols={t.sample.cols} rows={t.sample.rows} />}
+        </div>
+      ))}
+      {ctx.links.length > 0 && (
+        <p class="lcp-small"><strong>{T.links}</strong> {ctx.links.map((l, i) => <>{i > 0 && '; '}<code>{l}</code></>)}</p>
+      )}
+      <p class="lcp-small lcp-muted">{T.today}</p>
+    </div>
+  </details>
+)}

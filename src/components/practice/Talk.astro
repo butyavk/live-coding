@@ -1,0 +1,29 @@
+---
+// A question to answer out loud, without code. The answer (children) opens on request and is
+// left out of the site search (data-pagefind-ignore).
+//   <Talk q="What does a transaction give you?">"All or nothing: …" A note.</Talk>
+import { inline, localeOf } from './lib/data';
+import { strings } from './lib/i18n';
+import './practice.css';
+
+interface Props {
+  /** The interviewer's question, in English. */
+  q: string;
+}
+const { q } = Astro.props;
+const T = strings(localeOf(Astro));
+---
+<section class="lcp lcp-talk">
+  <header class="lcp-head not-content">
+    <span class="lcp-badge lcp-badge-talk">{T.talkBadge}</span>
+    <span class="lcp-kind">{T.talk}</span>
+  </header>
+  <p class="lcp-q" lang="en" set:html={inline(q)} />
+  <p class="lcp-small lcp-muted not-content">{T.talkFirst}</p>
+  <details class="lcp-answer">
+    <summary class="not-content">{T.showTalk}</summary>
+    <div class="lcp-answer-body lcp-explain" data-pagefind-ignore>
+      <slot />
+    </div>
+  </details>
+</section>

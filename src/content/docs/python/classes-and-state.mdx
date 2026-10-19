@@ -1,0 +1,253 @@
+---
+title: Classes and state
+description: A small class with state, @dataclass and frozen=True, the clock passed in instead of time.time(), the mutable default argument trap, and is versus ==.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Caches, rate limiters, webhook processors and ledgers all remember something between calls. In an interview they become a small class: an `__init__` and two or three methods. The interviewer looks at where the state lives, whether a test can control time, and two classic Python traps: a mutable default argument and `is` used instead of `==`.
+
+<Aside type="tip" title="TL;DR">
+- A class when there is state between calls; a function when there is none. Set every attribute in `__init__`.
+- `@dataclass` for records: `__init__`, `__repr__` and `__eq__` for free. `frozen=True` for values that must not change; they can also be set members and dict keys.
+- Pass the clock in: `def __init__(self, ttl, clock=time.monotonic)`. A test passes `lambda: now[0]` and moves time itself.
+- Never a mutable default (`items=[]`, `seen=set()`): use `None` and create the object inside. In a dataclass, `field(default_factory=list)`.
+- `==` compares values, `is` checks that it is the same object. Use `is` only for `None`.
+</Aside>
+
+## A small class with state
+
+If a function needs nothing from earlier calls, keep it a function. When it must remember something, such as the ids already seen or the balance so far, a class keeps that state in one place:
+
+```python
+from collections import defaultdict
+from decimal import Decimal
+
+class Ledger:
+    """What each merchant owes: an advance and its fee add to the balance, a repayment subtracts."""
+
+    def __init__(self):
+        self.entries = []                      # every posting, in order
+        self.balances = defaultdict(Decimal)   # merchant_id -> balance
+
+    def post(self, merchant_id, amount):
+        if not isinstance(amount, Decimal):
+            raise TypeError(f"amount must be a Decimal, got {type(amount).__name__}")
+        self.entries.append((merchant_id, amount))
+        self.balances[merchant_id] += amount
+
+    def balance(self, merchant_id):
+        return self.balances.get(merchant_id, Decimal("0"))
+
+ledger = Ledger()
+ledger.post("mer_01", Decimal("96.34"))      # advance
+ledger.post("mer_01", Decimal("2.89"))       # fee: 3% of the advance
+ledger.post("mer_01", Decimal("-50.00"))     # repayment
+print(ledger.balance("mer_01"), ledger.balance("mer_02"), len(ledger.entries))   # 49.23 0 3
+ledger.post("mer_01", 10.5)                  # TypeError: amount must be a Decimal, got float
+```
+
+Three habits make such a class easy to read:
+
+- **All state is created in `__init__`.** A reader sees in one place what the object remembers. An attribute that first appears in some method is a surprise.
+- **Methods check their input.** Bad input fails at the door with a clear message, instead of a wrong balance later.
+- **Reads do not change state.** `balance()` uses `.get()`, so asking about `mer_02` does not create an entry for it.
+
+## @dataclass for records
+
+A row of data, such as a payout or an event, needs no hand-written methods. `@dataclass` generates `__init__`, `__repr__` and `__eq__` from the fields:
+
+```python
+from dataclasses import FrozenInstanceError, dataclass, field, replace
+from decimal import Decimal
+
+@dataclass(frozen=True)
+class Payout:
+    payout_id: str
+    merchant_id: str
+    amount: Decimal
+
+p = Payout("po_1", "mer_01", Decimal("69.64"))
+print(p)                                                # Payout(payout_id='po_1', merchant_id='mer_01', amount=Decimal('69.64'))
+print(p == Payout("po_1", "mer_01", Decimal("69.64")))  # True -- __eq__ compares the fields
+print(len({p, Payout("po_1", "mer_01", Decimal("69.64"))}))   # 1 -- frozen, so hashable
+print(replace(p, amount=Decimal("70.00")))              # a changed copy, p stays as it was
+try:
+    p.amount = Decimal("0")
+except FrozenInstanceError as e:
+    print("FrozenInstanceError:", e)                    # FrozenInstanceError: cannot assign to field 'amount'
+
+@dataclass
+class Batch:
+    batch_id: str
+    payouts: list = field(default_factory=list)          # a new list for every Batch
+
+a, b = Batch("b1"), Batch("b2")
+a.payouts.append(p)
+print(len(a.payouts), len(b.payouts))                   # 1 0
+```
+
+`frozen=True` makes assignment to a field fail, so a payout cannot change after it is created. A frozen dataclass is also hashable, so it can go into a set or be a dict key. A normal dataclass cannot: `{Batch("b1")}` fails with a `TypeError` that says `unhashable type: 'Batch'`. To change a frozen value, make a copy with `dataclasses.replace`.
+
+A dataclass refuses a mutable default directly: `payouts: list = []` raises `ValueError: mutable default <class 'list'> for field payouts is not allowed: use default_factory`. `field(default_factory=list)` calls `list()` for every new object.
+
+## Pass the clock in
+
+Code that calls `time.time()` or `datetime.now()` inside a method is hard to test: the test must sleep to see an entry expire. Pass the clock in as a parameter instead. In production it is the real clock; in a test it is a value the test controls:
+
+```python
+import time
+
+class IdleTimer:
+    """A session that expires after `timeout` seconds without activity."""
+
+    def __init__(self, timeout, clock=time.monotonic):
+        self.timeout = timeout
+        self.clock = clock                 # a function that returns seconds
+        self.last_seen = clock()
+
+    def touch(self):
+        self.last_seen = self.clock()
+
+    def expired(self):
+        return self.clock() - self.last_seen >= self.timeout
+
+now = [0]                                  # a fake clock the test controls
+timer = IdleTimer(30, clock=lambda: now[0])
+now[0] = 29; print(timer.expired())        # False
+timer.touch()                              # activity at 29
+now[0] = 58; print(timer.expired())        # False -- 29 seconds since the last activity
+now[0] = 59; print(timer.expired())        # True -- exactly 30: expired
+```
+
+The test checks the boundary exactly (29 seconds, then 30) and takes no time at all. `now` is a list so that the lambda reads the current value; a plain number would be copied once. For durations the default is `time.monotonic`, not `time.time`: the wall clock can jump back when the system adjusts it, the monotonic clock never does.
+
+Note `clock=time.monotonic`, without parentheses: the default is the function, called later. With parentheses, the default would be one number, computed once when `def` runs. The same mistake with a date:
+
+```python
+from datetime import datetime, timezone
+
+def stamp(event, at=datetime.now(timezone.utc)):   # evaluated once, when def runs
+    return (event, at)
+
+first = stamp("a")
+time.sleep(0.01)
+second = stamp("b")
+print(first[1] == second[1])                       # True -- both calls got the same "now"
+```
+
+## The mutable default argument
+
+A default value is created once, when the function is defined, and every call that uses it shares that one object. For a list, a set or a dict, this means the calls share state:
+
+```python
+def add(item, items=[]):          # one list, created when def runs
+    items.append(item)
+    return items
+
+print(add("a"))                   # ['a']
+print(add("b"))                   # ['a', 'b'] -- the first call's item is still there
+
+def add_fixed(item, items=None):
+    if items is None:
+        items = []                # a new list on every call
+    items.append(item)
+    return items
+
+print(add_fixed("a"), add_fixed("b"))   # ['a'] ['b']
+
+class Deduper:
+    def __init__(self, seen=set()):     # the same trap in __init__
+        self.seen = seen
+
+    def first_time(self, event_id):
+        if event_id in self.seen:
+            return False
+        self.seen.add(event_id)
+        return True
+
+x, y = Deduper(), Deduper()
+print(x.first_time("evt_1"), y.first_time("evt_1"))   # True False -- y shares x's set
+```
+
+In `Deduper` the bug hides well: each instance looks separate, but all of them use one set. The first test passes; a test with a second instance fails, or worse, passes for the wrong reason. Both tasks on [Debugging](/python-tasks/debugging/) contain this bug in some form.
+
+<Talk q="What is wrong with `def add(item, items=[])`?">
+
+"The default list is created once, when the function is defined, and it is shared between calls. The second call sees the items from the first one. Use `items=None` and create the list inside."
+
+In a dataclass the same mistake does not even run: it asks for `field(default_factory=list)`.
+
+</Talk>
+
+## `is` and `==`
+
+```python
+from decimal import Decimal
+
+a = [1, 2]
+b = [1, 2]
+print(a == b, a is b)                        # True False -- equal values, two objects
+
+x = 1000
+y = int("1000")
+print(x == y, x is y)                        # True False -- `is` on numbers is luck, not logic
+print(Decimal("1.0") == Decimal("1.00"))     # True
+
+payout = Decimal("0")
+print(not payout, payout is None)            # True False -- zero is falsy, but it is not missing
+```
+
+`==` asks "are the values equal?", and each type defines what that means. `is` asks "is it the same object in memory?". Small integers and short strings are sometimes the same object, so `is` can seem to work on them, and then fail on other values. `None` is a single object, so `x is None` is the correct check, and it cannot be changed by a class that overrides `==`.
+
+The last line is a related money bug. `if not payout:` treats `Decimal("0")` as "no payout", because zero is falsy. When you mean "missing", write `if payout is None:`.
+
+<Talk q="`is` or `==`?">
+
+"`==` compares values, `is` checks that it is the same object. I use `is` only for None: `if x is None`."
+
+`if not x` is a third, different check: it is true for `None`, but also for `0`, `Decimal("0")` and an empty list.
+
+</Talk>
+
+## Practice
+
+<Drill id="y-ttl">
+
+The time comes from outside (`clock`), so the tests do not wait. An entry lives while `now - stored_at < ttl`: exactly at the boundary it has already expired, as the second check shows. A second `set` of the same key replaces the value and restarts its time. In the last check the fee set at 20 and again at 28 is still there at 32, and gone at 38. `setdefault` in `set` would keep the old value and the old time. An expired entry is removed when it is read. The follow-up "what if many threads use it?" is answered with a `threading.Lock` around the read, the check and the write.
+
+</Drill>
+
+<Drill id="y-state">
+
+An `Enum` gives the statuses a fixed set of names. A typo such as `Status.ACTVE` fails at once with `AttributeError`; a typo in a plain string just never matches. `Status('active')` looks a member up by its value and raises `ValueError` for an unknown one, so `'paused'` needs no extra code, and `Status(Status.ACTIVE)` returns the member itself. The rules are data: a dict from each status to the set of statuses it may move to, with an empty set for the final one. Check before you assign: the last check tries to go back from active to trial and expects the status to stay active. Keep the member, not its string: the third check compares the result with `Status.REFUNDED`, and `'refunded'` is not equal to it.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Before you type `class`, describe the object in two sentences: what it remembers, and where time comes from. For the cache: *"It keeps a dict from key to value and the time it was stored. The clock is a parameter, so a test moves time itself."* Then ask the boundary question: *"Is an entry exactly ttl seconds old still valid?"*
+
+When you read code someone else wrote, look at the signatures first and say what you see: *"This default set is created once and shared by every instance. I'll use None and create the set in __init__."*
+</Aside>
+
+## Further reading
+
+- [Classes: a first look](https://docs.python.org/3/tutorial/classes.html#a-first-look-at-classes) — `__init__`, instance attributes and methods.
+- [dataclasses](https://docs.python.org/3/library/dataclasses.html) — `@dataclass`, `field`, [frozen instances](https://docs.python.org/3/library/dataclasses.html#frozen-instances) and [mutable default values](https://docs.python.org/3/library/dataclasses.html#mutable-default-values).
+- [time.monotonic](https://docs.python.org/3/library/time.html#time.monotonic) — a clock that cannot go backwards.
+- [Default argument values](https://docs.python.org/3/tutorial/controlflow.html#default-argument-values) — the warning that a default is evaluated only once.
+- [Why are default values shared between objects?](https://docs.python.org/3/faq/programming.html#why-are-default-values-shared-between-objects) — the FAQ answer, with the `None` pattern.
+- [Identity comparisons](https://docs.python.org/3/reference/expressions.html#is-not) — what `is` and `is not` check.
+- [enum](https://docs.python.org/3/library/enum.html) — `Enum` members and the lookup by value, `Status('active')`.
+
+## Related topics
+
+- [dict, defaultdict and Counter](/python/dicts-and-counting/) — the state inside a class is often a dict.
+- [Decorators](/python/decorators/) — a closure or a function attribute also keeps state between calls.
+- [Time windows](/python/time-windows/) — a rate limiter: a class with a `deque` and the time passed in.
+- [Testing and complexity](/python/testing-and-complexity/) — injected time and randomness in tests.
+- [Caching and rate limits](/python-tasks/caching-and-rate-limits/) — a TTL cache and a rate limiter as full tasks.
+- [Debugging](/python-tasks/debugging/) — two modules broken by a shared default, among other bugs.

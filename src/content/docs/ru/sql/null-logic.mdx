@@ -1,0 +1,209 @@
+---
+title: Логика NULL
+description: NULL в запросах на интервью. Трёхзначная логика, IS NULL и IS DISTINCT FROM, NOT IN с NULL, пустые суммы, COALESCE и один тип на все ветки.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+NULL означает «нет значения» или «неизвестно». Сравнение с NULL не истинно и не ложно, а `WHERE` оставляет только строки, где условие истинно. Большинство ошибок с NULL тихо убирает строки: список приходит пустым, сумма равна NULL вместо 0, фильтр теряет строки.
+
+<Aside type="tip" title="Коротко">
+- `x = NULL` никогда не истинно. Проверка — `IS NULL` и `IS NOT NULL`.
+- «Отличается, и NULL — обычное значение»: `IS DISTINCT FROM`.
+- `NOT IN` с NULL в списке не возвращает ни одной строки. Берите `NOT EXISTS`.
+- `SUM`, `AVG`, `MIN` и `MAX` по пустому набору — NULL: `COALESCE(SUM(x), 0)`.
+- `COALESCE` и `CASE` возвращают один тип: приведите значение к тексту, прежде чем смешивать его с подписью.
+</Aside>
+
+## Три значения: истина, ложь и неизвестно
+
+В логике SQL есть третье значение — NULL, «неизвестно». Любое сравнение с NULL даёт NULL, даже `NULL = NULL`.
+
+<Trap id="null-eq" q="Что вернут три сравнения?">
+
+`eq` и `ne` — NULL, `is_null` — true. Любое сравнение с NULL даёт NULL («неизвестно»), а `WHERE` пропускает только TRUE. Проверка — `IS NULL` / `IS NOT NULL`; «не равно с учётом NULL» — `IS DISTINCT FROM`.
+
+</Trap>
+
+`AND` и `OR` обращаются с «неизвестно» по здравому смыслу. Если известная часть уже решает ответ, результат известен:
+
+```sql
+SELECT TRUE AND NULL     AS true_and_null,
+       FALSE AND NULL    AS false_and_null,
+       TRUE OR NULL      AS true_or_null,
+       FALSE OR NULL     AS false_or_null,
+       NOT NULL::boolean AS not_null;
+```
+
+| true_and_null | false_and_null | true_or_null | false_or_null | not_null |
+|---|---|---|---|---|
+| NULL | false | true | NULL | NULL |
+
+`FALSE AND неизвестно` — ложь, что бы ни скрывалось за неизвестным. `TRUE OR неизвестно` — истина. Остальные сочетания остаются неизвестными.
+
+`WHERE` оставляет строку, только когда условие TRUE. Условие NULL выбрасывает строку — и его отрицание тоже:
+
+```sql
+SELECT COUNT(*)                                                         AS all_rows,
+       COUNT(*) FILTER (WHERE refunded_at >= TIMESTAMP '2026-09-01')       AS refunded_in_sep,
+       COUNT(*) FILTER (WHERE NOT (refunded_at >= TIMESTAMP '2026-09-01')) AS not_refunded_in_sep
+FROM transactions;
+```
+
+| all_rows | refunded_in_sep | not_refunded_in_sep |
+|---|---|---|
+| 8294 | 13 | 175 |
+
+13 + 175 = 188 — это число строк с возвратом. 8106 строк без возврата не попали ни в одну колонку: для них и условие, и его отрицание — NULL. Если «без возврата в сентябре» должно их включать, напишите это явно: `refunded_at IS NULL OR refunded_at < TIMESTAMP '2026-09-01'`.
+
+## IS NULL и IS DISTINCT FROM
+
+`IS NULL` и `IS NOT NULL` — проверки, которые всегда отвечают true или false. В учебных данных `refunded_at IS NOT NULL` значит «был возврат», а `advances_enrolled_at IS NULL` — «не подключён к программе авансов».
+
+У `<>` та же проблема, что у `=`. «Все продавцы (merchants), которые подключились не 25 июня», записанное через `<>`, теряет тех, кто не подключался вовсе. `IS DISTINCT FROM` считает NULL обычным значением:
+
+```sql
+SELECT COUNT(*) FILTER (WHERE advances_enrolled_at <> TIMESTAMP '2026-06-25')               AS with_ne,
+       COUNT(*) FILTER (WHERE advances_enrolled_at IS DISTINCT FROM TIMESTAMP '2026-06-25') AS with_distinct
+FROM merchants;
+```
+
+| with_ne | with_distinct |
+|---|---|
+| 4 | 10 |
+
+Двое из 12 продавцов подключились 25 июня. Десять — нет: четверо подключились в другой день, шестеро не подключались вовсе. `<>` видит только четверых.
+
+## NOT IN и NULL
+
+`x NOT IN (a, b)` означает `x <> a AND x <> b`. Если в списке есть NULL, одна из частей — NULL, и всё условие никогда не станет истинным.
+
+<Trap id="not-in-null" q="Вернёт ли запрос строку?">
+
+Ноль строк. `1 NOT IN (2, NULL)` раскрывается в `1 <> 2 AND 1 <> NULL`, то есть `TRUE AND NULL`, а это NULL. Один NULL в списке или подзапросе `NOT IN` — и результат пустой. Для «нет в списке» берите `NOT EXISTS`.
+
+</Trap>
+
+В подзапросе NULL приходит из данных. Достаточно одного NULL в `advances.merchant_id`:
+
+```sql
+SELECT COUNT(*) AS never_advanced
+FROM merchants
+WHERE id NOT IN (SELECT merchant_id FROM advances
+                 UNION ALL
+                 SELECT NULL);
+```
+
+| never_advanced |
+|---|
+| 0 |
+
+Без двух последних строк ответ — 6. У `NOT EXISTS` и `LEFT JOIN … IS NULL` такой проблемы нет: см. [Подзапросы и CTE](/sql/subqueries-and-cte/).
+
+## Агрегаты пропускают NULL, а пустой набор даёт NULL
+
+Агрегатные функции игнорируют значения NULL. Исключение — `COUNT(*)`: он считает строки.
+
+```sql
+SELECT SUM(x)   AS sum_x,
+       AVG(x)   AS avg_x,
+       COUNT(x) AS count_x,
+       COUNT(*) AS count_star
+FROM (VALUES (10), (NULL), (20)) AS v(x);
+```
+
+| sum_x | avg_x | count_x | count_star |
+|---|---|---|---|
+| 30 | 15.0000000000000000 | 2 | 3 |
+
+Среднее — 15, а не 10: строка с NULL не входит в знаменатель. [Условная агрегация](/sql/conditional-aggregation/) пользуется этим намеренно. Ошибкой это становится, только если вы этого не ждёте.
+
+Второе правило: агрегат по пустому набору возвращает NULL. `SUM` от ничего — NULL, а не 0. `COUNT` снова исключение и возвращает 0.
+
+<Trap id="sum-empty" q="У mer_02 нет ни одного аванса. Что вернёт SUM?">
+
+NULL, а не 0: сумма пустого набора — NULL. Для денег и после `LEFT JOIN` пишите `COALESCE(SUM(…), 0)`.
+
+</Trap>
+
+<Trap id="filter-empty" q="Сумма возвратов по каналам продаж. Что будет в строке promo?">
+
+NULL. Возвратов у промо-доступа нет, а `SUM` по пустому набору — NULL. `COUNT(*) FILTER` вернул бы 0. Для денег — `COALESCE(SUM(x) FILTER (WHERE …), 0)`.
+
+</Trap>
+
+Тот же NULL появляется после `LEFT JOIN` у каждой строки без пары: см. [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+
+## COALESCE: первое значение не NULL
+
+`COALESCE(a, b, c)` возвращает первый аргумент, который не NULL. Типичные применения: 0 для пустой суммы, подпись для отсутствующего значения, запасная колонка вроде `COALESCE(refunded_at, end_time)`.
+
+`NULLIF(a, b)` делает обратное: возвращает NULL, когда `a = b`. Главное применение — безопасное деление. `x / NULLIF(n, 0)` даёт NULL вместо ошибки, когда `n` равно 0.
+
+### Один тип на все ветки
+
+`COALESCE` и `CASE` возвращают одно значение одного типа. PostgreSQL выбирает тип по веткам. Если одна ветка — `timestamp`, текстовую подпись он тоже пытается прочитать как метку времени:
+
+```sql
+SELECT id, COALESCE(advances_enrolled_at, 'not enrolled') AS enrolled
+FROM merchants;
+```
+
+```text
+ERROR: invalid input syntax for type timestamp: "not enrolled"
+```
+
+`CASE` ведёт себя так же. `CASE WHEN is_test THEN 'test purchase' ELSE revenue_usd END` падает с `invalid input syntax for type numeric: "test purchase"`. Решение — сделать текстом каждую ветку:
+
+```sql
+SELECT transaction_id,
+       CASE WHEN is_test THEN 'test purchase'
+            ELSE CAST(revenue_usd AS TEXT)
+       END AS price
+FROM transactions
+WHERE transaction_id IN ('t_000001', 't_000115')
+ORDER BY transaction_id;
+```
+
+| transaction_id | price |
+|---|---|
+| t_000001 | 79.99 |
+| t_000115 | test purchase |
+
+## Практика
+
+<Drill id="s-coalesce">
+
+`COALESCE` берёт первое значение не NULL, но все его аргументы должны быть одного типа. Сначала приведите дату к тексту. Без каста запрос падает: `invalid input syntax for type timestamp: "not enrolled"`. `CAST(CAST(x AS DATE) AS TEXT)` даёт `YYYY-MM-DD`; `to_char(x, 'YYYY-MM-DD')` делает то же.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Скажите словами, что значит NULL в каждой колонке, которую используете, — до фильтра, который от этого зависит:
+
+| Колонка | NULL значит | Поэтому фильтр |
+|---|---|---|
+| `refunded_at` | возврата не было | «был возврат» = `refunded_at IS NOT NULL` |
+| `advances_enrolled_at` | не подключался к программе | «не подключён» = `advances_enrolled_at IS NULL` |
+
+Про незнакомую колонку спросите: «Can this column be NULL, and what does NULL mean here?» Если спросят про ваш `NOT IN`, ответ короткий: «One NULL in the list makes it return nothing, so I'd use NOT EXISTS.»
+</Aside>
+
+## Что почитать
+
+- [Comparison functions and operators](https://www.postgresql.org/docs/current/functions-comparison.html) — `IS NULL`, `IS DISTINCT FROM` и другие предикаты.
+- [Logical operators](https://www.postgresql.org/docs/current/functions-logical.html) — таблицы истинности `AND`, `OR` и `NOT` с NULL.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) и [NULLIF](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-NULLIF) — два помощника для NULL.
+- [NOT IN](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-NOTIN) — как NULL в подзапросе меняет результат.
+- [UNION, CASE and related constructs](https://www.postgresql.org/docs/current/typeconv-union-case.html) — как PostgreSQL выбирает один тип результата для `CASE` и `COALESCE`.
+
+## Связанные темы
+
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — NULL после соединения без пары и `COALESCE` обратно в 0.
+- [Подзапросы и CTE](/sql/subqueries-and-cte/) — `NOT EXISTS`, надёжный способ сказать «никогда».
+- [Условная агрегация](/sql/conditional-aggregation/) — `AVG` с `CASE` опирается на то, что агрегаты пропускают NULL.
+- [Группировка и подсчёт](/sql/grouping-and-counting/) — `COUNT(*)` против `COUNT(col)`.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — остаток должен быть 0, а не NULL.

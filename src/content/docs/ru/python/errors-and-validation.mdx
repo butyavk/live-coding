@@ -1,0 +1,310 @@
+---
+title: Ошибки и проверка ввода
+description: "Проверять ввод на входе, бросать ValueError с понятным текстом, переводить InvalidOperation в ValueError, отсекать NaN и повторять только временные сбои."
+sidebar:
+  order: 10
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+В задачах про деньги суммы приходят строками — из файлов, запросов и других сервисов. Рано или поздно интервьюер спросит: *"What if the amount is empty, or 'abc', or negative?"* Функция, которая молча возвращает 0, хуже упавшей: выплата 0 выглядит законной.
+
+<Aside type="tip" title="Коротко">
+- Проверяйте ввод один раз, там, где он входит (запрос, файл, строка из базы). Внутри код работает с чистыми типами.
+- Бросайте `ValueError` с сообщением, в котором видно плохое значение: `f"not an amount: {s!r}"`.
+- `Decimal("abc")` бросает `InvalidOperation`, а это **не** `ValueError`. Перехватите и бросьте `ValueError(...) from e`. `Decimal("NaN")` проходит — отсекайте `is_finite()`.
+- Ловите самое узкое исключение и только вокруг строки, которая может упасть. Никогда — голый `except:`.
+- Повторяйте только временные сбои (тайм-ауты, 5xx, 429 после `Retry-After`), с растущими паузами и лимитом попыток. Вызов должен быть идемпотентным.
+</Aside>
+
+## Проверка на границе
+
+Граница — место, где внешние данные становятся вашими: обработчик API, чтение CSV, вебхук. Там всё проверяется один раз. Тогда внутренние функции доверяют аргументам и остаются короткими. Тело вебхука с полями `webhook_events`:
+
+```python
+from datetime import datetime
+
+EVENT_TYPES = {"purchase", "renewal", "expiration", "refund"}
+
+
+def parse_event(raw: dict) -> dict:
+    missing = {"event_id", "type", "occurred_at"} - raw.keys()
+    if missing:
+        raise ValueError(f"missing fields: {sorted(missing)}")
+    if raw["type"] not in EVENT_TYPES:
+        raise ValueError(f"unknown event type: {raw['type']!r}")
+    return {
+        "event_id": raw["event_id"],
+        "type": raw["type"],
+        "at": datetime.fromisoformat(raw["occurred_at"]),
+    }
+
+
+for raw in [
+    {"event_id": "e1", "type": "renewal", "occurred_at": "2026-09-01T10:00:00"},
+    {"event_id": "e2", "type": "renewal"},
+    {"event_id": "e3", "type": "RENEWAL", "occurred_at": "2026-09-01T10:00:00"},
+    {"event_id": "e4", "type": "refund", "occurred_at": "2026-09-31T10:00:00"},
+]:
+    try:
+        print(parse_event(raw))
+    except ValueError as e:
+        print("ValueError:", e)
+```
+
+```text
+{'event_id': 'e1', 'type': 'renewal', 'at': datetime.datetime(2026, 9, 1, 10, 0)}
+ValueError: missing fields: ['occurred_at']
+ValueError: unknown event type: 'RENEWAL'
+ValueError: day 31 must be in range 1..30 for month 9 in year 2026
+```
+
+Первые три сообщения говорят, что не так, и показывают значение. Последнее пришло из `datetime` и не говорит, какое событие и какое поле. На границе этот контекст добавляют через `raise ... from e` (ниже). `ValueError` — правильный тип для «тип верный, значение — нет». `TypeError` — для неверного типа, например `None` вместо строки.
+
+## Что принимает Decimal
+
+Суммы приходят строками, и обычный разборщик — `Decimal(s)`. Он принимает больше, чем можно ожидать:
+
+```python
+from decimal import Decimal
+
+for s in ["12.5", " 12.5 ", "1e3", "-1", "NaN", "Infinity", "abc", "", "1,5", None]:
+    try:
+        print(f"{s!r:12} -> {Decimal(s)!r}")
+    except Exception as e:
+        print(f"{s!r:12} -> {type(e).__name__}")
+```
+
+```text
+'12.5'       -> Decimal('12.5')
+' 12.5 '     -> Decimal('12.5')
+'1e3'        -> Decimal('1E+3')
+'-1'         -> Decimal('-1')
+'NaN'        -> Decimal('NaN')
+'Infinity'   -> Decimal('Infinity')
+'abc'        -> InvalidOperation
+''           -> InvalidOperation
+'1,5'        -> InvalidOperation
+None         -> TypeError
+```
+
+| Вход | Что делать |
+|---|---|
+| `'12.5'`, `' 12.5 '` | принять; `quantize` до 12.50 |
+| `'abc'`, `''`, `'1,5'` | перевести `InvalidOperation` в `ValueError` |
+| `'NaN'`, `'Infinity'` | отсечь через `is_finite()` |
+| `'-1'` | отсечь, если отрицательные суммы запрещены |
+| `'1e3'` | спросить, допустима ли экспоненциальная запись |
+| `None` | сначала проверить тип или перехватить `TypeError` |
+
+Подвох в двух деталях:
+
+```python
+from decimal import Decimal, InvalidOperation
+
+print(issubclass(InvalidOperation, ValueError), issubclass(InvalidOperation, ArithmeticError))
+print(Decimal("NaN").is_finite(), Decimal("Infinity").is_finite(), Decimal("12.5").is_finite())
+print(Decimal("Infinity") > 0)
+print(Decimal("NaN") < 0)
+```
+
+```text
+False True
+False False True
+True
+Traceback (most recent call last):
+  ...
+decimal.InvalidOperation: [<class 'decimal.InvalidOperation'>]
+```
+
+- `InvalidOperation` — наследник `ArithmeticError`, а не `ValueError`. Поэтому `except ValueError` его не поймает.
+- `Infinity` проходит проверку вида `amount > 0`. А сравнение с `NaN` само бросает `InvalidOperation`. Поэтому сначала `is_finite()`, потом сравнения.
+
+## raise … from e
+
+Низкоуровневую ошибку переводят в понятную вызывающему, а исходную сохраняют как причину:
+
+```python
+from decimal import Decimal, InvalidOperation
+
+
+def to_decimal(s):
+    try:
+        return Decimal(s)
+    except InvalidOperation as e:
+        raise ValueError(f"not an amount: {s!r}") from e
+
+
+to_decimal("12,50")
+```
+
+```text
+Traceback (most recent call last):
+  ...
+decimal.InvalidOperation: [<class 'decimal.ConversionSyntax'>]
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  ...
+ValueError: not an amount: '12,50'
+```
+
+Вызывающий ловит один тип, `ValueError`, и читает понятное сообщение. В логе остаётся исходная ошибка, а в коде она доступна как `err.__cause__`. Три варианта:
+
+| Код | Что пишет трейсбек | Когда |
+|---|---|---|
+| `raise ValueError(...) from e` | "The above exception was the direct cause…" | ошибку переводят намеренно |
+| `raise ValueError(...)` внутри `except` | "During handling of the above exception, another exception occurred" | выглядит как вторая ошибка |
+| `raise ValueError(...) from None` | только новая ошибка | исходная ничего не добавляет |
+
+## Ловить узко
+
+Широкий `except` превращает ошибки в неверные ответы:
+
+```python
+from decimal import Decimal
+
+
+def parse_amount_bad(s):
+    try:
+        return Decimal(s.strp())        # опечатка: strp вместо strip
+    except Exception:
+        return Decimal("0")
+
+
+print(parse_amount_bad("12.50"))
+```
+
+```text
+0
+```
+
+Опечатка бросает `AttributeError`, `except` его проглатывает, и каждая сумма становится 0. Ни один тест с правильным вводом громко не упадёт. Правила:
+
+- Ловите ровно тот тип, которого ждёте: `InvalidOperation`, `KeyError`, `TimeoutError`.
+- Блок `try` — маленький: только строка, которая может упасть.
+- Голый `except:` ловит ещё и `KeyboardInterrupt` и `SystemExit`. Не пишите его.
+- Если ловить всё необходимо (на верхнем уровне цикла воркера), запишите ошибку в лог с трейсбеком и бросьте дальше или посчитайте. Не прячьте.
+
+## Свои исключения
+
+Своё исключение нужно, когда вызывающий должен отреагировать на него особо. Наследуйте от встроенного, если оно подходит: тогда код, который ловит встроенное, продолжит работать:
+
+```python
+class PayoutError(Exception):
+    """Базовый класс: всё, что может пойти не так с выплатой."""
+
+
+class InvalidAmount(PayoutError, ValueError):
+    """Плохой ввод: повтор не поможет."""
+
+
+class BankUnavailable(PayoutError):
+    """Банк не обработал запрос: повторять безопасно."""
+
+
+def handle(exc):
+    try:
+        raise exc
+    except BankUnavailable:
+        return "retry later"
+    except ValueError as e:          # InvalidAmount — тоже ValueError
+        return f"reject: {e}"
+
+
+print(handle(BankUnavailable("503 from the bank")))
+print(handle(InvalidAmount("amount must be positive, got -5")))
+```
+
+```text
+retry later
+reject: amount must be positive, got -5
+```
+
+Имя класса несёт решение: `BankUnavailable` — «попробуй ещё», `InvalidAmount` — «не надо». Общий базовый класс (`PayoutError`) позволяет поймать всё семейство разом. Более конкретный `except` ставьте первым: Python берёт первый подходящий.
+
+## Какие ошибки повторять
+
+Повтор помогает, только если следующая попытка может пройти. Плохой запрос при повторе просто уйдёт ещё раз.
+
+| Сбой | Повторять? | Почему |
+|---|---|---|
+| Тайм-аут | да, но сначала проверить | запрос мог пройти |
+| Соединение отклонено до отправки | да | ничего не обработано |
+| HTTP 500, 502, 503, 504 | да, с паузами | сервер временно неисправен |
+| HTTP 429 Too Many Requests | да, после `Retry-After` | превышен лимит |
+| HTTP 400, 401, 403, 404, 422 | нет | тот же запрос снова упадёт |
+| Наш собственный `ValueError` | нет | ошибка в коде или плохой ввод |
+
+Перед каждым повтором ждите дольше (экспоненциальная пауза, exponential backoff), добавляйте случайность (jitter) и останавливайтесь после фиксированного числа попыток:
+
+```python
+import random
+
+base_delay = 0.5
+delays = [base_delay * 2 ** (k - 1) for k in range(1, 6)]   # перед повтором 1, 2, 3, ...
+print(delays)
+
+rng = random.Random(7)                                       # с seed: тест повторяем
+print([round(rng.uniform(0, d), 2) for d in delays])         # full jitter
+```
+
+```text
+[0.5, 1.0, 2.0, 4.0, 8.0]
+[0.16, 0.15, 1.3, 0.29, 4.29]
+```
+
+Jitter разносит повторы многих клиентов во времени, чтобы они не ударили по восстанавливающемуся серверу в одну секунду. После последней попытки бросьте своё исключение, указав последний сбой причиной: `raise PayoutFailed(...) from last_error`. Функцию `sleep` передавайте параметром, чтобы тесты не ждали. Полная задача — выплата, при которой тайм-аут мог уже провести платёж, — на странице [Задачи про деньги](/python-tasks/money/).
+
+<Talk q="A call to an external API sometimes fails. How do you retry it safely?">
+
+"Retry only errors that are temporary — timeouts and 5xx, not 4xx, except 429 after Retry-After — with exponential backoff and jitter, and a limit on attempts. And the call must be idempotent: for money I send an idempotency key, so a retry after a timeout does not charge twice."
+
+Тайм-аут — самый трудный случай: запрос мог дойти до другой стороны. Прежде чем повторять платёж, спросите, есть ли он уже, по тому же ключу идемпотентности.
+
+</Talk>
+
+## Практика
+
+<Drill id="y-validate">
+
+`Decimal('abc')` бросает `InvalidOperation` — переводим его в `ValueError`, понятный вызывающему, через `from e`, чтобы по трейсбеку было видно: перевод сделан намеренно. Значение, которое не строка, — это неверный тип, поэтому эталон проверяет `isinstance` и бросает `TypeError`, а не ловит `AttributeError` от `.strip()`. `quantize` с `ROUND_HALF_UP` округляет «как в бухгалтерии»; `round()` у `Decimal` банковский (0.125 → 0.12). `Decimal('NaN')` — тоже число, поэтому отсекаем его `is_finite()`, до проверки на отрицательное. Эта проверка — `is_signed()`: `value < 0` пропускает `'-0'`, и на выходе получается `Decimal('-0.00')`. Упасть может и сам `quantize`: для `'1e30'` нужно больше цифр, чем позволяет контекст, поэтому этот вызов тоже обёрнут. Проверки сравнивают и число знаков после запятой: `Decimal('12.5')` не сойдёт за `Decimal('12.50')`.
+
+</Drill>
+
+<Drill id="y-parse-csv">
+
+`csv.DictReader` берёт заголовок как ключи и отдаёт каждую строку словарём. На короткой строке он не падает: недостающие колонки приходят как `None`. Поэтому `not row.get(f)` ловит и отсутствующее поле, и пустое, и эта проверка идёт первой: иначе `Decimal('')` в строке 3 сообщит о плохой сумме. `reader.line_num` — число прочитанных строк файла, заголовок — строка 1. `enumerate(reader, start=2)` здесь даёт те же номера, но не тогда, когда поле в кавычках занимает две строки или пустая строка пропускается. `Decimal('n/a')` бросает `InvalidOperation`, а `Decimal('NaN')` разбирается, поэтому строке 6 нужен `is_finite()`. `date.fromisoformat` отвергает 31 сентября с `ValueError`. Собирайте плохие строки, а не останавливайтесь на первой: хорошие всё равно загрузятся, а отправитель исправит весь файл за один раз. Спросите заранее: *"Should one bad row reject the whole file?"*
+
+</Drill>
+
+<Drill id="y-webhook-json">
+
+`json.loads` бросает `json.JSONDecodeError` на сломанном JSON. Это подкласс `ValueError`, поэтому для второй проверки отдельный код не нужен. Корректный JSON всё равно может иметь не ту форму: список вместо объекта или строку там, где `transaction` должна быть объектом. Проверяйте `isinstance(..., dict)` до обращения по ключу и читайте поля через `.get()`: `payload["transaction"]` бросит `KeyError`, `"t_002200"["id"]` — `TypeError`, и ни одна из этих ошибок не скажет, какое поле не так. Ошибка `fromisoformat` называет день и месяц, но не поле, поэтому перехватите её и бросьте `ValueError` с именем `occurred_at`, через `from e`. Сумма приходит строкой и сразу идёт в `Decimal`; JSON-число уже стало бы float, а `json.loads(body, parse_float=Decimal)` этого не допускает. Замороженный (frozen) dataclass — запись, которой остальной код может доверять.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Проговорите договорённость о плохом вводе раньше основного сценария, чтобы интервьюер мог согласиться или поправить: *"Empty, non-numeric and negative strings raise ValueError with the value in the message. NaN and Infinity too. Should '1e3' count as valid input?"* Тесты потом следуют из этой фразы.
+
+Каждый раз, когда пишете `try`, говорите, что он ловит и почему остальное должно пройти мимо: *"I catch only InvalidOperation here, so a typo in my own code still fails loudly."*
+</Aside>
+
+## Что почитать
+
+- [Errors and Exceptions](https://docs.python.org/3/tutorial/errors.html#exception-chaining) — раздел учебника о цепочках исключений и `from`.
+- [Exception hierarchy](https://docs.python.org/3/builtins/exceptions.html#exception-hierarchy) — какое встроенное исключение от какого наследуется.
+- [decimal: Signals](https://docs.python.org/3/library/decimal.html#signals) — `InvalidOperation` и другие условия, о которых сообщает `Decimal`.
+- [Decimal.is_finite](https://docs.python.org/3/library/decimal.html#decimal.Decimal.is_finite) — истина для всех значений, кроме бесконечностей и NaN.
+- [csv.DictReader](https://docs.python.org/3/library/csv.html#csv.DictReader) — строки как словари, `None` для недостающих колонок и [line_num](https://docs.python.org/3/library/csv.html#csv.csvreader.line_num).
+- [json.loads](https://docs.python.org/3/library/json.html#json.loads) — `JSONDecodeError` и аргумент `parse_float`.
+
+## Связанные темы
+
+- [Деньги и Decimal](/python/money-and-decimal/) — `quantize`, режимы округления и почему деньги никогда не float.
+- [Задачи про деньги](/python-tasks/money/) — расчёт аванса и выплата с повторами и ключом идемпотентности.
+- [Декораторы](/python/decorators/) — та же логика повторов в виде переиспользуемого `@retry(times)`.
+- [Тесты и сложность](/python/testing-and-complexity/) — `pytest.raises`, чтобы проверить, что плохой ввод падает.
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — почему повторная запись не должна создавать вторую строку.

@@ -1,0 +1,107 @@
+---
+title: Caching and rate limits
+description: "Three Python tasks with state and a clock: a TTL cache decorator, a sliding-window rate limiter, and an API client that pages through rate limits."
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Three tasks deal with a slow or shared resource. A decorator keeps answers for a limited time, and a limiter lets each client send only so many requests per window. The third task is the other side of a limit: a client that reads every page of an API, waits when the server says "too many requests", and retries server errors. Each task keeps a little state and depends on time, so the time comes from outside and the tests control it. They build on [Decorators](/python/decorators/), [Time windows](/python/time-windows/) and [Errors and validation](/python/errors-and-validation/).
+
+<Aside type="tip" title="How to practise">
+All three tasks take the time from outside (a clock, `now` or a `sleep` function), so use that while you practise. In the editor, call your code with made-up times such as 0, 5 and 10, or with a fake client that prints every call, predict each answer, and press Run. Press Check only when your own examples agree.
+</Aside>
+
+## P01. TTL cache decorator
+
+<Task id="p01" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A cache for the answers of a slow external service, for example an exchange rate, for a limited time.
+
+**The idea.** An `OrderedDict` from key to (stored_at, value), whose order is the order of use. On a hit, `move_to_end`; when the cache is full, `popitem(last=False)` removes the least recently used entry. The key is `(args, tuple(sorted(kwargs.items())))`. An expired entry is removed when someone asks for it.
+
+**Traps.**
+
+- An entry is valid while `now - stored_at < ttl_seconds`. Exactly at `ttl_seconds` it has expired.
+- LRU means least recently used, not least recently added: a hit must move the key to the end.
+- An exception is not cached. Store the value only after the function returns.
+- The counters live on the wrapper: `wrapper.hits` and `wrapper.misses`. `functools.wraps` keeps the name and docstring of the function.
+- Read the time from `clock()`, not from `time.monotonic()` directly; the tests pass a fake clock.
+
+**Complexity.** Every operation is `O(1)`. Memory: at most `max_size` entries. Without `max_size`, expired entries stay until someone asks for them again.
+
+**Follow-up.** "Is it thread-safe?" No: two threads can change the `OrderedDict` at the same time, or both miss and both call the function. A lock keeps the dict consistent; to call the function only once per key, hold a lock per key while it runs. A cache shared by several processes lives outside them, for example in Redis with a TTL.
+
+</Reveal>
+
+## P08. Rate limiter for a public API
+
+<Task id="p08" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Protect a public API: one client must not take all of its capacity.
+
+**Steps.** A `dict` from key to a `deque` of the times of allowed requests. On each request:
+
+1. Drop from the left every time `<= now - window`.
+2. If fewer than `limit` remain, append `now` and return `True`.
+3. Otherwise return `False`.
+
+**Traps.**
+
+- Do not append rejected requests: they do not count.
+- The window is `(now - window, now]`. A request exactly `window` seconds later is allowed again, so the condition for dropping is `<=`.
+- Keep one deque per key: keys are independent.
+
+**Complexity.** Amortised `O(1)` per request: each time is appended once and removed once. Memory: at most `limit` times per active key.
+
+**Follow-up.**
+
+- "A million clients call once and never come back. What happens to memory?" Old times are dropped only when the same key calls again, so an idle key keeps its deque in the `dict` forever. Delete a key once its window is empty: for example, every N calls sweep out the keys whose newest time is `<= now - window`.
+- A token bucket uses constant memory per key but lets bursts through. A fixed window per clock minute is cheap but can let 2 × `limit` requests through at the border of two windows. With several processes, the counter lives in a shared store such as Redis.
+
+</Reveal>
+
+## P13. Fetch every page from the payouts API
+
+<Task id="p13" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Every integration with a partner or with another service has this loop: pages, rate limits, and a server that fails now and then. The tests check every call and every wait, as an incident review would.
+
+**Steps.**
+
+1. Two levels: `get_page` for the attempts of one page, and the outer loop over the pages. The retry count lives in `get_page`, so it starts again for each page.
+2. In `get_page`: 200 → return the json. 429 or 5xx → if no retries are left, raise `ApiError(status)`; otherwise wait and ask again. Any other status → `ApiError(status)` at once.
+3. The wait before retry k: the `Retry-After` of a 429, found without regard to case and turned into a number; otherwise `base_delay * 2 ** (k - 1)`.
+4. The outer loop: the params with `since.isoformat()`, and `"cursor"` from the second page on. Keep each payout whose id is new, and remember every cursor you sent. Stop when `next_cursor is None`; a cursor that was already sent → `ApiError(None, ...)`.
+
+**Traps.**
+
+- Checking only `next_cursor == cursor` catches `c1 → c1`, but loops forever on `c1 → c2 → c1`. Keep a set of every cursor you used.
+- `sleep("3")`: a header value is a string. Convert it.
+- `headers["Retry-After"]` fails on `retry-after`. HTTP/2 sends every header name in lower case.
+- Retrying a 400 or a 404 only wastes time: the request itself is wrong, and it will be wrong next time too.
+- One retry counter for the whole run: after one bad page, every later page has fewer retries.
+- A wait after the last failure only delays the error.
+- After a 429, asking for the next cursor skips a page: a 429 carries no data.
+
+**Check.** Say the waits of a script before you run it: 503, then 429 with `Retry-After: 4`, then 503, then 200 gives `[0.5, 4, 2.0]`.
+
+**Complexity.** One request per page, plus at most `max_retries` more per page. Memory: one id per payout and one cursor per page.
+
+**Follow-up.**
+
+- "Ten workers share one rate limit. What changes?" Each one backs off on its own, and they all come back at the same moment. Add random jitter to the waits, or put a shared token bucket in front of the client (compare P08).
+- "The job dies on page 400 of 1,000." Save the last cursor and the ids seen so far as a checkpoint, and resume from it. Ask how long a cursor stays valid: an expired cursor means starting again.
+- "Why not page by offset?" New payouts shift the offsets while you read, so items are skipped or repeated. A cursor marks a place in the data, and the dedupe by id covers the rest.
+
+**In production.** Cap the `Retry-After` wait, log every retry with its status and page, and limit the time of the whole run, not only of each request.
+
+</Reveal>

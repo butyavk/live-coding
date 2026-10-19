@@ -1,0 +1,192 @@
+---
+title: LEFT JOIN and zeros
+description: Every X, even with zero. Start from X, LEFT JOIN the facts, keep right-table conditions in ON, count a right-table column and wrap the sums in COALESCE.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Tasks often say "for every product" or "include merchants with no sales". An inner join, or a filter in the wrong place, drops the zeros. The report then looks complete while rows are missing. The recipe has five steps, and each step prevents a known mistake.
+
+<Aside type="tip" title="TL;DR">
+- Start `FROM` the table that holds every X: `FROM merchants m LEFT JOIN …`.
+- Conditions on the right table go in `ON`, not in `WHERE`. Conditions on X itself go in `WHERE`.
+- Count a column of the right table: `COUNT(cp.payout_id)`, not `COUNT(*)`.
+- Wrap sums in `COALESCE(SUM(…), 0)`.
+- Check the row count: one row per X.
+</Aside>
+
+## Start from the table of all X
+
+`LEFT JOIN` keeps every row of the left table. A left row without a match gets one row with NULL in every column of the right table. So the table that holds all X goes on the left.
+
+An example: every merchant with the marketplace payouts for August sales. Some payouts have not arrived yet.
+
+```sql
+SELECT m.id,
+       COUNT(cp.payout_id)             AS payouts,
+       COALESCE(SUM(cp.amount_usd), 0) AS paid_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+The first three of 12 rows:
+
+| id | payouts | paid_usd |
+|---|---|---|
+| mer_01 | 0 | 0 |
+| mer_02 | 1 | 154.57 |
+| mer_03 | 1 | 89.20 |
+
+There is one row per merchant, and mer_01 and mer_11 show 0. An inner `JOIN` would return only 10 merchants. The two without a payout, which are the point of the report, would be gone.
+
+Here is what the join produces before grouping, for two merchants:
+
+```sql
+SELECT m.id, cp.payout_id, cp.channel, cp.amount_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+WHERE m.id IN ('mer_01', 'mer_02')
+ORDER BY m.id;
+```
+
+| id | payout_id | channel | amount_usd |
+|---|---|---|---|
+| mer_01 | NULL | NULL | NULL |
+| mer_02 | po_0026 | south_market | 154.57 |
+
+mer_01 has no payout for August, so it gets one row of NULLs. The next three rules all come from this row.
+
+## Conditions on the right table go in ON
+
+`ON` is applied while rows are matched; `WHERE` is applied after the join. A condition on the right table in `WHERE` is NULL for the row of NULLs, so `WHERE` drops that row, and the `LEFT JOIN` behaves like an inner join. In the query above, moving `cp.period_month = DATE '2026-08-01'` from `ON` to `WHERE` returns 10 rows: mer_01 and mer_11 disappear.
+
+<Trap id="left-where" q="Sales in Japan in September for each product, 'including zeros'. How many of the 20 products will be in the result?">
+
+19, not 20: prd_06 is gone. `WHERE t.country = 'JP'` drops the rows without a match (their `t.country` is NULL), and the `LEFT JOIN` turns into an inner join. Conditions on the right table go in `ON`.
+
+</Trap>
+
+Conditions on the left table are different. They choose which X are in the report, so they go in `WHERE`. For merchants enrolled in the advances program only:
+
+```sql
+SELECT m.id,
+       COUNT(cp.payout_id)             AS payouts,
+       COALESCE(SUM(cp.amount_usd), 0) AS paid_usd
+FROM merchants m
+LEFT JOIN channel_payouts cp
+       ON cp.merchant_id = m.id
+      AND cp.period_month = DATE '2026-08-01'
+WHERE m.advances_enrolled_at IS NOT NULL
+GROUP BY m.id
+ORDER BY m.id;
+```
+
+| id | payouts | paid_usd |
+|---|---|---|
+| mer_01 | 0 | 0 |
+| mer_03 | 1 | 89.20 |
+| mer_04 | 1 | 310.12 |
+| mer_07 | 1 | 13.58 |
+| mer_09 | 1 | 178.40 |
+| mer_11 | 0 | 0 |
+
+Another way to keep the right side clean is to filter it first in a CTE and then join the result. See [Subqueries and CTE](/sql/subqueries-and-cte/).
+
+## Count a column, not the row
+
+After a `LEFT JOIN`, a merchant without payouts still has one row. `COUNT(*)` counts that row and returns 1. `COUNT(cp.payout_id)` counts only real matches, because the column is NULL in the row of NULLs. Count the right table's key, or any column that is never NULL in a real row.
+
+<Trap id="left-count-star" q="prd_06 has no sales in Japan in September. What do the two counters show?">
+
+`count_star` = 1, `count_col` = 0. After the `LEFT JOIN`, a product without a match keeps one row with NULL on the right, and `COUNT(*)` counts it. Count a column of the right table: `COUNT(t.product_id)`.
+
+</Trap>
+
+## COALESCE for sums
+
+`SUM` over the row of NULLs is NULL. For a report, and always for money, turn it into 0: `COALESCE(SUM(cp.amount_usd), 0)`. `COUNT` needs no `COALESCE`, because it already returns 0.
+
+Be careful with columns of the left table. A left row without a match still carries its own values, so `SUM` of a left-table column returns that value, not 0. The second drill below has exactly this trap.
+
+## Two fact tables: aggregate each one first
+
+"Every merchant with payouts and advances" needs two "many" tables. Two plain `LEFT JOIN`s multiply each other's rows. Aggregate each table to one row per merchant, then join both results to `merchants`:
+
+```sql
+WITH paid AS (
+    SELECT merchant_id, SUM(amount_usd) AS paid_usd
+    FROM channel_payouts
+    WHERE period_month = DATE '2026-08-01'
+    GROUP BY merchant_id
+),
+advanced AS (
+    SELECT merchant_id, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    WHERE period_month = DATE '2026-08-01'
+    GROUP BY merchant_id
+)
+SELECT m.id,
+       COALESCE(pd.paid_usd, 0)    AS paid_usd,
+       COALESCE(v.advanced_usd, 0) AS advanced_usd
+FROM merchants m
+LEFT JOIN paid pd    ON pd.merchant_id = m.id
+LEFT JOIN advanced v ON v.merchant_id = m.id
+ORDER BY m.id;
+```
+
+The first four of 12 rows:
+
+| id | paid_usd | advanced_usd |
+|---|---|---|
+| mer_01 | 0 | 125.45 |
+| mer_02 | 154.57 | 0 |
+| mer_03 | 89.20 | 175.44 |
+| mer_04 | 310.12 | 384.11 |
+
+mer_01 already received advances against August sales, and no marketplace has paid it yet. With two plain `LEFT JOIN`s to the raw tables instead, mer_04's payouts double from 310.12 to 620.24: its one payout row meets both of its advances. [Row multiplication](/sql-patterns/row-multiplication/) covers this in detail.
+
+## Practice
+
+<Drill id="s-left-zero">
+
+"Including zero" means: start from `products` and `LEFT JOIN` the transactions. Every condition on `transactions` goes in `ON`; in `WHERE` it would drop the products without a match. Count `COUNT(t.transaction_id)`: `COUNT(*)` would give 1 instead of 0.
+
+</Drill>
+
+<Drill id="s-stock-on-hand">
+
+The items set the rows: `FROM items i LEFT JOIN stock_moves mv`. The date limit is a condition on the right table, so it goes in `ON`. In `WHERE` it would drop the Stapler, which has no moves at all, and the Tape, whose only move is on 3 October. `WHERE mv.moved_at < … OR mv.moved_at IS NULL` brings the Stapler back but still drops the Tape. `COALESCE(SUM(mv.qty), 0)` turns the NULL into 0 units, and the value is units × `i.unit_cost_usd`. Group by `i.id`: two items are called Pen, and grouping by name would merge them into one row. The trap: `SUM(mv.qty) * i.unit_cost_usd` without `COALESCE` gives NULL, not 0, for the Stapler and the Tape. The sum over no rows is NULL, and NULL times a price is still NULL.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Catch the word "every" in the task and repeat it back before you write `FROM`: "You said every product, so I start from products and LEFT JOIN the transactions. The filters on transactions go into ON."
+
+Close with a check you say out loud: "There are 20 products, and I get 20 rows. prd_06 has no sales in Japan, and it shows 0, not NULL."
+
+If the next request is "Only the products of enrolled merchants", that filter is on the left side. It goes in `WHERE`, or in an inner join to `merchants`.
+</Aside>
+
+## Further reading
+
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — `LEFT OUTER JOIN`, with an example of a condition in `ON` against the same condition in `WHERE`.
+- [Joins between tables](https://www.postgresql.org/docs/current/tutorial-join.html) — the tutorial, including outer joins.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — the first value that is not NULL.
+- [Aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) — the note that `sum` of no rows returns NULL, not zero.
+
+## Related topics
+
+- [Joins](/sql/joins/) — keys, and what a join does to the row count.
+- [NULL logic](/sql/null-logic/) — why the row of NULLs fails every condition in `WHERE`.
+- [Row multiplication](/sql-patterns/row-multiplication/) — two "many" tables in one query.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — every day, even with no data: `generate_series` and `LEFT JOIN`.
+- [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/) — `FULL OUTER JOIN` when either side can be missing.

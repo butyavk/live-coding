@@ -1,0 +1,200 @@
+---
+title: Подзапросы и CTE
+description: Подзапросы, CTE как именованные шаги, EXISTS для «есть хоть одна такая строка», NOT EXISTS и LEFT JOIN … IS NULL для «никогда». Почему NOT IN ненадёжен.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Многие задачи решаются в два шага: сначала агрегировать, потом отфильтровать или посчитать агрегаты. CTE даёт каждому шагу имя и позволяет запустить его отдельно. `EXISTS` отвечает на «есть ли хоть одна такая строка» и не размножает строки, а `NOT EXISTS` — на «никогда».
+
+<Aside type="tip" title="Коротко">
+- CTE — именованный шаг: `WITH per_customer AS (…) SELECT … FROM per_customer`. Называйте его по тому, что внутри.
+- Фильтр по псевдониму, агрегат от агрегатов и фильтр по оконной функции требуют шага перед ними.
+- «Есть хоть одна …» — `EXISTS (SELECT 1 FROM … WHERE <связь с внешней строкой>)`.
+- «Никогда» — `NOT EXISTS (…)` или `LEFT JOIN … WHERE right.key IS NULL`. Не `NOT IN`.
+- Запускайте каждое CTE отдельно, прежде чем писать следующее.
+</Aside>
+
+## Подзапросы: запрос внутри запроса
+
+Подзапрос — `SELECT` в скобках внутри другого запроса. Чаще всего он стоит в одном из трёх мест:
+
+| Где | Что возвращает | Пример |
+|---|---|---|
+| в `WHERE` или `SELECT` | одно значение | `price > (SELECT AVG(price) FROM …)` |
+| после `IN` или `EXISTS` | строки для проверки | `id IN (SELECT merchant_id FROM advances)` |
+| в `FROM` | таблицу | `FROM (SELECT … GROUP BY …) AS per_product` |
+
+Платные транзакции дороже средней платной цены:
+
+```sql
+SELECT COUNT(*) AS above_average
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND charged_usd > (
+      SELECT AVG(charged_usd)
+      FROM transactions
+      WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  );
+```
+
+| above_average |
+|---|
+| 1185 |
+
+Внутренний запрос возвращает одно значение, среднее 14,91, а внешний сравнивает с ним каждую строку. Подзапрос в роли значения должен вернуть одну строку. Если строк больше, запрос падает: `more than one row returned by a subquery used as an expression`.
+
+## CTE: именованные шаги
+
+`WITH имя AS (…)` задаёт шаг, который следующие шаги читают как таблицу. Это то же, что подзапрос в `FROM`, но читается сверху вниз, и у каждого шага есть имя.
+
+Типичный случай — агрегат от агрегатов. «Сколько клиентов платили в августе больше одного раза?» — сначала покупки на клиента, потом подсчёт по клиентам:
+
+```sql
+WITH per_customer AS (
+    SELECT customer_id, COUNT(*) AS purchases
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+      AND start_time >= TIMESTAMP '2026-08-01'
+      AND start_time <  TIMESTAMP '2026-09-01'
+    GROUP BY customer_id
+)
+SELECT COUNT(*)                              AS customers,
+       COUNT(*) FILTER (WHERE purchases > 1) AS repeat_customers,
+       ROUND(AVG(purchases), 2)              AS avg_purchases
+FROM per_customer;
+```
+
+| customers | repeat_customers | avg_purchases |
+|---|---|---|
+| 432 | 23 | 1.12 |
+
+`COUNT(*)` во внешнем запросе считает клиентов: каждая строка `per_customer` — один клиент. `AVG(purchases)` — среднее от подсчётов. Ни то ни другое не получить одним `GROUP BY`.
+
+Шаг нужен для:
+
+- фильтра по псевдониму из `SELECT`;
+- агрегата от агрегата, как выше;
+- фильтра по оконной функции, например `WHERE rn = 1` (см. [Лучший в группе](/sql-patterns/top-n-per-group/));
+- двух таблиц «много», каждая из которых сворачивается до одной строки на ключ перед соединением (см. [LEFT JOIN и нули](/sql/left-join-and-zeros/)).
+
+Работайте маленькими шагами. Напишите первое CTE, закончите запрос строкой `SELECT * FROM per_customer LIMIT 5`, запустите и посмотрите на строки. Только потом пишите следующий шаг. CTE, которое используется один раз, ничего не стоит: PostgreSQL встраивает его в основной запрос.
+
+## EXISTS: есть хоть одна такая строка
+
+Некоторые условия касаются других строк: «клиенты, у которых был ещё и возврат», «продавцы (merchants) хотя бы с одним авансом». Слова-подсказки: *also*, *at least one*, *ever*, *any*. `EXISTS (подзапрос)` истинно, если подзапрос вернул хотя бы одну строку. Что именно он выбирает, неважно, поэтому пишут `SELECT 1`.
+
+```sql
+SELECT COUNT(*) AS merchants_with_advance
+FROM merchants m
+WHERE EXISTS (
+    SELECT 1
+    FROM advances v
+    WHERE v.merchant_id = m.id
+);
+```
+
+| merchants_with_advance |
+|---|
+| 6 |
+
+Строка `v.merchant_id = m.id` связывает подзапрос с внешней строкой. Подзапрос проверяется для каждого продавца, ответ — true или false, поэтому каждый продавец считается один раз. `JOIN` вернул бы строку на каждый аванс: 38 строк для тех же шести продавцов.
+
+Без связи `EXISTS` истинно для каждой строки, как только в таблице есть хоть одна строка: тот же запрос без `WHERE v.merchant_id = m.id` возвращает 12. Результат «100 %» — повод проверить связь.
+
+В положительном случае `IN (SELECT …)` даёт тот же ответ: `WHERE m.id IN (SELECT merchant_id FROM advances)` тоже возвращает 6. Ломается `IN` в отрицательной форме.
+
+## «Никогда»: NOT EXISTS и LEFT JOIN … IS NULL
+
+Анти-джойн (anti-join) оставляет строки, у которых нет пары. Слова-подсказки: *never*, *without*, *no …*. Надёжных форм две. Продукты без единой продажи через оплату на сайте в сентябре, без тестовых покупок:
+
+```sql
+SELECT p.id AS product_id, p.name
+FROM products p
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM transactions t
+    WHERE t.product_id = p.id
+      AND t.channel = 'web'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+)
+ORDER BY p.id;
+```
+
+| product_id | name |
+|---|---|
+| prd_18 | Product 18 |
+| prd_20 | Product 20 |
+
+То же через `LEFT JOIN`: оставить строки из NULL, и только их. Возвращает те же два продукта.
+
+```sql
+SELECT p.id AS product_id, p.name
+FROM products p
+LEFT JOIN transactions t
+       ON t.product_id = p.id
+      AND t.channel = 'web'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+WHERE t.transaction_id IS NULL
+ORDER BY p.id;
+```
+
+`IS NULL` проверяйте на колонке, которая в настоящей паре никогда не бывает NULL, например на ключе правой таблицы. Все остальные условия на правую таблицу остаются в `ON`.
+
+### Почему не NOT IN
+
+`NOT IN (SELECT …)` выглядит самой короткой формой. Но если подзапрос вернёт хотя бы один NULL, условие никогда не станет истинным, и результат окажется пустым без всякой ошибки. [Логика NULL](/sql/null-logic/) показывает это на учебных данных. `NOT EXISTS` проверяет строку за строкой, и NULL на него не влияет.
+
+| Форма | NULL в подзапросе | Читается как |
+|---|---|---|
+| `NOT EXISTS (…)` | безопасно | «такой строки нет» |
+| `LEFT JOIN … WHERE r.key IS NULL` | безопасно | «пары не нашлось» |
+| `NOT IN (SELECT …)` | пустой результат | «нет в списке» |
+
+## Практика
+
+<Drill id="s-exists">
+
+«Есть ли у клиента хоть одна строка такого вида» — `EXISTS` со связью на того же клиента: `r.customer_id = t.customer_id`. `JOIN` размножил бы строки, если возвратов было несколько. В скрытых данных есть такой клиент, и проверка это поймает. Подойдёт и `IN (SELECT customer_id …)`.
+
+</Drill>
+
+<Drill id="s-anti">
+
+Анти-джойн: `NOT EXISTS` или `LEFT JOIN advances v … WHERE v.advance_id IS NULL`. `NOT IN` опасен: один NULL в подзапросе — и результат пустой. В `advances.merchant_id` здесь нет NULL, поэтому `NOT IN` вернёт верные строки, и проверка ошибку не поймает. Привычка всё равно плохая.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Для запроса из нескольких шагов проговорите план и запишите его комментариями до любого SQL:
+
+```sql
+-- 1. per_customer: paid purchases per customer in August
+-- 2. from per_customer: all customers, and those with more than one purchase
+```
+
+Потом заполните один шаг, запустите его и посмотрите на строки, прежде чем писать следующий. Выбирая `EXISTS`, назовите причину в той же фразе: «I only need to know whether such a row exists, so EXISTS. A join would repeat the customer for every refund.»
+
+Просят анти-джойн без подзапроса? «I'd LEFT JOIN the advances and keep the rows where advance_id is NULL.»
+</Aside>
+
+## Что почитать
+
+- [WITH queries (common table expressions)](https://www.postgresql.org/docs/current/queries-with.html) — именованные шаги и [когда CTE встраивается в основной запрос](https://www.postgresql.org/docs/current/queries-with.html#QUERIES-WITH-CTE-MATERIALIZATION).
+- [Subquery expressions](https://www.postgresql.org/docs/current/functions-subquery.html) — [`EXISTS`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-EXISTS), [`IN`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-IN) и [`NOT IN`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-NOTIN).
+- [Scalar subqueries](https://www.postgresql.org/docs/current/sql-expressions.html#SQL-SYNTAX-SCALAR-SUBQUERIES) — подзапрос в роли одного значения.
+- [Subqueries in FROM](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-SUBQUERIES) — подзапрос в роли таблицы.
+
+## Связанные темы
+
+- [Размножение строк](/sql-patterns/row-multiplication/) — зачем агрегировать в CTE до соединения.
+- [Лучший в группе](/sql-patterns/top-n-per-group/) — CTE с `ROW_NUMBER()` и `WHERE rn = 1` снаружи.
+- [Когорты и удержание](/sql-patterns/cohorts-and-retention/) — `EXISTS` для «заплатил снова в следующем месяце».
+- [Логика NULL](/sql/null-logic/) — проблема `NOT IN` подробно.
+- [LEFT JOIN и нули](/sql/left-join-and-zeros/) — анти-джойн со стороны `LEFT JOIN`.

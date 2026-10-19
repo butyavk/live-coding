@@ -1,0 +1,6 @@
+PGlite (https://pglite.dev), PostgreSQL compiled to WebAssembly that runs the SQL exercises on
+this site, is redistributed here unmodified, as published on npm (package
+"@electric-sql/pglite", version 0.5.8). PGlite is dual-licensed under the Apache License 2.0
+(LICENSE in this folder) and the PostgreSQL License. It includes PostgreSQL, licensed under the
+PostgreSQL License: https://www.postgresql.org/about/licence/
+Source code: https://github.com/electric-sql/pglite

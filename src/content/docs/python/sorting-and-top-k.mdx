@@ -1,0 +1,150 @@
+---
+title: Sorting and top-k
+description: Sort by several keys with a tuple key and a minus sign, why reverse=True breaks mixed directions, what a stable sort gives you, and top-k with heapq.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Almost every result in a live-coding task has an order: the biggest payouts first, the latest events first, the top customers by revenue. The order usually has two parts: a main key and a rule for ties. If the code ignores the tie rule, the answer is right on the example and wrong on the hidden test. If it sorts a million rows to take ten, the interviewer asks about complexity.
+
+<Aside type="tip" title="TL;DR">
+- Several keys: `sorted(rows, key=lambda r: (-r["amount"], r["id"]))` — amount descending, then id ascending.
+- The minus works for numbers (`int`, `Decimal`). `reverse=True` flips every part of the key, the tie-breaker too.
+- For a string or a date in descending order, sort twice: the secondary key first, then the main key with `reverse=True`.
+- `sorted` is stable: rows with equal keys keep their input order.
+- Top-k: `heapq.nsmallest(k, rows, key=…)`, O(n log k) time and O(k) memory. For k = 1, `min` or `max`.
+</Aside>
+
+## sorted and list.sort
+
+```python
+from decimal import Decimal
+
+payouts = [
+    {"id": "po_3", "amount": Decimal("10.00")},
+    {"id": "po_1", "amount": Decimal("25.50")},
+    {"id": "po_2", "amount": Decimal("10.00")},
+]
+
+print(sorted(payouts, key=lambda p: p["amount"]))
+# [{'id': 'po_3', 'amount': Decimal('10.00')}, {'id': 'po_2', 'amount': Decimal('10.00')}, {'id': 'po_1', 'amount': Decimal('25.50')}]
+
+result = payouts.sort(key=lambda p: p["id"])   # sorts in place...
+print(result)                                  # None -- ...and returns None
+print([p["id"] for p in payouts])              # ['po_1', 'po_2', 'po_3']
+```
+
+`sorted()` takes any iterable and returns a new list. `list.sort()` changes the list in place and returns `None`, so `rows = rows.sort()` loses the data. Both take `key`: a function that turns a row into the value to compare. Both are O(n log n).
+
+## Several keys, mixed directions
+
+A tuple compares element by element: the first elements, then the second ones if the first are equal. So a tuple key gives "by amount, then by id". To make one part descending, put a minus in front of it:
+
+```python
+print([p["id"] for p in sorted(payouts, key=lambda p: (-p["amount"], p["id"]))])
+# ['po_1', 'po_2', 'po_3'] -- amount descending, id ascending
+
+print([p["id"] for p in sorted(payouts, key=lambda p: (p["amount"], p["id"]), reverse=True)])
+# ['po_1', 'po_3', 'po_2'] -- amount descending, but id descending too
+```
+
+`reverse=True` reverses the whole order, so the tie-breaker is reversed as well: `po_3` comes before `po_2`. It is right only when every key goes in the same direction.
+
+### When there is nothing to negate
+
+A minus works for numbers only. `-"north_market"` fails with `TypeError: bad operand type for unary -: 'str'`, and the same happens with a `datetime`. For a date, `-d.toordinal()` or `-ts.timestamp()` turns it into a number. For a string, sort twice and let stability do the work:
+
+```python
+rows = [("north_market", 3), ("web", 1), ("north_market", 1), ("south_market", 2), ("web", 5)]
+
+# channel descending, then amount ascending: the channel is a string, so no minus
+by_amount = sorted(rows, key=lambda r: r[1])                 # 1. the secondary key
+result = sorted(by_amount, key=lambda r: r[0], reverse=True) # 2. the main key; ties keep step 1
+print(result)
+# [('web', 1), ('web', 5), ('south_market', 2), ('north_market', 1), ('north_market', 3)]
+```
+
+The order of the passes is the reverse of how you say it: the last pass decides the main order.
+
+## Stability
+
+A stable sort keeps the input order of rows whose keys are equal:
+
+```python
+events = [("evt_9", "2026-09-02"), ("evt_4", "2026-09-01"), ("evt_1", "2026-09-02"), ("evt_2", "2026-09-01")]
+
+print(sorted(events, key=lambda e: e[1]))
+# [('evt_4', '2026-09-01'), ('evt_2', '2026-09-01'), ('evt_9', '2026-09-02'), ('evt_1', '2026-09-02')]
+```
+
+Within a day, `evt_4` stays before `evt_2`, because it came first. Python guarantees this, and the two-pass sort above depends on it. Do not use it to break ties a task asks for, though: the input order is rarely part of the contract. If the task says "ties by id", put the id in the key. The first example on this page shows the same thing: `po_3` stayed before `po_2` when only the amount was the key.
+
+## Top-k with heapq
+
+`heapq.nsmallest(k, iterable, key=…)` returns the same list as `sorted(iterable, key=key)[:k]`. It keeps only the k best rows seen so far in a heap. Each new row costs O(log k), so the whole pass is O(n log k) with O(k) memory, instead of O(n log n) with all rows in memory. It also works on a generator, so the rows never have to be in one list.
+
+```python
+import heapq
+from decimal import Decimal
+
+revenue = {"prd_09": Decimal("329.85"), "prd_03": Decimal("120.00"), "prd_12": Decimal("120.00"),
+           "prd_01": Decimal("120.00"), "prd_07": Decimal("15.98")}
+
+# the 3 highest; ties -> smaller product id first
+print(heapq.nsmallest(3, revenue.items(), key=lambda kv: (-kv[1], kv[0])))
+# [('prd_09', Decimal('329.85')), ('prd_01', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+
+print(heapq.nlargest(3, revenue.items(), key=lambda kv: (kv[1], kv[0])))
+# [('prd_09', Decimal('329.85')), ('prd_12', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+
+print(sorted(revenue.items(), key=lambda kv: (-kv[1], kv[0]))[:3])
+# [('prd_09', Decimal('329.85')), ('prd_01', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+```
+
+Why `nsmallest` for "the highest"? `nlargest` is like `sorted(…, reverse=True)`: it reverses every part of the key. With `(revenue, id)` it prefers the larger id on a tie and returns `prd_12` instead of `prd_01`. With `nsmallest` and `(-revenue, id)` the directions are exactly as written. For k = 1, `min` or `max` with the same key is O(n) and simpler.
+
+In the database, `ORDER BY … LIMIT k` does the same. On the 8,294 practice transactions, `EXPLAIN ANALYZE` of `SELECT transaction_id, charged_usd FROM transactions ORDER BY charged_usd DESC, transaction_id LIMIT 10` shows `Sort Method: top-N heapsort  Memory: 17kB`.
+
+<Talk q="Top 10 out of a million rows — do you sort everything?">
+
+"No. heapq.nsmallest or nlargest keeps a heap of the 10 best so far: O(n log k) time and O(k) memory instead of O(n log n). If the data is in the database, ORDER BY … LIMIT 10 does the same — Postgres shows 'top-N heapsort' in the plan."
+
+When k is close to the number of rows, `sorted()` is faster; the heapq documentation says the same.
+
+</Talk>
+
+## Practice
+
+<Drill id="y-sort">
+
+Several keys are a tuple in `key`. The minus in front of the amount makes only that part descending. `reverse=True` would also reverse the id, and `p3` would come before `p2`.
+
+</Drill>
+
+<Drill id="y-topk">
+
+`heapq.nsmallest(k, …, key=lambda kv: (-kv[1], kv[0]))` is O(n log k) time and O(k) memory, instead of a full O(n log n) sort. The second check asks for more customers than there are, and the third one passes an empty dict: both must work without special code. To the question "what if there are a billion rows?" the answer is `ORDER BY … LIMIT k` in the database: PostgreSQL does the same top-N heapsort.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Write the order rule as a comment before the code, in the interviewer's words, and read it back: *"So: amount from high to low, and for equal amounts the smaller id first. Is that right?"* The key follows from the comment: `(-amount, id)`. If a part of the key is a string or a date, say why there is no minus and sort in two passes.
+
+When only the first few rows matter, mention the cost before you are asked: *"I don't need a full sort. heapq keeps the k best, so it is O(n log k). In the database it would be ORDER BY … LIMIT k."*
+</Aside>
+
+## Further reading
+
+- [sorted()](https://docs.python.org/3/builtins/functions.html#sorted) — the `key` and `reverse` arguments, and the stability guarantee.
+- [Sorting techniques](https://docs.python.org/3/howto/sorting.html) — key functions, ascending and descending, [stability and complex sorts](https://docs.python.org/3/howto/sorting.html#sort-stability-and-complex-sorts).
+- [heapq.nsmallest and nlargest](https://docs.python.org/3/library/heapq.html#heapq.nsmallest) — what they are equivalent to, and when they are faster than a sort.
+
+## Related topics
+
+- [dict, defaultdict and Counter](/python/dicts-and-counting/) — `Counter.most_common` and why it needs a tuple key for ties.
+- [Intervals](/python/intervals/) — merging periods starts with a sort by start.
+- [Testing and complexity](/python/testing-and-complexity/) — naming O(n log n) and O(n log k) out loud.
+- [Top N per group](/sql-patterns/top-n-per-group/) — the same tie rules with `ROW_NUMBER` and `ORDER BY … DESC, id`.

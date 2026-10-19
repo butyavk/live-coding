@@ -1,0 +1,26 @@
+-- Q13. Check merchant advances
+-- Level: hard. Target time: 15 min.
+--
+-- TASK
+--   We advanced money to merchants against their future channel payouts. Find advances that break our rules:
+--   (1) 'over_limit': amount_usd > ROUND(0.70 * expected proceeds of the advance's merchant, channel and period_month, 2) + 0.01.
+--   Expected proceeds of a (merchant, channel, month): north_market and south_market only, test purchases excluded. Each sale adds charged_usd * (1 - fee_rate) in the month of start_time; each refund subtracts the same amount in the month of refunded_at. Round the sum to 2 decimals. No date filter.
+--   (2) 'before_enrollment': the merchant is not enrolled (advances_enrolled_at IS NULL), or created_at < advances_enrolled_at.
+--   (3) 'duplicate': another advance with the same idempotency_key was created earlier.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: One row per advance?
+--   A: One row per broken rule.
+--   Q: No expected proceeds for that month?
+--   A: Treat them as 0.
+--   Q: Why + 0.01 in the limit?
+--   A: Advances are computed by another system with its own rounding, so 7 of the 38 are exactly one cent above ROUND(0.70 * expected, 2). One cent is rounding, not a broken rule.
+--   Q: Two advances with the same key and the same created_at?
+--   A: That does not happen here. If it did, the one with the smaller advance_id would be the original.
+--
+-- OUTPUT COLUMNS: advance_id, merchant_id, issue
+-- ORDER BY: advance_id, issue
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q13.sql   Check: pytest -k q13
+
+-- your query below

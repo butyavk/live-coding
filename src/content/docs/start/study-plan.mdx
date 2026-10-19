@@ -1,0 +1,77 @@
+---
+title: Study plan
+description: Pick a 1-week, 2–3-week or 4–6-week plan and get a checklist through this site, with saved progress, advice on how to practise and what to skip.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import StudyPlan from '~/components/StudyPlan.astro';
+
+Reading about SQL and Python will not get you through a live-coding interview. Solving tasks out loud, on a timer, will. This page turns the site into a plan that fits the time you have: the core first, then the patterns, and full tasks from the first week.
+
+<Aside type="tip" title="TL;DR">
+- **Short** (1 week): the protocol, the core drills of each page and eight full tasks on a timer. The other exercises are optional.
+- **Medium** (2–3 weeks): the core plus the patterns that turn a pass into a strong pass; most tasks, out loud.
+- **Long** (4–6 weeks): every topic and every task, each task solved twice.
+- Each plan shows its hours in total and per day, estimated from the pages and their exercises.
+- Practise **out loud, on a timer, from an empty editor**, and press Check before you read the answer.
+</Aside>
+
+## Choose your plan
+
+Pick a timeline and work down the checklist. Each step links to the page to read or the tasks to solve, and each phase starts with what to aim for in that plan. Ticks are saved in your browser and shared with the [skill map](/start/skill-map/): a page ticked here shows as learned on the map, and the plan you pick here is the plan the map shows. To move your progress to another device, use **Download progress** under the map.
+
+The hours of each plan come from the same estimate as the map: reading at about 150 words a minute, a fixed time for each exercise, each task at one and a half times its target time, plus the second attempts and the mock interviews the plan asks for. The flashcards add a few minutes a day.
+
+A step with exercises shows how many of them have passed Check, for example "exercises: 2/3". When all of them pass, the step offers **All solved: mark as learned**. In the short plan a step counts only the drills and traps marked "core" on the page and the tasks it names.
+
+<StudyPlan />
+
+The phases are in order, but they overlap in practice. Once you know the protocol and the first SQL pages, start the first tasks and keep reading in parallel. A task that goes badly shows you which page to read next. The last phase, before the interview, is the same in every plan: the recipes by hand, the common mistakes, the flashcards and a mock interview.
+
+## Do I need to know everything here?
+
+No. A live-coding round checks a small and stable core, and most tasks are built from the same few patterns. What you meet beyond the core depends on:
+
+- **The role.** A data or analytics role leans on SQL: reports, windows, cohorts. A backend role leans on Python, and its SQL part is often simpler: joins, grouping, a duplicate check.
+- **The level.** For senior roles the code matters less than the questions you ask, the checks you run and the follow-up: indexes, duplicates, what happens in production.
+- **The domain.** A payments company likes tasks about money and reconciliation. A consumer product likes conversion, churn and retention.
+- **The task you get.** One or two tasks in an hour is a small sample, so the core must be solid everywhere.
+
+The core that every plan covers: filters with half-open date ranges, GROUP BY and the three kinds of COUNT, NULL, LEFT JOIN with zeros, CTE, the best row per group, row multiplication; in Python, dict and Counter, sorting by several keys, Decimal, dates, intervals and a small class. Everything else adds depth to your follow-up answers.
+
+## How to practise
+
+**Set a timer.** Give each task 25 minutes, the slot a task gets in a round with two tasks. A task with a target time over 15 minutes gets its target plus 10 minutes. The [protocol](/start/interview-protocol/#time-budget-for-one-task) splits this time by step, and the mock interview uses the same clock. When the timer rings, stop and note where you are. Running out of time is useful information: it shows which step takes too long.
+
+**Say it out loud.** Restate the task, ask your questions, say the plan, explain each step. It feels strange when you are alone; record yourself, or practise with a friend. The [think-aloud phrases](/start/think-aloud/) give you the words.
+
+**Start from an empty editor.** Many rounds start from a blank editor. Others give you a function skeleton or a small repository with a bug, but you still write the logic yourself. So practise without the template: type the whole query or function yourself, including the comment block with the answers to your questions.
+
+**Press Check before you read the answer.** Check tells you whether the result is right, not how to get there. If it fails, find the difference yourself: count the rows, check one row by hand, look for a missing filter. Open **Show answer** or the walkthrough only after Check passes, or after a real attempt.
+
+**Redo a task three days later.** Keep a short list of tasks that failed or took too long. Three days later, solve each one again from an empty editor, without looking at your old solution. The second attempt shows whether you learned the pattern or only remembered the answer.
+
+**Do a mock interview.** At least once before the real one: the [mock interview](/start/mock-interview/) page picks a random SQL task, a random Python task or one of each, starts the timer and hides the hints. Work out loud, with a friend in the interviewer's role or a recorder running, and end with your [questions to ask](/start/questions-to-ask/).
+
+## What to skip when time is short
+
+With only a few days, keep what most tasks need and leave the rest for later. The short plan above does exactly this:
+
+- **Keep:** the [protocol](/start/interview-protocol/) and the [questions to ask](/start/questions-to-ask/), the SQL foundations, five SQL patterns ([row multiplication](/sql-patterns/row-multiplication/), [top N per group](/sql-patterns/top-n-per-group/), running totals, calendars, duplicates), the Python pages from dicts to testing, and the eight tasks of the short plan on a timer. On each page, the drills and traps marked "core".
+- **Skim:** [indexes and EXPLAIN](/sql-patterns/indexes-and-explain/): the TL;DR, the "In the interview" box and the spoken questions. "Which index would help?" is the most common follow-up to a SQL task.
+- **Skip:** the PostgreSQL dialect, database concepts, reconciliation and ledgers, cohorts and retention (unless you interview for an analytics role), generators, the other tasks on the task pages, and the second way to solve each drill.
+- **Backend role:** a rate limiter and a cache are common backend questions. If you have one more evening, do the optional steps of the short plan: decorators, time windows and the [caching and rate limits](/python-tasks/caching-and-rate-limits/) tasks.
+- **Never skip:** the check before "done". It takes two minutes and catches the mistakes that cost the most.
+
+<Aside type="note" title="In the interview">
+Practise the check as a sentence, not only as a habit, so it comes out by itself under pressure: "Twelve rows, one per merchant. The zero row is there. Let me check one merchant by hand." A dozen tasks solved with questions first, small steps and a spoken check prepare you better than fifty solutions read.
+</Aside>
+
+## Related topics
+
+- [Skill map](/start/skill-map/): the same pages as a map of prerequisites; its progress and the study plan's ticks are shared.
+- [Introduction](/start/introduction/): what the interview tests and how an exercise works.
+- [Interview protocol](/start/interview-protocol/): what to do inside each task while you practise.
+- [Mock interview](/start/mock-interview/): the last step of every plan, with a checklist for the review.
+- [Flashcards](/reference/flashcards/): a few minutes a day for the facts behind the patterns.

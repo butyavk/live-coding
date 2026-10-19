@@ -1,0 +1,22 @@
+-- Q03. Active paid subscriptions on a date
+-- Level: easy. Target time: 8 min.
+--
+-- TASK
+--   How many paid subscriptions were active on 2026-09-01 00:00 UTC, per product?
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: What does "active" mean for one transaction?
+--   A: start_time <= moment < end_time (half-open interval).
+--   Q: Paid means?
+--   A: Not a trial, not a test purchase, channel is not 'promo'.
+--   Q: What about refunds?
+--   A: A refunded transaction stops being active at refunded_at. If refunded_at <= moment, it is not active.
+--   Q: Products with zero?
+--   A: Leave them out.
+--
+-- OUTPUT COLUMNS: product_id, active_subscriptions
+-- ORDER BY: active_subscriptions DESC, product_id
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q03.sql   Check: pytest -k q03
+
+-- your query below

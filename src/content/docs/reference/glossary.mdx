@@ -1,0 +1,123 @@
+---
+title: Glossary
+description: The words behind subscription and payout tasks. Merchants and plans, sales channels, gross and net, proceeds, payouts, churn, MRR, webhooks, advances, ledgers.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+
+In tasks on subscription data, many wrong answers come from a word, not from SQL or Python. What are proceeds? When does a subscription churn? Does a debt have a date window? Each term below has a short meaning and the place where it lives in the [practice dataset](/start/dataset/). Read the English terms out loud before the interview: they are the words the interviewer will use.
+
+<Aside type="tip" title="TL;DR">
+- **Gross** is what the customer paid. **Net** is after refunds. **Proceeds** are what reaches the merchant: the price minus the sales channel's fee. A refunded sale gives 0. For one month, each sale adds its proceeds in the month it starts, and each refund takes them back in the month it happens.
+- A **subscription** is a chain of transactions with the same `original_transaction_id`. It **churns** in a month when it is active at the start of the month and not active on the 1st of the next month at 00:00: its last period has ended and nobody renewed it.
+- Webhooks are delivered **at least once**, so the same event can arrive twice. Processing must be **idempotent**.
+- An **advance** is paid now against a marketplace payout that has not arrived yet. What the merchant owes is the **sum of the ledger** over all time.
+- A **flow** has a period ("revenue in August"). A **balance** is a state at a moment ("what is owed today") and has no date window.
+</Aside>
+
+## The marketplace
+
+The practice data is an invented subscription marketplace: merchants sell subscriptions to customers through four sales channels.
+
+| Term | What it means | In the practice data |
+|---|---|---|
+| **merchant** | A business that sells subscriptions on the platform | `merchants`: `mer_01` … `mer_12` |
+| **product** | One subscription that a merchant sells | `products`: `prd_01` … `prd_20`, linked by `merchant_id` |
+| **plan** | A product with a billing period: weekly, monthly or annual | `plan_id` such as `prd_03.monthly`; `plan_period` is `P1W`, `P1M` or `P1Y` |
+| **customer** | A person who buys a subscription | `customer_id` such as `cus_02564` |
+| **sales channel** | Where the customer paid | `channel`: `north_market`, `south_market`, `web` or `promo` |
+| **partner marketplace** | A third party that sells for the merchant: it collects the money, keeps a fee and pays the merchant later | North Market (`north_market`) and South Market (`south_market`) |
+| **web checkout** | The merchant's own payment page | `channel = 'web'`, with a card processing fee |
+| **promo access** | Free access that the merchant grants to a customer | `channel = 'promo'`, price 0 |
+
+Say: *"One row of transactions is one billing period of one customer's subscription, sold through one channel."*
+
+## Money from a purchase
+
+| Term | What it means | In the practice data |
+|---|---|---|
+| **gross revenue** | What the customer paid | `charged_usd` |
+| **net revenue** | Revenue after refunds | `revenue_usd`, which is 0 for a refunded transaction |
+| **fee rate** | The share of the price that the channel keeps | `fee_rate`: 0.15 or 0.30 on the marketplaces, 0.03 on web checkout, 0 for promo |
+| **proceeds** of a sale | What reaches the merchant: the price minus the fee; 0 once refunded | `revenue_usd * (1 - fee_rate)` |
+| **proceeds of a month** | What a marketplace owes a merchant for one month (reconciliation, advances) | Each sale adds `charged_usd * (1 - fee_rate)` in the month of `start_time`; each refund subtracts the same amount in the month of `refunded_at` |
+| **payout** | A transfer from a marketplace to the merchant, once a month, for one month of sales | `channel_payouts`; North Market pays about 32 days after the month ends, South Market about 14 |
+| **refund** | Money returned to the customer, days or weeks after the purchase | `refunded_at`; in the practice data, a median of about 11 days after the start and 21 days at most |
+| **test purchase** | A purchase made to test the integration, not real money | `is_test`: exclude it from every business number |
+
+Say: *"Proceeds are what the merchant actually receives: the price minus the channel's fee. For one month, I add the sales of that month and subtract the refunds of that month."*
+
+## Subscriptions
+
+| Term | What it means | In the practice data |
+|---|---|---|
+| **transaction** | One billing period of a subscription, paid or trial | A row of `transactions`, the period `[start_time, end_time)` |
+| **subscription, chain** | Every period of one subscription: the first purchase and its renewals | The same `original_transaction_id` |
+| **renewal** | The next period of the same subscription | The next row of the chain, `renewal_number` 2, 3, … |
+| **trial** | A free first period | `is_trial`; 7 days, price 0 |
+| **trial conversion** | The first paid period right after a trial | `is_trial_conversion` |
+| **conversion rate** | Converted trials divided by all trials | Recent trials have not had time to convert yet |
+| **active at moment m** | m is inside the period, and the subscription was not refunded by then | `start_time <= m AND end_time > m AND (refunded_at IS NULL OR refunded_at > m)` |
+| **paid** | Not a trial, not a test purchase, not promo access | The three filters together |
+| **churn** | A subscription was active at the start of the period and is not active at its end: nobody renewed it | For August: active on 1 August, and `last_end <= '2026-09-01'`, where `last_end` is `MAX(end_time)` of the chain: not active on 1 September at 00:00 |
+| **churn rate** | Churned subscriptions divided by those active at the start of the period | Active on the first day is the denominator |
+| **MRR** | Monthly recurring revenue: the monthly value of every subscription active now | By `plan_period`: annual price / 12, weekly price × 52 / 12, monthly as is |
+| **ARPPU** | Average revenue per paying user: revenue divided by the number of distinct paying customers | Net revenue / `COUNT(DISTINCT customer_id)` of paid transactions |
+| **maturation** | A number that is still changing, because refunds and conversions have not arrived yet | The most recent month looks better than it will be |
+
+Say: *"A subscription is a chain of transactions with the same original transaction id. It churned in August if it was active on the first of August and is not active on the first of September at midnight."*
+
+## Webhooks
+
+| Term | What it means | In the practice data |
+|---|---|---|
+| **webhook** | A message from a sales channel: "something happened" | `webhook_events`; `type` is `purchase`, `renewal`, `expiration` or `refund` |
+| **at-least-once delivery** | The sender retries until it is sure, so one event can arrive more than once | The same `event_id` in several rows |
+| **duplicate** | A repeated delivery of the same event | Same `event_id`, type and `occurred_at`; only `received_at` differs |
+| **idempotency** | Processing the same event again changes nothing | A unique key plus `ON CONFLICT DO NOTHING` |
+| **occurred_at, received_at** | When it happened, and when it reached the platform | The difference is the delivery delay |
+
+Say: *"Webhooks are delivered at least once, so I'd store them with a unique constraint on event_id and ignore the repeats."*
+
+## The advances program
+
+The platform pays a merchant early: up to 70% of the proceeds a marketplace will pay out later, for a 3% fee. When the marketplace payout arrives, it repays the advance.
+
+| Term | What it means | In the practice data |
+|---|---|---|
+| **advance** | Money paid to a merchant now, against a marketplace payout that has not arrived yet | `advances`; by the rules, at most 70% of the expected proceeds; an `advance` entry (+) in the ledger |
+| **principal** | The advance itself: the money that was paid out | `advances.amount_usd` |
+| **fee** | What the platform charges for the advance | `fee_usd`, 3% of the amount; a `fee` entry (+) |
+| **repayment** | Paying the debt back out of a marketplace payout | A `repayment` entry (−) |
+| **ledger** | A journal of money movements; entries are only added, never changed | `ledger_entries` |
+| **outstanding, owed** | What the merchant owes right now: the sum of every ledger entry over all time | `SUM(amount_usd)` |
+| **enrolled** | The merchant has joined the advances program | `merchants.advances_enrolled_at IS NOT NULL`; six of the twelve merchants |
+| **headroom, available to advance** | How much more can be advanced: the limit minus the debt | For example, 70% of the last 30 days of proceeds minus what is owed; negative means over the limit |
+| **allocation** | A piece of a payout sent to one part of a debt | `(advance_id, 'fee' or 'principal', amount)` |
+| **remaining** | What is left of a payout after repayment; it goes to the merchant | Never below 0 |
+| **idempotency key** | The key that recognises a repeat of the same operation | `payout_id`; `advances.idempotency_key` is `merchant:channel:month`, such as `mer_11:north_market:2026-07-01` |
+| **reconciliation** | Comparing what should have been paid with what arrived | Expected proceeds, or advances, against `channel_payouts`, per channel and month |
+
+Say: *"An advance is money paid to a merchant today against their next marketplace payout. When the payout arrives, it repays the fee first, then the principal, oldest advance first."*
+
+## Flow and balance
+
+This one difference decides many money tasks.
+
+- **A flow** is a sum over a period: revenue for 30 days, sales in August. It always has a date window.
+- **A balance** is a state at a moment: a debt, an account balance, the active subscriptions. It is computed over all time up to that moment, with no window.
+
+Say: *"Proceeds are a flow, so they get the 30-day filter. The debt is a balance, so I sum the whole ledger."*
+
+<Aside type="note" title="In the interview">
+A word with two meanings is a question for the first minutes, and the answer usually names a column: *"By revenue, do you mean gross or net of refunds?"*, *"How do I know a merchant is enrolled?"* After a monthly report, be ready for *"Can we trust the number for the last month?"* An honest answer: *"Not fully yet. Refunds and trial conversions are still coming in, so the newest month looks better than it will."*
+</Aside>
+
+## Related topics
+
+- [Practice dataset](/start/dataset/) — every table and column these terms refer to.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — "active at a moment" in SQL.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — flows, balances and the ledger in practice.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — at-least-once delivery and unique keys.
+- [Conversion and churn](/sql-tasks/funnels-and-churn/) — tasks built on trials, renewals and churn.

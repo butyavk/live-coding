@@ -1,0 +1,36 @@
+---
+// The interactive part of an exercise: the editor (a plain <pre> until JavaScript replaces it
+// with CodeMirror), the toolbar, a status line, the verdict and the output. client.ts wires it up.
+import { strings, type Locale } from '../lib/i18n';
+
+interface Props {
+  locale: Locale;
+  lang: 'sql' | 'python';
+  code: string;
+  check?: boolean;
+  example?: boolean;
+  reset?: boolean;
+  /** A short line under the toolbar. */
+  note?: string;
+}
+const { locale, lang, code, check = false, example = false, reset = true, note } = Astro.props;
+const T = strings(locale);
+---
+<div class="lcp-work not-content">
+  <div class="lcp-editor" data-editor data-lang={lang}>
+    {code.trim() ? <pre class="lcp-fallback">{code}</pre> : <pre class="lcp-fallback lcp-fallback-empty">{lang === 'sql' ? T.sqlPlaceholder : ''}</pre>}
+  </div>
+  <div class="lcp-bar" data-bar hidden>
+    <button type="button" class="lcp-btn lcp-btn-primary" data-act="run">▶ {T.run}</button>
+    {check && <button type="button" class="lcp-btn" data-act="check">✓ {T.check}</button>}
+    {example && <button type="button" class="lcp-btn" data-act="example">{T.insertExample}</button>}
+    {reset && <button type="button" class="lcp-btn lcp-btn-quiet" data-act="reset">↺ {T.reset}</button>}
+    <button type="button" class="lcp-btn lcp-btn-stop" data-act="stop" hidden>■ {T.stop}</button>
+    <span class="lcp-keys">{!check ? T.keysRun : lang === 'sql' ? T.keys : T.keysPy}</span>
+  </div>
+  {note && <p class="lcp-small lcp-muted lcp-note">{note}</p>}
+  <noscript><p class="lcp-small lcp-muted">{T.noJs}</p></noscript>
+  <div class="lcp-status" data-status aria-live="polite"></div>
+  <div class="lcp-verdict" data-verdict aria-live="polite"></div>
+  <div class="lcp-out" data-out></div>
+</div>

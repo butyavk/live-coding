@@ -1,0 +1,253 @@
+---
+title: Классы и состояние
+description: Небольшой класс с состоянием, @dataclass и frozen=True, часы как параметр вместо time.time(), ловушка изменяемого значения по умолчанию и is против ==.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Кэши, ограничители частоты (rate limiter), обработчики вебхуков и журналы проводок помнят что-то между вызовами. На интервью они превращаются в небольшой класс: `__init__` и два-три метода. Интервьюер смотрит, где живёт состояние, может ли тест управлять временем, и ловит две классические ловушки Python: изменяемое значение по умолчанию и `is` вместо `==`.
+
+<Aside type="tip" title="Коротко">
+- Класс — когда между вызовами есть состояние; функция — когда его нет. Все атрибуты задаются в `__init__`.
+- `@dataclass` для записей: `__init__`, `__repr__` и `__eq__` бесплатно. `frozen=True` — для значений, которые не должны меняться; их можно класть в множество и делать ключами словаря.
+- Часы передаются снаружи: `def __init__(self, ttl, clock=time.monotonic)`. Тест передаёт `lambda: now[0]` и сам двигает время.
+- Никаких изменяемых значений по умолчанию (`items=[]`, `seen=set()`): `None`, а объект создаётся внутри. В dataclass — `field(default_factory=list)`.
+- `==` сравнивает значения, `is` проверяет, что это тот же объект. `is` — только для `None`.
+</Aside>
+
+## Небольшой класс с состоянием
+
+Если функции ничего не нужно от прошлых вызовов, пусть остаётся функцией. Когда нужно что-то помнить — например, уже виденные id или текущий остаток, — класс держит это состояние в одном месте:
+
+```python
+from collections import defaultdict
+from decimal import Decimal
+
+class Ledger:
+    """Сколько должен каждый продавец: аванс и комиссия увеличивают остаток, погашение уменьшает."""
+
+    def __init__(self):
+        self.entries = []                      # все проводки по порядку
+        self.balances = defaultdict(Decimal)   # merchant_id -> остаток
+
+    def post(self, merchant_id, amount):
+        if not isinstance(amount, Decimal):
+            raise TypeError(f"amount must be a Decimal, got {type(amount).__name__}")
+        self.entries.append((merchant_id, amount))
+        self.balances[merchant_id] += amount
+
+    def balance(self, merchant_id):
+        return self.balances.get(merchant_id, Decimal("0"))
+
+ledger = Ledger()
+ledger.post("mer_01", Decimal("96.34"))      # аванс
+ledger.post("mer_01", Decimal("2.89"))       # комиссия: 3 % от аванса
+ledger.post("mer_01", Decimal("-50.00"))     # погашение
+print(ledger.balance("mer_01"), ledger.balance("mer_02"), len(ledger.entries))   # 49.23 0 3
+ledger.post("mer_01", 10.5)                  # TypeError: amount must be a Decimal, got float
+```
+
+Три привычки делают такой класс читаемым:
+
+- **Всё состояние создаётся в `__init__`.** Читатель в одном месте видит, что помнит объект. Атрибут, который впервые появляется в каком-то методе, — сюрприз.
+- **Методы проверяют вход.** Неверный ввод падает сразу и с понятным сообщением, а не превращается позже в неверный остаток.
+- **Чтение не меняет состояние.** `balance()` использует `.get()`, поэтому вопрос про `mer_02` не создаёт для него запись.
+
+## @dataclass для записей
+
+Строке данных — выплате или событию — не нужны написанные вручную методы. `@dataclass` создаёт `__init__`, `__repr__` и `__eq__` по полям:
+
+```python
+from dataclasses import FrozenInstanceError, dataclass, field, replace
+from decimal import Decimal
+
+@dataclass(frozen=True)
+class Payout:
+    payout_id: str
+    merchant_id: str
+    amount: Decimal
+
+p = Payout("po_1", "mer_01", Decimal("69.64"))
+print(p)                                                # Payout(payout_id='po_1', merchant_id='mer_01', amount=Decimal('69.64'))
+print(p == Payout("po_1", "mer_01", Decimal("69.64")))  # True -- __eq__ сравнивает поля
+print(len({p, Payout("po_1", "mer_01", Decimal("69.64"))}))   # 1 -- frozen, значит хешируемый
+print(replace(p, amount=Decimal("70.00")))              # изменённая копия, p не меняется
+try:
+    p.amount = Decimal("0")
+except FrozenInstanceError as e:
+    print("FrozenInstanceError:", e)                    # FrozenInstanceError: cannot assign to field 'amount'
+
+@dataclass
+class Batch:
+    batch_id: str
+    payouts: list = field(default_factory=list)          # новый список для каждого Batch
+
+a, b = Batch("b1"), Batch("b2")
+a.payouts.append(p)
+print(len(a.payouts), len(b.payouts))                   # 1 0
+```
+
+`frozen=True` запрещает присваивание полям, так что выплата не может измениться после создания. Замороженный dataclass ещё и хешируемый: его можно положить в множество или сделать ключом словаря. Обычный dataclass — нельзя: `{Batch("b1")}` падает с `TypeError`, в тексте которого есть `unhashable type: 'Batch'`. Чтобы «изменить» замороженное значение, создают копию через `dataclasses.replace`.
+
+Изменяемое значение по умолчанию dataclass не примет: `payouts: list = []` даёт `ValueError: mutable default <class 'list'> for field payouts is not allowed: use default_factory`. `field(default_factory=list)` вызывает `list()` для каждого нового объекта.
+
+## Часы — снаружи
+
+Код, который вызывает `time.time()` или `datetime.now()` внутри метода, трудно тестировать: чтобы увидеть, как запись устарела, тест должен спать. Вместо этого передайте часы параметром. В продакшене это настоящие часы, в тесте — значение, которым управляет тест:
+
+```python
+import time
+
+class IdleTimer:
+    """Сессия, которая истекает через `timeout` секунд без активности."""
+
+    def __init__(self, timeout, clock=time.monotonic):
+        self.timeout = timeout
+        self.clock = clock                 # функция, которая возвращает секунды
+        self.last_seen = clock()
+
+    def touch(self):
+        self.last_seen = self.clock()
+
+    def expired(self):
+        return self.clock() - self.last_seen >= self.timeout
+
+now = [0]                                  # поддельные часы, которыми управляет тест
+timer = IdleTimer(30, clock=lambda: now[0])
+now[0] = 29; print(timer.expired())        # False
+timer.touch()                              # активность в 29
+now[0] = 58; print(timer.expired())        # False -- 29 секунд с последней активности
+now[0] = 59; print(timer.expired())        # True -- ровно 30: истекла
+```
+
+Тест проверяет границу точно (29 секунд, потом 30) и не тратит времени. `now` — список, чтобы лямбда читала текущее значение; простое число скопировалось бы один раз. Для длительностей по умолчанию берут `time.monotonic`, а не `time.time`: системные часы могут прыгнуть назад при подстройке, монотонные — никогда.
+
+Обратите внимание: `clock=time.monotonic` без скобок. Значение по умолчанию — сама функция, её вызовут позже. Со скобками по умолчанию было бы одно число, вычисленное один раз при выполнении `def`. Та же ошибка с датой:
+
+```python
+from datetime import datetime, timezone
+
+def stamp(event, at=datetime.now(timezone.utc)):   # вычисляется один раз, при выполнении def
+    return (event, at)
+
+first = stamp("a")
+time.sleep(0.01)
+second = stamp("b")
+print(first[1] == second[1])                       # True -- оба вызова получили одно и то же «сейчас»
+```
+
+## Изменяемое значение по умолчанию
+
+Значение по умолчанию создаётся один раз, когда функция определяется, и все вызовы, которые его используют, делят этот один объект. Для списка, множества или словаря это значит, что вызовы делят состояние:
+
+```python
+def add(item, items=[]):          # один список, создан при выполнении def
+    items.append(item)
+    return items
+
+print(add("a"))                   # ['a']
+print(add("b"))                   # ['a', 'b'] -- элемент первого вызова всё ещё здесь
+
+def add_fixed(item, items=None):
+    if items is None:
+        items = []                # новый список при каждом вызове
+    items.append(item)
+    return items
+
+print(add_fixed("a"), add_fixed("b"))   # ['a'] ['b']
+
+class Deduper:
+    def __init__(self, seen=set()):     # та же ловушка в __init__
+        self.seen = seen
+
+    def first_time(self, event_id):
+        if event_id in self.seen:
+            return False
+        self.seen.add(event_id)
+        return True
+
+x, y = Deduper(), Deduper()
+print(x.first_time("evt_1"), y.first_time("evt_1"))   # True False -- y делит множество с x
+```
+
+В `Deduper` ошибка хорошо прячется: экземпляры выглядят отдельными, но все используют одно множество. Первый тест проходит; тест со вторым экземпляром падает или, хуже, проходит по неверной причине. В обеих задачах на странице [Отладка](/python-tasks/debugging/) эта ошибка есть в том или ином виде.
+
+<Talk q="What is wrong with `def add(item, items=[])`?">
+
+"The default list is created once, when the function is defined, and it is shared between calls. The second call sees the items from the first one. Use `items=None` and create the list inside."
+
+В dataclass та же ошибка даже не запустится: он потребует `field(default_factory=list)`.
+
+</Talk>
+
+## `is` и `==`
+
+```python
+from decimal import Decimal
+
+a = [1, 2]
+b = [1, 2]
+print(a == b, a is b)                        # True False -- значения равны, объекта два
+
+x = 1000
+y = int("1000")
+print(x == y, x is y)                        # True False -- `is` на числах — удача, а не логика
+print(Decimal("1.0") == Decimal("1.00"))     # True
+
+payout = Decimal("0")
+print(not payout, payout is None)            # True False -- ноль ложен, но он не «отсутствует»
+```
+
+`==` спрашивает «равны ли значения?», и каждый тип сам определяет, что это значит. `is` спрашивает «это тот же объект в памяти?». Маленькие целые числа и короткие строки иногда оказываются одним объектом, поэтому `is` на них может «работать» — и сломаться на других значениях. `None` — единственный объект, поэтому `x is None` — правильная проверка, и класс с переопределённым `==` её не изменит.
+
+Последняя строка — родственная денежная ошибка. `if not payout:` считает `Decimal("0")` «выплаты нет», потому что ноль ложен. Если имеется в виду «значения нет», пишите `if payout is None:`.
+
+<Talk q="`is` or `==`?">
+
+"`==` compares values, `is` checks that it is the same object. I use `is` only for None: `if x is None`."
+
+`if not x` — третья, другая проверка: она верна для `None`, но и для `0`, `Decimal("0")` и пустого списка.
+
+</Talk>
+
+## Практика
+
+<Drill id="y-ttl">
+
+Время подаём снаружи (`clock`), поэтому тесты не ждут. Запись живёт, пока `now - stored_at < ttl`: ровно на границе она уже просрочена, это вторая проверка. Повторный `set` того же ключа заменяет значение и запускает время заново. В последней проверке комиссия, сохранённая в 20 и ещё раз в 28, на месте в 32 и исчезает в 38. `setdefault` в `set` оставил бы старое значение и старое время. Просроченное удаляем при чтении. На вопрос «а если потоков много?» ответ — `threading.Lock` вокруг чтения, проверки и записи.
+
+</Drill>
+
+<Drill id="y-state">
+
+`Enum` даёт статусам фиксированный набор имён. Опечатка вроде `Status.ACTVE` сразу падает с `AttributeError`, а опечатка в обычной строке просто ни с чем не совпадёт. `Status('active')` ищет элемент по значению и бросает `ValueError` для неизвестного, поэтому для `'paused'` не нужно отдельного кода, а `Status(Status.ACTIVE)` возвращает сам элемент. Правила — это данные: словарь от каждого статуса к множеству статусов, в которые из него можно перейти, у конечного — пустое множество. Проверяйте до присваивания: последняя проверка пытается вернуться из active в trial и ждёт, что статус останется active. Храните элемент, а не его строку: третья проверка сравнивает результат с `Status.REFUNDED`, а `'refunded'` ему не равна.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Прежде чем написать `class`, опишите объект двумя фразами: что он помнит и откуда берёт время. Для кэша: *"It keeps a dict from key to value and the time it was stored. The clock is a parameter, so a test moves time itself."* Потом задайте вопрос о границе: *"Is an entry exactly ttl seconds old still valid?"*
+
+Читая чужой код, сначала посмотрите на сигнатуры и скажите, что видите: *"This default set is created once and shared by every instance. I'll use None and create the set in __init__."*
+</Aside>
+
+## Что почитать
+
+- [Classes: a first look](https://docs.python.org/3/tutorial/classes.html#a-first-look-at-classes) — `__init__`, атрибуты экземпляра и методы.
+- [dataclasses](https://docs.python.org/3/library/dataclasses.html) — `@dataclass`, `field`, [frozen instances](https://docs.python.org/3/library/dataclasses.html#frozen-instances) и [mutable default values](https://docs.python.org/3/library/dataclasses.html#mutable-default-values).
+- [time.monotonic](https://docs.python.org/3/library/time.html#time.monotonic) — часы, которые не идут назад.
+- [Default argument values](https://docs.python.org/3/tutorial/controlflow.html#default-argument-values) — предупреждение о том, что значение по умолчанию вычисляется один раз.
+- [Why are default values shared between objects?](https://docs.python.org/3/faq/programming.html#why-are-default-values-shared-between-objects) — ответ из FAQ с приёмом через `None`.
+- [Identity comparisons](https://docs.python.org/3/reference/expressions.html#is-not) — что проверяют `is` и `is not`.
+- [enum](https://docs.python.org/3/library/enum.html) — элементы `Enum` и поиск по значению, `Status('active')`.
+
+## Связанные темы
+
+- [dict, defaultdict и Counter](/python/dicts-and-counting/) — состояние внутри класса часто и есть словарь.
+- [Декораторы](/python/decorators/) — замыкание или атрибут функции тоже хранят состояние между вызовами.
+- [Окна по времени](/python/time-windows/) — ограничитель частоты: класс с `deque` и временем снаружи.
+- [Тесты и сложность](/python/testing-and-complexity/) — время и случайность снаружи в тестах.
+- [Кэш и лимиты](/python-tasks/caching-and-rate-limits/) — кэш с TTL и ограничитель частоты как полные задачи.
+- [Отладка](/python-tasks/debugging/) — два модуля, сломанные общим значением по умолчанию и другими ошибками.

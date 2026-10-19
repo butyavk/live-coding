@@ -1,0 +1,2127 @@
+---
+// Skill map: every topic as a node in a prerequisite graph, grouped by stage and section.
+// Shows what is learned, opened, ready, skipped ("gaps"), where the reader is and what to
+// study next, and how many of each page's exercises have passed Check. Selecting a node draws
+// its prerequisites and what it unlocks. The chosen plan, the progress and the Reset are shared
+// with the study plan (lib/plan-store.ts, lib/progress.ts).
+// Server-rendered as plain links (works without JS); the script adds state and wiring.
+import { stages, tracks } from '~/data/skill-map';
+import { timelines, planSize, DEFAULT_TIMELINE } from '~/data/study-plan';
+import { mapNodes, pageHref } from './lib/skill-map-data';
+import { RESET_TEXT } from './lib/plan-store';
+import { overviewLayout } from './lib/skill-map-layout';
+import type { Locale } from './lib/format';
+import '@fontsource-variable/cormorant';
+import './skill-map-grim.css';
+
+const locale: Locale = Astro.locals.starlightRoute?.locale === 'ru' ? 'ru' : 'en';
+const nodes = await mapNodes(locale);
+const href = (p: string) => pageHref(p, locale);
+
+const T = {
+  en: {
+    learned: 'steps done',
+    here: 'You are here',
+    notStarted: 'Not started yet.',
+    start: 'Start with the introduction',
+    next: 'Next up',
+    gaps: 'Skipped',
+    gapsHelp: 'Prerequisites of topics you have learned',
+    plan: 'Show',
+    planWord: 'plan',
+    legend: 'Legend',
+    lLearned: 'learned',
+    lOpened: 'opened',
+    lReady: 'ready to start',
+    lLocked: 'prerequisites first',
+    lGap: 'skipped',
+    lOut: 'not in this plan',
+    lOpt: 'optional in this plan',
+    exStat: 'exercises solved',
+    solvedK: 'Every exercise solved',
+    solvedHelp: 'mark these topics as learned',
+    saved: 'Progress is saved in this browser only and shared with the study plan. Pages you open are marked “opened”; an exercise counts as solved when it passes Check. Mark a topic as learned at the end of its page or here.',
+    nojs: 'Turn on JavaScript to see your progress and the connections between topics.',
+    ovAria: 'Overview of all topics and their prerequisites',
+    ovHint: 'Left to right: from the basics to the topics that build on them. Lines are prerequisites; select a topic to see what it needs and what it unlocks.',
+    full: 'Full screen',
+    exitFull: 'Exit full screen',
+    listHead: 'By stage',
+    keyAria: 'Sections',
+    download: 'Download progress',
+    load: 'Load progress',
+    skin: 'Map look',
+    classic: 'Classic',
+    grim: 'Dark fantasy',
+    nextGrim: 'Next quests',
+    levelGrim: 'level',
+  },
+  ru: {
+    learned: 'шагов выполнено',
+    here: 'Вы здесь',
+    notStarted: 'Вы ещё не начали.',
+    start: 'Начните с введения',
+    next: 'Дальше',
+    gaps: 'Пропущено',
+    gapsHelp: 'Темы, на которые опираются уже изученные',
+    plan: 'Показать',
+    planWord: 'план',
+    legend: 'Обозначения',
+    lLearned: 'изучено',
+    lOpened: 'открыто',
+    lReady: 'можно начинать',
+    lLocked: 'сначала нужные темы',
+    lGap: 'пропущено',
+    lOut: 'нет в этом плане',
+    lOpt: 'по желанию в этом плане',
+    exStat: 'упражнений решено',
+    solvedK: 'Все упражнения решены',
+    solvedHelp: 'отметьте эти темы изученными',
+    saved: 'Прогресс хранится только в этом браузере и виден также в плане подготовки. Открытые страницы отмечаются как «открыто»; упражнение считается решённым, когда проходит проверку. Отметить тему изученной можно в конце её страницы или здесь.',
+    nojs: 'Включите JavaScript, чтобы видеть прогресс и связи между темами.',
+    ovAria: 'Обзор всех тем и связей между ними',
+    ovHint: 'Слева направо — от основ к темам, которые на них опираются. Линии — зависимости; выберите тему, чтобы увидеть, что ей нужно и что она открывает.',
+    full: 'На весь экран',
+    exitFull: 'Свернуть',
+    listHead: 'По этапам',
+    keyAria: 'Разделы',
+    download: 'Скачать прогресс',
+    load: 'Загрузить прогресс',
+    skin: 'Вид карты',
+    classic: 'Обычная',
+    grim: 'Тёмное фэнтези',
+    nextGrim: 'Следующие задания',
+    levelGrim: 'уровень',
+  },
+}[locale];
+
+// Strings the script needs.
+const C = {
+  en: {
+    of: 'of', min: 'min of study', core: 'In every plan', medium: 'Medium and long plans', long: 'Long plan only', noPlan: 'Not a plan step', optShort: 'optional in the short plan',
+    ex: 'Exercises solved: {x} of {y}', exAll: 'All solved: mark as learned', exNone: 'No exercises to check on this page in this plan.',
+    mark: 'Mark as learned', unmark: 'Learned — undo', open: 'Open the page', before: 'Learn first', leads: 'Leads to',
+    noNeeds: 'Nothing — a good place to start.', endLine: 'Nothing directly: this is an end point.', allBefore: 'Prerequisites learned, counting indirect ones',
+    st: { learned: 'Learned', opened: 'Opened, not marked as learned', ready: 'Ready: every prerequisite is learned', locked: 'Prerequisites not learned yet', gap: 'Skipped: a topic you learned builds on it' },
+    done: 'Everything in this plan is learned. Keep practising out loud.', more: 'more', here: 'You are here', none: 'none',
+    cont: 'Continue', show: 'Show on the map', close: 'Close',
+    route: {
+      h: 'Path here', left: 'Left to learn: {n}, including this one. Studying them with the exercises: about {time}. At each plan’s pace:', done: 'Already learned: nothing left on this path.',
+      notIn: 'not in this plan', opt: 'optional', lessDay: 'under a day', note: 'A plan’s pace is its length (for example 2–3 weeks for the medium plan) spread over its topics by study time.',
+      topic: ['topic', 'topics'], day: ['day', 'days'], hr: 'h', mn: 'min',
+    },
+    io: { bad: 'This is not a progress file from this site.', replace: 'Replace the progress in this browser with the one from the file?', loaded: 'Progress loaded.', saved: 'Progress file saved.' },
+    grim: { before: 'Requires', leads: 'Unlocks', mark: 'Learn this skill', unmark: 'Learned — undo', open: 'Open the page', routeH: 'The road here' },
+  },
+  ru: {
+    of: 'из', min: 'мин занятий', core: 'Во всех планах', medium: 'Средний и длинный планы', long: 'Только длинный план', noPlan: 'Не шаг плана', optShort: 'в коротком — по желанию',
+    ex: 'Решено упражнений: {x} из {y}', exAll: 'Всё решено: отметить изученным', exNone: 'В этом плане на странице нет упражнений с проверкой.',
+    mark: 'Отметить изученным', unmark: 'Изучено — отменить', open: 'Открыть страницу', before: 'Сначала изучить', leads: 'Ведёт к',
+    noNeeds: 'Ничего — хорошее место для старта.', endLine: 'Прямых продолжений нет: это конечная точка.', allBefore: 'Изучено нужных тем, включая косвенные',
+    st: { learned: 'Изучено', opened: 'Открыто, но не отмечено изученным', ready: 'Можно начинать: все нужные темы изучены', locked: 'Нужные темы ещё не изучены', gap: 'Пропущено: на эту тему опирается уже изученная' },
+    done: 'Всё в этом плане изучено. Продолжайте тренироваться вслух.', more: 'ещё', here: 'Вы здесь', none: 'нет',
+    cont: 'Продолжить', show: 'Показать на карте', close: 'Закрыть',
+    route: {
+      h: 'Путь сюда', left: 'Осталось изучить: {n}, включая эту. Изучение с упражнениями — около {time}. В темпе каждого плана:', done: 'Уже изучено: на этом пути ничего не осталось.',
+      notIn: 'не входит в план', opt: 'по желанию', lessDay: 'меньше дня', note: 'Темп плана — его срок (например, 2–3 недели у среднего), распределённый по темам пропорционально времени на каждую.',
+      topic: ['тема', 'темы', 'тем'], day: ['день', 'дня', 'дней'], hr: 'ч', mn: 'мин',
+    },
+    io: { bad: 'Это не файл прогресса с этого сайта.', replace: 'Заменить прогресс в этом браузере данными из файла?', loaded: 'Прогресс загружен.', saved: 'Файл с прогрессом сохранён.' },
+    grim: { before: 'Требует', leads: 'Открывает', mark: 'Изучить навык', unmark: 'Изучено — отменить', open: 'Открыть страницу', routeH: 'Дорога сюда' },
+  },
+}[locale];
+
+const trackTitle = Object.fromEntries(tracks.map((t) => [t.id, t.title[locale]]));
+const stageOfTrack = Object.fromEntries(stages.flatMap((s, i) => s.tracks.map((t) => [t, i])));
+const clientData = {
+  nodes: nodes.map((n) => ({ p: n.p, t: n.t, title: n.title, d: n.d, tr: n.tr, needs: n.needs, deps: n.deps, plans: n.plans, opt: n.opt, ord: n.ord, min: n.min, mins: n.mins, ex: n.ex, h: href(n.p) })),
+  tracks: trackTitle,
+  stages: stages.map((s) => s.title[locale]),
+  stageOfTrack,
+  t: C,
+  plans: timelines.map((tl) => ({ id: tl.id, name: `${tl.name[locale]} ${T.planWord}`, days: tl.days })),
+};
+const nodeByPath = Object.fromEntries(nodes.map((n) => [n.p, n]));
+const ov = overviewLayout((p) => nodeByPath[p].t);
+const roman = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII'];
+// One sigil per section for the dark-fantasy look (24×24, stroked).
+const sigils: Record<string, string> = {
+  start: 'M7 4h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7M7 4a2 2 0 0 0-2 2v1h4V6a2 2 0 0 0-2-2zM7 20a2 2 0 0 1-2-2v-1h4v1a2 2 0 0 1-2 2zM10 9h6M10 13h6',
+  reference: 'M7 3h10M7 21h10M8 3c0 5 8 5 8 9s-8 4-8 9M16 3c0 5-8 5-8 9s8 4 8 9',
+  sql: 'M5 6c0 1.7 3.1 3 7 3s7-1.3 7-3-3.1-3-7-3-7 1.3-7 3zM5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3',
+  'sql-patterns': 'M12 3 3 7.5l9 4.5 9-4.5zM3 12l9 4.5 9-4.5M3 16.5l9 4.5 9-4.5',
+  python: 'M9 4c-2 0-3 1-3 3v2c0 1.5-1 3-3 3 2 0 3 1.5 3 3v2c0 2 1 3 3 3M15 4c2 0 3 1 3 3v2c0 1.5 1 3 3 3-2 0-3 1.5-3 3v2c0 2-1 3-3 3',
+  'sql-tasks': 'M4 3l9.5 9.5M20 3l-9.5 9.5M8 15l-3.5 3.5M16 15l3.5 3.5M6.5 13.5l4 4M17.5 13.5l-4 4M3 21l1.5-2.5M21 21l-1.5-2.5',
+  'python-tasks': 'M3 5h18v14H3zM7 9l3 3-3 3M12 15h5',
+};
+// The long plan covers every topic, so it doubles as "show everything". Names, durations and the
+// number of steps come from the study plan, so both pages describe a plan with the same words.
+const stepsWord = (n: number) =>
+  locale === 'ru' ? (n % 10 === 1 && n % 100 !== 11 ? 'шаг' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? 'шага' : 'шагов') : n === 1 ? 'step' : 'steps';
+const plans = timelines.map(({ id, name, duration }) => {
+  const count = planSize(id);
+  const topics = `${count} ${stepsWord(count)}`;
+  return { id, name: name[locale], duration: duration[locale], topics, aria: `${name[locale]} ${T.planWord}: ${duration[locale]}, ${topics}` };
+});
+const R = RESET_TEXT[locale];
+---
+
+<div class="sm not-content" data-sm data-skin="classic">
+  <script is:inline>
+    // Apply the saved look before first paint, so the map does not flash.
+    (function (root) {
+      try {
+        var q = new URLSearchParams(location.search).get('skin');
+        var v = q === 'grim' || q === 'classic' ? q : localStorage.getItem('lcm-map-skin');
+        if (v === 'grim') root.dataset.skin = 'grim';
+      } catch (e) {}
+    })(document.currentScript.parentElement);
+  </script>
+  <script type="application/json" data-sm-json set:html={JSON.stringify(clientData)} />
+  <svg class="sm-sprite" aria-hidden="true" focusable="false" width="0" height="0">
+    {Object.entries(sigils).map(([id, d]) => (
+      <symbol id={`sm-sigil-${id}`} viewBox="0 0 24 24"><path d={d} fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></symbol>
+    ))}
+  </svg>
+
+  <div class="sm-skinbar">
+    <span class="sm-skinbar__label" aria-hidden="true">{T.skin}</span>
+    <fieldset class="sm-plan sm-skin">
+      <legend class="sm-sr">{T.skin}</legend>
+      <label>
+        <input type="radio" name="sm-skin" value="classic" checked />
+        <span>{T.classic}</span>
+      </label>
+      <label>
+        <input type="radio" name="sm-skin" value="grim" />
+        <span>⚔ {T.grim}</span>
+      </label>
+    </fieldset>
+  </div>
+  <section class="sm-top" aria-label={locale === 'ru' ? 'Ваш прогресс' : 'Your progress'}>
+    <div class="sm-stat">
+      <div class="sm-orb" aria-hidden="true"><span class="sm-orb__liquid"></span></div>
+      <p class="sm-stat__num"><b data-sm-learned>0</b> <span>/ <span data-sm-total>{nodes.length}</span></span></p>
+      <p class="sm-stat__label"><span class="sm-c">{T.learned}</span><span class="sm-g">{T.levelGrim} · {T.learned}</span></p>
+      <div class="sm-meter" aria-hidden="true"><span class="sm-meter__l" data-sm-ml></span><span class="sm-meter__o" data-sm-mo></span></div>
+      <p class="sm-stat__ex"><b data-sm-ex-solved>0</b> / <span data-sm-ex-total>0</span> {T.exStat}</p>
+    </div>
+    <div class="sm-cell">
+      <p class="sm-k">{T.here}</p>
+      <div data-sm-here>
+        <p class="sm-here__empty">{T.notStarted} <a href={href('start/introduction/')}>{T.start}</a>.</p>
+      </div>
+    </div>
+    <div class="sm-cell">
+      <p class="sm-k"><span class="sm-c">{T.next}</span><span class="sm-g">{T.nextGrim}</span></p>
+      <div class="sm-chips" data-sm-next>
+        <a class="sm-chip" href={href('start/introduction/')}>{nodes[0].t}</a>
+      </div>
+    </div>
+    <div class="sm-cell sm-cell--solved" data-sm-solved-wrap hidden>
+      <p class="sm-k">{T.solvedK} <span class="sm-k__help">· {T.solvedHelp}</span></p>
+      <div class="sm-chips" data-sm-solved></div>
+    </div>
+    <div class="sm-cell sm-cell--gaps" data-sm-gaps-wrap hidden>
+      <p class="sm-k">{T.gaps} <span class="sm-k__help">· {T.gapsHelp}</span></p>
+      <div class="sm-chips" data-sm-gaps></div>
+    </div>
+  </section>
+
+  <div class="sm-bar">
+    <fieldset class="sm-plan sm-plan--time">
+      <legend class="sm-sr">{T.plan}</legend>
+      {plans.map(({ id, name, duration, topics, aria }) => (
+        <label>
+          <input type="radio" name="sm-plan" value={id} checked={id === DEFAULT_TIMELINE} aria-label={aria} />
+          <span>
+            <span class="sm-plan__name">
+              {name}
+              <span class="sm-plan__word"> {T.planWord}</span>
+            </span>
+            <span class="sm-plan__meta">
+              <span>{duration}</span>
+              <span class="sm-plan__sep">, </span>
+              <span>{topics}</span>
+            </span>
+          </span>
+        </label>
+      ))}
+    </fieldset>
+    <ul class="sm-legend" aria-label={T.legend}>
+      <li><span class="sm-glyph is-learned"></span>{T.lLearned}</li>
+      <li><span class="sm-glyph is-opened"></span>{T.lOpened}</li>
+      <li><span class="sm-glyph is-ready"></span>{T.lReady}</li>
+      <li><span class="sm-glyph is-locked"></span>{T.lLocked}</li>
+      <li><span class="sm-glyph is-gap"></span>{T.lGap}</li>
+      <li data-sm-lout hidden><span class="sm-glyph is-out"></span>{T.lOut}</li>
+      <li data-sm-lopt hidden><span class="sm-legend__opt" aria-hidden="true"></span>{T.lOpt}</li>
+    </ul>
+  </div>
+  <noscript><p class="sm-nojs">{T.nojs}</p></noscript>
+
+  <section class="sm-ov" data-sm-ov aria-label={T.ovAria}>
+    <div class="sm-ov__bar">
+      <p class="sm-ov__hint">{T.ovHint}</p>
+      <button type="button" class="sm-ov__full" data-sm-full data-on={T.full} data-off={T.exitFull} aria-pressed="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" /></svg>
+        <span data-sm-full-label>{T.full}</span>
+      </button>
+    </div>
+    <div class="sm-ov__body" data-sm-ov-body>
+    <div class="sm-ov__scroll" data-sm-ov-scroll>
+      <div class="sm-ov__canvas" data-sm-ov-canvas style={`width:${ov.width}px;height:${ov.height}px`}>
+        <svg class="sm-ov__edges" width={ov.width} height={ov.height} viewBox={`0 0 ${ov.width} ${ov.height}`} aria-hidden="true" focusable="false">
+          {ov.edges.map((e) => <path d={e.d} data-from={e.from} data-to={e.to} />)}
+        </svg>
+        {ov.nodes.map((o) => (
+          <a class="sm-onode" href={href(o.p)} data-p={o.p} style={`left:${o.x}px;top:${o.y}px`} title={nodeByPath[o.p].title}>
+            <span class="sm-rune" aria-hidden="true"><svg><use href={`#sm-sigil-${nodeByPath[o.p].tr}`} /></svg></span>
+            <span class="sm-onode__t">{nodeByPath[o.p].t}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+    </div>
+    <ul class="sm-ov__key" aria-label={T.keyAria}>
+      {tracks.map((tr) => (
+        <li><svg aria-hidden="true"><use href={`#sm-sigil-${tr.id}`} /></svg>{tr.title[locale]}</li>
+      ))}
+    </ul>
+  </section>
+
+  <h2 class="sm-listhead">{T.listHead}</h2>
+
+  <div class="sm-board" data-sm-board>
+    <svg class="sm-wires" data-sm-wires aria-hidden="true" focusable="false">
+      <defs>
+        <marker id="sm-arrow-need" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" /></marker>
+        <marker id="sm-arrow-dep" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 8 4 0 8z" /></marker>
+      </defs>
+      <g data-sm-g></g>
+    </svg>
+    <ol class="sm-stages">
+      {stages.map((st, si) => (
+        <li class="sm-stage" data-stage={si}>
+          <header class="sm-stage__head">
+            <span class="sm-stage__n" aria-hidden="true"><span class="sm-c">{si + 1}</span><span class="sm-g">{roman[si]}</span></span>
+            <h2 class="sm-stage__title">{st.title[locale]}</h2>
+            <span class="sm-stage__count" data-sm-stage-count></span>
+          </header>
+          <p class="sm-stage__out">{st.outcome[locale]}</p>
+          <div class="sm-tracks">
+            {st.tracks.map((tr) => (
+              <section class="sm-track" data-track={tr}>
+                <h3 class="sm-track__title">
+                  <span>{trackTitle[tr]}</span>
+                  <span class="sm-track__count" data-sm-track-count></span>
+                </h3>
+                <ol class="sm-track__list">
+                  {nodes
+                    .filter((n) => n.tr === tr)
+                    .map((n) => (
+                      <li>
+                        <a class="sm-node" href={href(n.p)} data-p={n.p} title={n.title !== n.t ? n.title : undefined}>
+                          <span class="sm-glyph" aria-hidden="true"></span>
+                          <span class="sm-rune" aria-hidden="true"><svg><use href={`#sm-sigil-${n.tr}`} /></svg></span>
+                          <span class="sm-node__t">{n.t}</span>
+                          <span class="sm-node__ex" data-sm-ex hidden></span>
+                          <span class="sm-node__here" hidden>{C.here}</span>
+                        </a>
+                      </li>
+                    ))}
+                </ol>
+              </section>
+            ))}
+          </div>
+        </li>
+      ))}
+    </ol>
+    <aside class="sm-detail" data-sm-detail hidden aria-live="polite"></aside>
+  </div>
+
+  <div class="sm-foot">
+    <p class="sm-saved">{T.saved}</p>
+    <div class="sm-io">
+      <button type="button" class="sm-reset" data-sm-export>{T.download}</button>
+      <button type="button" class="sm-reset" data-sm-import>{T.load}</button>
+      <input type="file" accept="application/json,.json" data-sm-file hidden />
+      <button type="button" class="sm-reset" data-reset-open aria-expanded="false" aria-controls="sm-reset-panel">{R.button}</button>
+      <div class="sm-reset-panel" id="sm-reset-panel" data-reset-panel hidden>
+        <p>{R.ask}</p>
+        <label class="sm-reset-drafts"><input type="checkbox" data-reset-drafts /> {R.drafts}</label>
+        <div class="sm-reset-actions">
+          <button type="button" class="sm-reset sm-reset--yes" data-reset-yes>{R.yes}</button>
+          <button type="button" class="sm-reset" data-reset-no>{R.no}</button>
+        </div>
+      </div>
+      <p class="sm-io__msg" data-sm-io-msg data-reset-msg data-done={R.done} aria-live="polite"></p>
+    </div>
+  </div>
+</div>
+
+<style is:global>
+  :root:has(.sm) {
+    --sl-content-width: 74rem;
+  }
+  .sm-sprite {
+    position: absolute;
+    width: 0;
+    height: 0;
+    overflow: hidden;
+  }
+  .sm:not([data-skin='grim']) :is(.sm-g, .sm-node .sm-rune, .sm-orb) {
+    display: none;
+  }
+  .sm[data-skin='grim'] .sm-c {
+    display: none;
+  }
+  .sm {
+    --sm-gap: 1rem;
+    --sm-node-bg: var(--sl-color-bg);
+    container-type: inline-size;
+    margin-block: 1.5rem 2rem;
+  }
+  .sm :where(p, ol, ul, h2, h3, h4) {
+    margin: 0;
+  }
+  .sm ol,
+  .sm ul {
+    list-style: none;
+    padding: 0;
+  }
+  .sm-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* ---------- Summary ---------- */
+  .sm-top {
+    display: grid;
+    grid-template-columns: minmax(9rem, auto) 1fr 1.4fr;
+    gap: 0.75rem;
+  }
+  .sm-stat,
+  .sm-cell {
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+    background: var(--sl-color-bg);
+  }
+  .sm-cell--gaps {
+    grid-column: 1 / -1;
+    border-color: color-mix(in srgb, var(--lcm-signal) 55%, var(--sl-color-gray-5));
+    background: color-mix(in srgb, var(--lcm-signal-low) 60%, var(--sl-color-bg));
+  }
+  .sm-stat__num {
+    font-size: 2rem;
+    line-height: 1;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-white);
+  }
+  .sm-stat__num span {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-stat__label {
+    margin-top: 0.3rem !important;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-meter {
+    display: flex;
+    height: 0.4rem;
+    margin-top: 0.7rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--sl-color-gray-6);
+  }
+  .sm-meter__l {
+    background: var(--sl-color-accent);
+  }
+  .sm-meter__o {
+    background: color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+  }
+  .sm-k {
+    margin-bottom: 0.45rem !important;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-k__help {
+    font-weight: 450;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .sm-here__empty,
+  .sm-here__title {
+    font-size: var(--sl-text-sm);
+    line-height: 1.45;
+  }
+  .sm-here__title {
+    font-weight: 600;
+    color: var(--sl-color-white);
+  }
+  .sm-here__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.9rem;
+    margin-top: 0.4rem;
+    font-size: var(--sl-text-sm);
+  }
+  .sm-here__actions :is(a, button),
+  .sm-here__empty a {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--sl-color-accent);
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 0.18em;
+  }
+  .sm-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .sm-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    max-width: 100%;
+    padding: 0.28rem 0.7rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 999px;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-white);
+    font: inherit;
+    font-size: var(--sl-text-sm);
+    line-height: 1.35;
+    text-align: start;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .sm-chip:hover,
+  .sm-chip:focus-visible {
+    border-color: var(--sl-color-accent);
+  }
+  .sm-chip--more {
+    color: var(--sl-color-gray-3);
+  }
+  .sm-done {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+
+  /* ---------- Controls ---------- */
+  .sm-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem 1.25rem;
+    margin: 1.25rem 0 0.25rem;
+  }
+  .sm-plan {
+    display: inline-flex;
+    flex-wrap: wrap;
+    margin: 0;
+    padding: 0.2rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 999px;
+  }
+  .sm-plan label {
+    position: relative;
+  }
+  .sm-plan input {
+    position: absolute;
+    opacity: 0;
+    inset: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+  .sm-plan label > span {
+    display: block;
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-2);
+  }
+  .sm-plan input:checked + span {
+    background: var(--sl-color-accent);
+    color: var(--sl-color-black);
+    font-weight: 600;
+  }
+  /* Plan switch: name on top, duration and number of topics underneath. */
+  .sm-plan--time {
+    border-radius: 1rem;
+  }
+  .sm-plan--time label > span {
+    padding: 0.3rem 0.95rem 0.35rem;
+    border-radius: 0.8rem;
+    line-height: 1.3;
+    text-align: center;
+  }
+  .sm-plan__name,
+  .sm-plan__meta {
+    display: block;
+  }
+  .sm-plan__meta {
+    font-size: var(--sl-text-xs);
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-plan input:checked + span .sm-plan__meta {
+    color: inherit;
+  }
+  .sm-plan input:focus-visible + span {
+    outline: 2px solid var(--sl-color-accent);
+    outline-offset: 2px;
+  }
+  .sm-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 0.9rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+  }
+  .sm-legend li[hidden] {
+    display: none;
+  }
+  .sm-nojs {
+    margin-top: 0.75rem !important;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+
+  /* ---------- Overview: the whole tree at once ---------- */
+  .sm-ov {
+    margin-top: 1.25rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+    background-color: var(--sl-color-bg);
+    background-image: radial-gradient(var(--sl-color-gray-6) 1px, transparent 1.2px);
+    background-size: 18px 18px;
+  }
+  .sm-ov__bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.5rem 1rem;
+    padding: 0.75rem 0.9rem 0;
+  }
+  .sm-ov__hint {
+    flex: 1 1 24rem;
+    max-width: 62ch;
+    font-size: var(--sl-text-sm);
+    line-height: 1.45;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-ov__full {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-gray-2);
+    font: inherit;
+    font-size: var(--sl-text-sm);
+    cursor: pointer;
+  }
+  .sm-ov__full svg {
+    width: 0.9rem;
+    height: 0.9rem;
+  }
+  .sm-ov__full:hover,
+  .sm-ov__full:focus-visible {
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-white);
+  }
+  .sm-ov__scroll {
+    overflow: auto;
+    overscroll-behavior-x: contain;
+    padding: 0.25rem 0 0.5rem;
+  }
+  .sm-ov__canvas {
+    position: relative;
+    margin-inline: auto;
+  }
+  .sm-ov__edges {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+  }
+  .sm-ov__edges path {
+    fill: none;
+    stroke: var(--sl-color-gray-5);
+    stroke-width: 1.4;
+    transition: stroke 150ms, opacity 150ms;
+  }
+  .sm-ov__edges path.e-done {
+    stroke: color-mix(in srgb, var(--sl-color-accent) 55%, var(--sl-color-gray-5));
+  }
+  .sm.has-sel .sm-ov__edges path {
+    opacity: 0.35;
+  }
+  .sm.has-sel .sm-ov__edges path:is(.e-need, .e-dep, .e-anc) {
+    opacity: 1;
+  }
+  .sm-ov__edges path.e-anc {
+    stroke: color-mix(in srgb, var(--sl-color-accent) 60%, transparent);
+    stroke-width: 1.8;
+  }
+  .sm-ov__edges path.e-need {
+    stroke: var(--sl-color-accent);
+    stroke-width: 2.6;
+  }
+  .sm-ov__edges path.e-dep {
+    stroke: var(--lcm-signal);
+    stroke-width: 2.2;
+    stroke-dasharray: 6 4;
+  }
+  /* Links to topics outside the chosen plan fade to a dotted trace. */
+  .sm-ov__edges path.e-out:not(.e-need, .e-dep, .e-anc) {
+    stroke-dasharray: 1.5 4.5;
+    opacity: 0.6;
+  }
+  .sm-onode {
+    position: absolute;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    width: 122px;
+    transform: translate(-50%, -17px);
+    color: var(--sl-color-white);
+    text-decoration: none;
+  }
+  .sm-onode .sm-rune {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border: 2px solid var(--sl-color-gray-4);
+    border-radius: 50%;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-gray-3);
+    transition: box-shadow 150ms, border-color 150ms, background-color 150ms, transform 220ms ease;
+  }
+  .sm-onode .sm-rune svg {
+    transition: opacity 150ms;
+  }
+  .sm-onode .sm-rune svg {
+    width: 17px;
+    height: 17px;
+  }
+  /* Sizes match OV.labelW / lineH / maxLines in skill-map-layout.ts, which leaves room for them. */
+  .sm-onode__t {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    max-width: 100%;
+    padding: 0 1px;
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--sl-color-bg) 88%, transparent);
+    font-size: 0.72rem;
+    line-height: 14px;
+    text-align: center;
+    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
+  .sm-onode.is-ready .sm-rune {
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-accent);
+  }
+  .sm-onode.is-locked .sm-rune {
+    border-style: dashed;
+  }
+  .sm-onode.is-locked {
+    color: var(--sl-color-gray-2);
+  }
+  .sm-onode.is-opened .sm-rune {
+    border-color: var(--sl-color-accent);
+    background: linear-gradient(90deg, var(--sl-color-accent-low) 50%, var(--sl-color-bg) 50%);
+    color: var(--sl-color-accent);
+  }
+  .sm-onode.is-learned .sm-rune {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-accent);
+    color: var(--sl-color-black);
+  }
+  .sm-onode.is-gap .sm-rune {
+    border-color: var(--lcm-signal);
+    color: var(--lcm-signal);
+    background: var(--lcm-signal-low);
+  }
+  /* Not in the chosen plan: the socket folds into a small dot and the tree keeps its shape.
+     Pointing at it (or selecting it) unfolds it again. */
+  .sm-onode.is-out {
+    color: var(--sl-color-gray-3);
+  }
+  .sm-onode.is-out:not(.is-sel, :hover, :focus-visible) .sm-rune {
+    transform: scale(0.36);
+    border-color: var(--sl-color-gray-4);
+    background: var(--sl-color-gray-4);
+    box-shadow: none;
+  }
+  .sm-onode.is-out.is-learned:not(.is-sel, :hover, :focus-visible) .sm-rune {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-accent);
+  }
+  .sm-onode.is-out:not(.is-sel, :hover, :focus-visible) .sm-rune svg {
+    opacity: 0;
+  }
+  .sm.has-sel .sm-onode:not(.is-sel, .is-need, .is-anc, .is-dep) {
+    color: var(--sl-color-gray-3);
+  }
+  .sm-onode.is-need .sm-rune,
+  .sm-onode.is-anc .sm-rune {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--sl-color-accent) 35%, transparent);
+  }
+  .sm-onode.is-dep .sm-rune {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--lcm-signal) 35%, transparent);
+  }
+  .sm-onode.is-sel .sm-rune {
+    box-shadow: 0 0 0 3px var(--sl-color-bg), 0 0 0 5px var(--sl-color-accent);
+  }
+  .sm-onode.is-sel .sm-onode__t {
+    font-weight: 650;
+  }
+  .sm-onode.is-here .sm-rune::after {
+    content: '';
+    position: absolute;
+    top: -5px;
+    right: -5px;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--sl-color-bg);
+    border-radius: 50%;
+    background: var(--lcm-signal);
+  }
+  .sm-onode:hover .sm-rune {
+    border-color: var(--sl-color-gray-2);
+  }
+  .sm-onode:focus-visible {
+    outline: none;
+  }
+  .sm-onode:focus-visible .sm-rune {
+    outline: 2px solid var(--sl-color-accent);
+    outline-offset: 3px;
+  }
+  .sm-ov .sm-ov__key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem 1rem;
+    padding: 0.6rem 0.9rem 0.8rem;
+    border-top: 1px solid var(--sl-color-gray-6);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-ov__key li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .sm-ov__key svg {
+    width: 14px;
+    height: 14px;
+  }
+  /* A topic picked on the overview: its card docks at the right edge and the map moves over
+     to make room, so the card never covers the tree. */
+  .sm-ov__body {
+    --sm-dock: 21rem;
+    position: relative;
+  }
+  .sm-ov__body.has-dock > .sm-ov__scroll {
+    margin-inline-end: var(--sm-dock);
+  }
+  .sm .sm-ov__body > .sm-detail.is-dock {
+    position: absolute;
+    z-index: 3;
+    top: 0.25rem;
+    bottom: 0.5rem;
+    inset-inline-end: 0.6rem;
+    width: calc(var(--sm-dock) - 1.2rem);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .sm-d__close {
+    position: absolute;
+    top: 0.4rem;
+    inset-inline-end: 0.5rem;
+    width: 1.8rem;
+    height: 1.8rem;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--sl-color-gray-3);
+    font: inherit;
+    font-size: 1.3rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .sm-d__close:hover,
+  .sm-d__close:focus-visible {
+    color: var(--sl-color-white);
+    background: var(--sl-color-gray-6);
+  }
+  .sm-detail .sm-d__crumb {
+    padding-inline-end: 2rem;
+  }
+  /* Full screen. */
+  .sm-ov.is-full {
+    position: fixed !important;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    border-radius: 0;
+  }
+  .sm-ov.is-full .sm-ov__body {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .sm-ov.is-full .sm-ov__scroll {
+    flex: 1;
+  }
+  :root.sm-noscroll {
+    overflow: hidden;
+  }
+  /* Overlay fallback: let the fixed overview rise above the site header and sidebar. */
+  :root.sm-noscroll :is(.main-pane, .sm, .sm > *) {
+    isolation: auto !important;
+    z-index: auto !important;
+  }
+  :root.sm-noscroll .sm-ov.is-full {
+    z-index: 2147483000 !important;
+  }
+  .sm .sm-listhead {
+    margin: 2rem 0 0.25rem;
+    font-size: var(--sl-text-h4);
+    font-weight: 650;
+    color: var(--sl-color-white);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sm-ov__edges path,
+    .sm-onode .sm-rune,
+    .sm-onode .sm-rune svg {
+      transition: none;
+    }
+  }
+
+  /* ---------- Board ---------- */
+  .sm-board {
+    position: relative;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1.25rem;
+    margin-top: 1rem;
+  }
+  .sm.is-side.has-sel .sm-board {
+    grid-template-columns: minmax(0, 1fr) 19rem;
+    align-items: start;
+  }
+  .sm-wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .sm-wires path {
+    fill: none;
+    stroke-width: 1.75;
+    stroke-linecap: round;
+  }
+  .sm-wires .w-need {
+    stroke: var(--sl-color-accent);
+    marker-end: url(#sm-arrow-need);
+  }
+  .sm-wires .w-dep {
+    stroke: var(--lcm-signal);
+    stroke-dasharray: 5 4;
+    marker-end: url(#sm-arrow-dep);
+  }
+  #sm-arrow-need path {
+    fill: var(--sl-color-accent);
+  }
+  #sm-arrow-dep path {
+    fill: var(--lcm-signal);
+  }
+  .sm-stages {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+  .sm-stage {
+    position: relative;
+    padding-bottom: 1.1rem;
+  }
+  .sm-stage:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    left: 0.95rem;
+    bottom: 0;
+    width: 2px;
+    height: 0.9rem;
+    background: var(--sl-color-gray-5);
+  }
+  .sm-stage__head,
+  .sm-stage__out {
+    position: relative;
+    background: var(--sl-color-bg);
+  }
+  .sm-stage__head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .sm-stage__n {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 2rem;
+    height: 2rem;
+    border: 2px solid var(--sl-color-accent);
+    border-radius: 50%;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-accent);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .sm-stage.is-complete .sm-stage__n {
+    background: var(--sl-color-accent);
+    color: var(--sl-color-bg);
+  }
+  .sm .sm-stage__title {
+    margin: 0;
+    padding: 0;
+    font-size: var(--sl-text-lg);
+    font-weight: 650;
+    color: var(--sl-color-white);
+  }
+  .sm-stage__count {
+    margin-inline-start: auto;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .sm-stage__out {
+    margin: 0.2rem 0 0.7rem 2.6rem !important;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-tracks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(13.5rem, 1fr));
+    gap: var(--sm-gap);
+    margin-inline-start: 2.6rem;
+  }
+  .sm-track {
+    min-width: 0;
+    padding: 0.7rem 0.75rem 0.8rem;
+    border: 1px dashed var(--sl-color-gray-5);
+    border-radius: 0.75rem;
+  }
+  .sm-track {
+    background: color-mix(in srgb, var(--sl-color-bg) 82%, transparent);
+  }
+  .sm .sm-track__title {
+    margin-top: 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem !important;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-track__count {
+    flex: none;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0;
+  }
+  .sm-track__list {
+    display: grid;
+    gap: 0.4rem;
+  }
+  .sm-node {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.55rem;
+    background: var(--sm-node-bg);
+    color: var(--sl-color-white);
+    font-size: var(--sl-text-sm);
+    line-height: 1.3;
+    text-decoration: none;
+    transition: border-color 120ms, opacity 120ms, background-color 120ms;
+  }
+  .sm-node:hover {
+    border-color: var(--sl-color-gray-3);
+  }
+  .sm-node:focus-visible {
+    outline: 2px solid var(--sl-color-accent);
+    outline-offset: 2px;
+  }
+  .sm-node__t {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .sm-node__here {
+    flex: none;
+    margin-inline-start: auto;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: var(--lcm-signal);
+    color: var(--sl-color-black);
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+  .sm-node.is-locked {
+    color: var(--sl-color-gray-2);
+  }
+  .sm-node.is-gap {
+    border-color: color-mix(in srgb, var(--lcm-signal) 70%, transparent);
+  }
+  /* Dimming changes colours, never opacity: nodes stay opaque so wires pass behind them. */
+  .sm-node.is-out {
+    border-color: var(--sl-color-gray-6);
+    color: var(--sl-color-gray-3);
+  }
+  /* Outside the chosen plan: the same folded dot as on the overview (learned ones keep their colour). */
+  .sm-node.is-out > .sm-glyph {
+    width: 0.45rem;
+    height: 0.45rem;
+    margin: 0.25rem;
+    border-style: solid;
+    border-color: var(--sl-color-gray-4);
+    background: var(--sl-color-gray-4);
+  }
+  .sm-node.is-out.is-learned > .sm-glyph {
+    border-color: var(--sl-color-accent);
+    background: var(--sl-color-accent);
+  }
+  .sm-node.is-out > .sm-glyph::after {
+    display: none;
+  }
+  .sm-node.is-need {
+    border-color: var(--sl-color-accent);
+  }
+  .sm-node.is-anc:not(.is-need) {
+    border-color: color-mix(in srgb, var(--sl-color-accent) 45%, var(--sl-color-gray-5));
+    border-style: dashed;
+  }
+  .sm-node.is-dep {
+    border-color: var(--lcm-signal);
+  }
+  .sm-node.is-sel {
+    border-color: var(--sl-color-accent);
+    background: color-mix(in srgb, var(--sl-color-accent-low) 75%, var(--sl-color-bg));
+    box-shadow: 0 0 0 1px var(--sl-color-accent);
+  }
+  .sm.has-sel .sm-node:not(.is-sel, .is-need, .is-anc, .is-dep) {
+    border-color: var(--sl-color-gray-6);
+    color: var(--sl-color-gray-3);
+  }
+  .sm.has-sel .sm-node:not(.is-sel, .is-need, .is-anc, .is-dep) .sm-glyph {
+    opacity: 0.6;
+  }
+
+  /* ---------- Detail panel ---------- */
+  .sm-detail {
+    position: relative;
+    z-index: 2;
+    padding: 1rem 1.1rem 1.1rem;
+    border: 1px solid var(--sl-color-accent);
+    border-radius: 0.85rem;
+    background: var(--sl-color-bg);
+    box-shadow: 0 10px 30px -18px rgb(0 0 0 / 0.5);
+  }
+  .sm.is-side .sm-detail {
+    position: sticky;
+    top: calc(var(--sl-nav-height, 4rem) + 1rem);
+    max-height: calc(100vh - var(--sl-nav-height, 4rem) - 2rem);
+    overflow: auto;
+  }
+  .sm-tracks > .sm-detail {
+    grid-column: 1 / -1;
+  }
+  .sm-detail .sm-d__crumb {
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-detail .sm-d__title {
+    margin: 0.25rem 0 0.4rem;
+    font-size: var(--sl-text-xl);
+    line-height: 1.2;
+    font-weight: 650;
+    color: var(--sl-color-white);
+  }
+  .sm-detail .sm-d__desc {
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+    color: var(--sl-color-gray-2);
+  }
+  .sm-detail .sm-d__meta {
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-detail .sm-d__status {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+    padding: 0.55rem 0.65rem;
+    border-radius: 0.55rem;
+    background: var(--sl-color-gray-6);
+    font-size: var(--sl-text-sm);
+    line-height: 1.4;
+  }
+  .sm-detail .sm-d__status .sm-glyph {
+    margin-top: 0.15rem;
+  }
+  .sm-detail .sm-d__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.8rem;
+  }
+  .sm-detail .sm-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--sl-color-accent);
+    border-radius: 0.5rem;
+    background: var(--sl-color-accent);
+    color: var(--sl-color-black);
+    font: inherit;
+    font-size: var(--sl-text-sm);
+    font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .sm-detail .sm-btn--ghost {
+    background: transparent;
+    color: var(--sl-color-accent);
+  }
+  .sm-detail .sm-d__h {
+    margin: 1rem 0 0.4rem;
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-detail .sm-d__h--need {
+    color: var(--sl-color-accent);
+  }
+  .sm-detail .sm-d__h--dep {
+    color: var(--lcm-signal);
+  }
+  .sm-detail .sm-d__list {
+    display: grid;
+    gap: 0.3rem;
+  }
+  .sm-detail .sm-d__list .sm-chip {
+    width: 100%;
+    border-radius: 0.5rem;
+  }
+  .sm-detail .sm-d__none,
+  .sm-detail .sm-d__path {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .sm-detail .sm-d__path {
+    margin-top: 0.4rem;
+  }
+  /* Path here: how much is left before this topic, in days at each plan's pace. */
+  .sm-detail .sm-d__left {
+    font-size: var(--sl-text-sm);
+  }
+  .sm-detail .sm-d__plans {
+    display: grid;
+    gap: 0.15rem;
+    margin-top: 0.4rem;
+    font-size: var(--sl-text-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .sm-detail .sm-d__plans li {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.4rem;
+    color: var(--sl-color-gray-2);
+  }
+  .sm-detail .sm-d__plans li.is-cur {
+    background: var(--sl-color-accent-low);
+    color: var(--sl-color-white);
+    font-weight: 600;
+  }
+  .sm-detail .sm-d__plans li.is-no span:last-child {
+    color: var(--sl-color-gray-3);
+    font-weight: 400;
+  }
+  .sm-detail .sm-d__note {
+    margin-top: 0.35rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+
+  /* ---------- Footer ---------- */
+  .sm-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem 1.5rem;
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sl-color-gray-6);
+  }
+  .sm-saved {
+    flex: 1 1 22rem;
+    font-size: var(--sl-text-xs);
+    line-height: 1.5;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-skinbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+  .sm-skinbar__label {
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+  .sm[data-skin='grim'] .sm-skinbar__label {
+    color: var(--g-bone-dim);
+  }
+  .sm-io {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+  .sm-io__msg {
+    flex-basis: 100%;
+    min-height: 1.2em;
+    font-size: var(--sl-text-xs);
+    text-align: end;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-reset {
+    padding: 0.3rem 0.75rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--sl-color-gray-2);
+    font: inherit;
+    font-size: var(--sl-text-sm);
+    cursor: pointer;
+  }
+  .sm-reset:hover,
+  .sm-reset:focus-visible {
+    border-color: var(--sl-color-gray-3);
+    color: var(--sl-color-white);
+  }
+
+  /* ---------- Exercises and optional steps ---------- */
+  .sm-stat__ex {
+    margin-top: 0.45rem !important;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    font-variant-numeric: tabular-nums;
+  }
+  .sm-stat__ex b {
+    color: var(--sl-color-white);
+  }
+  .sm-cell--solved {
+    grid-column: 1 / -1;
+    border-color: var(--sl-color-accent);
+    background: color-mix(in srgb, var(--sl-color-accent-low) 55%, var(--sl-color-bg));
+  }
+  .sm-chip--learn::before {
+    content: '✓';
+    color: var(--sl-color-accent);
+    font-weight: 700;
+  }
+  .sm-node__ex {
+    flex: none;
+    margin-inline-start: auto;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--sl-color-gray-3);
+  }
+  .sm-node__ex.is-all {
+    color: var(--sl-color-text-accent);
+    font-weight: 650;
+  }
+  .sm-node__ex + .sm-node__here {
+    margin-inline-start: 0;
+  }
+  .sm-node.is-opt,
+  .sm-legend__opt {
+    border-style: dotted;
+    border-width: 1.5px;
+  }
+  .sm-legend__opt {
+    display: inline-block;
+    width: 1.2rem;
+    height: 0.8rem;
+    border-color: var(--sl-color-gray-3);
+    border-radius: 0.25rem;
+  }
+  .sm-onode.is-opt .sm-rune {
+    border-style: dotted;
+  }
+  .sm-detail .sm-d__ex {
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-sm);
+    font-variant-numeric: tabular-nums;
+  }
+  .sm-detail .sm-d__ex.is-all {
+    color: var(--sl-color-text-accent);
+    font-weight: 600;
+  }
+  .sm-reset-panel {
+    flex-basis: 100%;
+    padding: 0.65rem 0.75rem;
+    border: 1px solid var(--sl-color-red, var(--sl-color-gray-4));
+    border-radius: 0.5rem;
+    font-size: var(--sl-text-sm);
+    line-height: 1.5;
+  }
+  .sm-reset-panel[hidden] {
+    display: none;
+  }
+  .sm-reset-panel p {
+    margin: 0 0 0.45rem;
+  }
+  .sm-reset-drafts {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.45rem;
+    cursor: pointer;
+  }
+  .sm-reset-drafts input {
+    margin: 0.25rem 0 0;
+    accent-color: var(--sl-color-accent);
+  }
+  .sm-reset-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.55rem;
+  }
+  .sm-reset--yes {
+    border-color: var(--sl-color-red, var(--sl-color-gray-4));
+    color: var(--sl-color-white);
+  }
+  /* The same parts in the dark-fantasy look (skill-map-grim.css styles the rest). */
+  .sm[data-skin='grim'] .sm-stat__ex {
+    grid-column: 1 / -1;
+    color: var(--g-bone-dim);
+  }
+  .sm[data-skin='grim'] .sm-stat__ex b {
+    color: var(--g-ember-hot);
+  }
+  .sm[data-skin='grim'] .sm-cell--solved {
+    border-color: var(--g-gold-deep);
+    background: linear-gradient(180deg, rgb(217 181 106 / 0.14), rgb(40 28 10 / 0.35)), var(--g-stone);
+  }
+  .sm[data-skin='grim'] .sm-cell--solved .sm-k,
+  .sm[data-skin='grim'] .sm-chip--learn::before {
+    color: var(--g-gold);
+  }
+  .sm[data-skin='grim'] :is(.sm-node__ex, .sm-d__ex) {
+    color: var(--g-bone-dim);
+  }
+  .sm[data-skin='grim'] :is(.sm-node__ex, .sm-d__ex).is-all {
+    color: var(--g-ember-hot);
+  }
+  .sm[data-skin='grim'] .sm-legend__opt {
+    border-color: var(--g-bone-dim);
+  }
+  .sm[data-skin='grim'] .sm-reset-panel {
+    border-color: #6e2a22;
+    background: var(--g-stone);
+    color: var(--g-bone);
+  }
+
+  @container (max-width: 44rem) {
+    .sm-top {
+      grid-template-columns: 1fr;
+    }
+    .sm-stat {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: end;
+      column-gap: 0.75rem;
+    }
+    .sm-meter {
+      grid-column: 1 / -1;
+    }
+    .sm-tracks {
+      margin-inline-start: 0;
+    }
+    .sm-stage__out {
+      margin-inline-start: 0 !important;
+    }
+    .sm-stage:not(:last-child)::after {
+      display: none;
+    }
+    .sm-plan {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
+      width: 100%;
+      border-radius: 1rem;
+    }
+    .sm-plan label > span {
+      text-align: center;
+    }
+    .sm-plan--time label > span {
+      padding-inline: 0.4rem;
+    }
+    /* Phones: "Short", then the duration and the number of topics on their own lines. */
+    .sm-plan__word,
+    .sm-plan__sep {
+      display: none;
+    }
+    .sm-plan__meta > span:not(.sm-plan__sep) {
+      display: block;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sm-node {
+      transition: none;
+    }
+  }
+</style>
+
+<script>
+  import { loadProgress, onProgressChange, saveProgress, setLearned, PROGRESS_KEY, type Progress } from './lib/progress';
+  import { FLASH_KEY, OLD_FLASH_KEYS, PLAN_KEY, migrateFlashcards, onPlanChange, readPlan, solvedOf, wireReset, writePlan } from './lib/plan-store';
+  import type { Timeline } from '~/data/study-plan';
+
+  // Everything a reader may want to carry to another browser: map and plan progress (solved
+  // exercises included), flashcard boxes and the chosen views. Older files may hold the
+  // map's own plan key and per-language flashcards; Load progress still reads them.
+  const PORTABLE = [PROGRESS_KEY, PLAN_KEY, 'lcm-map-skin', FLASH_KEY];
+  const LEGACY = ['lcm-map-plan', ...OLD_FLASH_KEYS];
+
+  type N = { p: string; t: string; title: string; d: string; tr: string; needs: string[]; deps: string[]; plans: string[]; opt: string[]; ord: number; min: number; mins: Record<Timeline, number>; ex: Record<Timeline, string[]>; h: string };
+  type Data = { nodes: N[]; tracks: Record<string, string>; stages: string[]; stageOfTrack: Record<string, number>; t: any; plans: { id: string; name: string; days: [number, number] }[] };
+  type Status = 'learned' | 'opened' | 'ready' | 'locked' | 'gap';
+
+  const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+
+  function init(root: HTMLElement) {
+    if (root.dataset.ready) return;
+    root.dataset.ready = '1';
+    const data = JSON.parse(root.querySelector('[data-sm-json]')!.textContent || '{}') as Data;
+    const t = data.t;
+    const byPath = new Map(data.nodes.map((n) => [n.p, n]));
+    const els = new Map<string, HTMLAnchorElement>();
+    root.querySelectorAll<HTMLAnchorElement>('.sm-node').forEach((a) => els.set(a.dataset.p!, a));
+    // Overview: one socket per topic and one path per prerequisite link.
+    const oels = new Map<string, HTMLAnchorElement>();
+    root.querySelectorAll<HTMLAnchorElement>('.sm-onode').forEach((a) => oels.set(a.dataset.p!, a));
+    const oedges = [...root.querySelectorAll<SVGPathElement>('.sm-ov__edges path')];
+    const ovSection = root.querySelector<HTMLElement>('[data-sm-ov]')!;
+    const ovScroll = root.querySelector<HTMLElement>('[data-sm-ov-scroll]')!;
+    const ovBody = root.querySelector<HTMLElement>('[data-sm-ov-body]')!;
+    const ovCanvas = root.querySelector<HTMLElement>('[data-sm-ov-canvas]')!;
+    // Where the last selection came from decides where the panel opens.
+    let origin: 'ov' | 'list' = 'list';
+    const board = root.querySelector<HTMLElement>('[data-sm-board]')!;
+    const g = root.querySelector<SVGGElement>('[data-sm-g]')!;
+    const detail = root.querySelector<HTMLElement>('[data-sm-detail]')!;
+    const radios = [...root.querySelectorAll<HTMLInputElement>('input[name="sm-plan"]')];
+
+    let plan: Timeline = readPlan();
+    let progress: Progress = loadProgress();
+    let selected: string | null = null;
+
+    // Transitive prerequisites.
+    const ancCache = new Map<string, Set<string>>();
+    const ancestors = (p: string): Set<string> => {
+      if (ancCache.has(p)) return ancCache.get(p)!;
+      const out = new Set<string>();
+      const walk = (q: string) => byPath.get(q)?.needs.forEach((d) => { if (!out.has(d)) { out.add(d); walk(d); } });
+      walk(p);
+      ancCache.set(p, out);
+      return out;
+    };
+    const inPlan = (n: N) => n.plans.length === 0 || n.plans.includes(plan);
+    const isOpt = (n: N) => !inPlan(n) && n.opt.includes(plan);
+    const learned = (p: string) => !!progress.learned[p];
+    // Exercises the chosen plan asks for on a page, and how many have passed Check.
+    const exOf = (n: N) => n.ex[plan] ?? [];
+    const allSolved = (n: N) => exOf(n).length > 0 && solvedOf(exOf(n), progress) === exOf(n).length;
+
+    function statuses(): Map<string, Status> {
+      const gapSet = new Set<string>();
+      for (const n of data.nodes) if (learned(n.p)) ancestors(n.p).forEach((a) => !learned(a) && gapSet.add(a));
+      const m = new Map<string, Status>();
+      for (const n of data.nodes) {
+        if (learned(n.p)) m.set(n.p, 'learned');
+        else if (gapSet.has(n.p)) m.set(n.p, 'gap');
+        else if (progress.visited[n.p]) m.set(n.p, 'opened');
+        else m.set(n.p, n.needs.every(learned) ? 'ready' : 'locked');
+      }
+      return m;
+    }
+
+    const chip = (n: N, st?: Status) =>
+      `<button type="button" class="sm-chip" data-go="${esc(n.p)}">${st ? `<span class="sm-glyph is-${st}" aria-hidden="true"></span>` : ''}${esc(n.t)}</button>`;
+
+    function planText(n: N) {
+      if (!n.plans.length) return t.noPlan;
+      if (n.plans.includes('short')) return t.core;
+      const opt = n.opt.includes('short') ? `; ${t.optShort}` : '';
+      if (n.plans.includes('medium')) return t.medium + opt;
+      return t.long + opt;
+    }
+
+    // Labels for the detail panel: the dark-fantasy look renames a few of them.
+    const L = () => (root.dataset.skin === 'grim' ? { ...t, ...t.grim } : t);
+
+    // Path to a topic: the topic and every prerequisite not learned yet, direct or indirect.
+    // Days follow each plan's pace: its duration spread over its topics by study time.
+    const plural = (k: number, forms: string[]) =>
+      forms.length === 2
+        ? forms[k === 1 ? 0 : 1]
+        : forms[k % 10 === 1 && k % 100 !== 11 ? 0 : k % 10 >= 2 && k % 10 <= 4 && (k % 100 < 10 || k % 100 >= 20) ? 1 : 2];
+    // Minutes follow what each plan asks for on a page (the short plan: core drills, named tasks).
+    const minIn = (x: N, pl: string) => x.mins[pl as Timeline] ?? x.min;
+    const planMinutes = new Map(data.plans.map((pl) => [pl.id, data.nodes.filter((x) => !x.plans.length || x.plans.includes(pl.id)).reduce((sum, x) => sum + minIn(x, pl.id), 0)]));
+    function routeHtml(n: N, t: ReturnType<typeof L>, hx: string) {
+      const r = t.route;
+      const h = `<${hx} class="sm-d__h">${esc(t.routeH ?? r.h)}</${hx}>`;
+      const todo = [n.p, ...ancestors(n.p)].filter((p) => !learned(p)).map((p) => byPath.get(p)!);
+      if (!todo.length) return `<div class="sm-d__route">${h}<p class="sm-d__left">${esc(r.done)}</p></div>`;
+      const minutes = todo.reduce((sum, x) => sum + minIn(x, plan), 0);
+      // Non-breaking spaces keep each number with its unit.
+      const time = minutes < 60 ? `${minutes}\u00a0${r.mn}` : `${Math.floor(minutes / 60)}\u00a0${r.hr}${minutes % 60 ? `\u00a0${minutes % 60}\u00a0${r.mn}` : ''}`;
+      const left = r.left.replace('{n}', `${todo.length}\u00a0${plural(todo.length, r.topic)}`).replace('{time}', time);
+      const days = (lo: number, hi: number) => {
+        if (hi < 1) return r.lessDay;
+        const a = Math.max(1, Math.round(lo));
+        const b = Math.max(a, Math.round(hi));
+        return `≈\u00a0${a === b ? a : `${a}–${b}`}\u00a0${plural(b, r.day)}`;
+      };
+      const rows = data.plans
+        .map((pl) => {
+          const opt = n.opt.includes(pl.id);
+          const inside = !n.plans.length || n.plans.includes(pl.id) || opt;
+          const per = todo.reduce((sum, x) => sum + minIn(x, pl.id), 0) / planMinutes.get(pl.id)!;
+          const value = inside ? days(pl.days[0] * per, pl.days[1] * per) + (opt ? ` · ${r.opt}` : '') : r.notIn;
+          return `<li class="${pl.id === plan ? 'is-cur' : ''}${inside ? '' : ' is-no'}"><span>${esc(pl.name)}</span><span>${esc(value)}</span></li>`;
+        })
+        .join('');
+      return `<div class="sm-d__route">${h}<p class="sm-d__left">${esc(left)}</p><ul class="sm-d__plans">${rows}</ul><p class="sm-d__note">${esc(r.note)}</p></div>`;
+    }
+
+    // Scroll the overview so a topic is in view (the docked card narrows the map).
+    function revealOnOverview(p: string) {
+      const a = oels.get(p);
+      if (!a) return;
+      const r = a.getBoundingClientRect();
+      const box = ovScroll.getBoundingClientRect();
+      const dx = r.left < box.left + 24 || r.right > box.right - 24 ? r.left + r.width / 2 - (box.left + box.width / 2) : 0;
+      const dy = r.top < box.top + 8 || r.bottom > box.bottom - 8 ? r.top + r.height / 2 - (box.top + box.height / 2) : 0;
+      if (dx || dy) ovScroll.scrollBy({ left: dx, top: dy, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    }
+
+    function renderDetail(st: Map<string, Status>) {
+      const t = L();
+      ovBody.classList.remove('has-dock');
+      detail.classList.remove('is-dock');
+      if (!selected) {
+        detail.hidden = true;
+        return;
+      }
+      const n = byPath.get(selected)!;
+      const s = st.get(n.p)!;
+      const anc = [...ancestors(n.p)];
+      const ancLearned = anc.filter(learned).length;
+      const needs = n.needs.map((p) => byPath.get(p)!);
+      const deps = n.deps.map((p) => byPath.get(p)!);
+      // Heading levels follow where the card sits: beside the overview (under the page title)
+      // or among the stages of the list (under "By stage").
+      const [ht, hx] = origin === 'ov' ? ['h2', 'h3'] : ['h3', 'h4'];
+      detail.innerHTML = `
+        <button type="button" class="sm-d__close" data-close aria-label="${esc(t.close)}">×</button>
+        <p class="sm-d__crumb">${data.stageOfTrack[n.tr] + 1} · ${esc(data.stages[data.stageOfTrack[n.tr]])} / ${esc(data.tracks[n.tr])}</p>
+        <${ht} class="sm-d__title">${esc(n.title)}</${ht}>
+        <p class="sm-d__desc">${esc(n.d)}</p>
+        <p class="sm-d__meta">≈ ${minIn(n, plan)} ${t.min} · ${esc(planText(n))}</p>
+        <p class="sm-d__status"><span class="sm-glyph is-${s}" aria-hidden="true"></span><span>${esc(t.st[s])}</span></p>
+        <p class="sm-d__ex${allSolved(n) ? ' is-all' : ''}">${exOf(n).length ? esc(t.ex.replace('{x}', String(solvedOf(exOf(n), progress))).replace('{y}', String(exOf(n).length))) : esc(t.exNone)}</p>
+        <div class="sm-d__actions">
+          <a class="sm-btn" href="${esc(n.h)}">${t.open} →</a>
+          <button type="button" class="sm-btn sm-btn--ghost" data-toggle aria-pressed="${learned(n.p)}">${learned(n.p) ? t.unmark : allSolved(n) ? t.exAll : t.mark}</button>
+        </div>
+        ${routeHtml(n, t, hx)}
+        <${hx} class="sm-d__h sm-d__h--need">${t.before}</${hx}>
+        ${needs.length ? `<ul class="sm-d__list">${needs.map((x) => `<li>${chip(x, st.get(x.p))}</li>`).join('')}</ul>` : `<p class="sm-d__none">${t.noNeeds}</p>`}
+        ${anc.length > needs.length ? `<p class="sm-d__path">${t.allBefore}: ${ancLearned}\u00a0${t.of}\u00a0${anc.length}</p>` : ''}
+        <${hx} class="sm-d__h sm-d__h--dep">${t.leads}</${hx}>
+        ${deps.length ? `<ul class="sm-d__list">${deps.map((x) => `<li>${chip(x, st.get(x.p))}</li>`).join('')}</ul>` : `<p class="sm-d__none">${t.endLine}</p>`}`;
+      detail.hidden = false;
+      if (origin === 'ov') {
+        // Overview: dock the card at the right edge when there is room, else show it under the map.
+        if (ovSection.clientWidth >= 640) {
+          if (detail.parentElement !== ovBody) ovBody.append(detail);
+          detail.classList.add('is-dock');
+          ovBody.classList.add('has-dock');
+          requestAnimationFrame(() => revealOnOverview(n.p));
+        } else if (ovSection.nextElementSibling !== detail) ovSection.after(detail);
+        return;
+      }
+      // Lists: on narrow layouts show the panel right under the section that holds the node.
+      if (!root.classList.contains('is-side')) {
+        const track = els.get(n.p)!.closest('.sm-track')!;
+        if (track.nextElementSibling !== detail) track.after(detail);
+      } else if (detail.parentElement !== board) board.append(detail);
+    }
+
+    function render() {
+      progress = loadProgress();
+      const st = statuses();
+      const sel = selected ? byPath.get(selected) : null;
+      const anc = sel ? ancestors(sel.p) : new Set<string>();
+      root.classList.toggle('has-sel', !!sel);
+      let total = 0;
+      let nLearned = 0;
+      let nOpened = 0;
+      const planEx = new Set<string>();
+      for (const n of data.nodes) {
+        const a = els.get(n.p)!;
+        const s = st.get(n.p)!;
+        for (const k of ['learned', 'opened', 'ready', 'locked', 'gap']) a.classList.toggle(`is-${k}`, k === s);
+        const opt = isOpt(n);
+        const out = !inPlan(n) && !opt;
+        a.classList.toggle('is-out', out);
+        a.classList.toggle('is-opt', opt);
+        const ex = exOf(n);
+        const exEl = a.querySelector<HTMLElement>('[data-sm-ex]')!;
+        exEl.hidden = !ex.length;
+        exEl.textContent = `${solvedOf(ex, progress)}/${ex.length}`;
+        exEl.classList.toggle('is-all', allSolved(n));
+        a.classList.toggle('is-sel', n.p === selected);
+        a.classList.toggle('is-need', !!sel && sel.needs.includes(n.p));
+        a.classList.toggle('is-anc', anc.has(n.p));
+        a.classList.toggle('is-dep', !!sel && sel.deps.includes(n.p));
+        if (n.p === selected) a.setAttribute('aria-current', 'true');
+        else a.removeAttribute('aria-current');
+        a.querySelector<HTMLElement>('.sm-node__here')!.hidden = progress.last !== n.p;
+        const o = oels.get(n.p);
+        if (o) {
+          o.className = a.className.replace('sm-node', 'sm-onode');
+          o.classList.toggle('is-here', progress.last === n.p);
+          if (n.p === selected) o.setAttribute('aria-current', 'true');
+          else o.removeAttribute('aria-current');
+        }
+        if (inPlan(n)) {
+          total++;
+          if (s === 'learned') nLearned++;
+          else if (progress.visited[n.p]) nOpened++;
+          ex.forEach((id) => planEx.add(id));
+        }
+      }
+      root.querySelector('[data-sm-ex-solved]')!.textContent = String(solvedOf([...planEx], progress));
+      root.querySelector('[data-sm-ex-total]')!.textContent = String(planEx.size);
+      // Counts per track and stage (within the chosen plan).
+      root.querySelectorAll<HTMLElement>('.sm-track').forEach((tr) => {
+        const list = data.nodes.filter((n) => n.tr === tr.dataset.track && inPlan(n));
+        tr.querySelector('[data-sm-track-count]')!.textContent = `${list.filter((n) => learned(n.p)).length}/${list.length}`;
+      });
+      root.querySelectorAll<HTMLElement>('.sm-stage').forEach((sg) => {
+        const i = Number(sg.dataset.stage);
+        const list = data.nodes.filter((n) => data.stageOfTrack[n.tr] === i && inPlan(n));
+        const d = list.filter((n) => learned(n.p)).length;
+        sg.querySelector('[data-sm-stage-count]')!.textContent = `${d} ${t.of} ${list.length}`;
+        sg.classList.toggle('is-complete', list.length > 0 && d === list.length);
+      });
+      root.querySelector('[data-sm-learned]')!.textContent = String(nLearned);
+      root.querySelector('[data-sm-total]')!.textContent = String(total);
+      root.querySelector<HTMLElement>('[data-sm-ml]')!.style.width = `${total ? (nLearned / total) * 100 : 0}%`;
+      root.style.setProperty('--sm-p', String(total ? nLearned / total : 0));
+      root.querySelector<HTMLElement>('[data-sm-mo]')!.style.width = `${total ? (nOpened / total) * 100 : 0}%`;
+
+      // You are here.
+      const here = root.querySelector<HTMLElement>('[data-sm-here]')!;
+      const last = progress.last && byPath.get(progress.last);
+      if (last) {
+        here.innerHTML = `<p class="sm-here__title">${esc(last.title)}</p>
+          <p class="sm-here__actions"><a href="${esc(last.h)}">${t.cont} →</a><button type="button" data-go="${esc(last.p)}">${t.show}</button></p>`;
+      }
+
+      // Next up: the next three steps of the chosen plan, in the plan's order, not learned yet.
+      // The plan puts every prerequisite before the topics that need it, so the first one is ready.
+      const next = data.nodes
+        .filter((n) => n.plans.includes(plan) && !learned(n.p))
+        .sort((a, b) => a.ord - b.ord)
+        .slice(0, 3);
+      const nextEl = root.querySelector<HTMLElement>('[data-sm-next]')!;
+      nextEl.innerHTML = next.length ? next.map((n) => chip(n, st.get(n.p))).join('') : `<p class="sm-done">${t.done}</p>`;
+
+      // Every exercise solved but not marked: offer the mark right here.
+      const solved = data.nodes.filter((n) => (inPlan(n) || isOpt(n)) && !learned(n.p) && allSolved(n)).sort((a, b) => a.ord - b.ord);
+      root.querySelector<HTMLElement>('[data-sm-solved-wrap]')!.hidden = solved.length === 0;
+      root.querySelector<HTMLElement>('[data-sm-solved]')!.innerHTML = solved
+        .map((n) => `<button type="button" class="sm-chip sm-chip--learn" data-learn-p="${esc(n.p)}" aria-label="${esc(`${t.mark}: ${n.t}`)}">${esc(n.t)}</button>`)
+        .join('');
+
+      // Gaps.
+      const gaps = data.nodes.filter((n) => st.get(n.p) === 'gap').sort((a, b) => a.ord - b.ord);
+      const gw = root.querySelector<HTMLElement>('[data-sm-gaps-wrap]')!;
+      gw.hidden = gaps.length === 0;
+      const shown = gaps.slice(0, 8);
+      root.querySelector<HTMLElement>('[data-sm-gaps]')!.innerHTML =
+        shown.map((n) => chip(n, 'gap')).join('') + (gaps.length > shown.length ? `<span class="sm-chip sm-chip--more">+${gaps.length - shown.length} ${t.more}</span>` : '');
+
+      // Overview links: what the selected topic needs, what it unlocks, and the path behind it.
+      for (const e of oedges) {
+        const f = e.dataset.from!;
+        const to = e.dataset.to!;
+        e.classList.toggle('e-need', !!sel && to === sel.p);
+        e.classList.toggle('e-dep', !!sel && f === sel.p);
+        e.classList.toggle('e-anc', !!sel && to !== sel.p && anc.has(to) && anc.has(f));
+        e.classList.toggle('e-done', learned(f) && learned(to));
+        const shown = (x: N) => inPlan(x) || isOpt(x);
+        e.classList.toggle('e-out', !shown(byPath.get(f)!) || !shown(byPath.get(to)!));
+      }
+      root.querySelector<HTMLElement>('[data-sm-lout]')!.hidden = data.nodes.every((n) => inPlan(n) || isOpt(n));
+      root.querySelector<HTMLElement>('[data-sm-lopt]')!.hidden = !data.nodes.some(isOpt);
+      renderDetail(st);
+      requestAnimationFrame(drawWires);
+    }
+
+    // ---------- Wires ----------
+    function drawWires() {
+      g.textContent = '';
+      if (!selected) return;
+      const n = byPath.get(selected)!;
+      const box = board.getBoundingClientRect();
+      const rect = (p: string) => {
+        const r = els.get(p)!.getBoundingClientRect();
+        return { l: r.left - box.left, r: r.right - box.left, t: r.top - box.top, b: r.bottom - box.top, cx: r.left - box.left + r.width / 2, cy: r.top - box.top + r.height / 2 };
+      };
+      const path = (from: string, to: string, cls: string, k: number) => {
+        const a = rect(from);
+        const b = rect(to);
+        let d: string;
+        if (Math.abs(a.cx - b.cx) < 8) {
+          // Same column: bulge out to the left so the line does not run behind the nodes in between.
+          const x = Math.min(a.l, b.l);
+          const bend = 16 + k * 7;
+          const y1 = a.cy;
+          const y2 = b.cy;
+          d = `M${x} ${y1} C${x - bend} ${y1} ${x - bend} ${y2} ${x - 2} ${y2}`;
+        } else if (Math.abs(a.cy - b.cy) < Math.max(a.b - a.t, 24) && Math.abs(a.cx - b.cx) > 0) {
+          // Same row: side to side.
+          const [x1, x2] = a.cx < b.cx ? [a.r, b.l - 2] : [a.l, b.r + 2];
+          const mx = (x1 + x2) / 2;
+          d = `M${x1} ${a.cy} C${mx} ${a.cy} ${mx} ${b.cy} ${x2} ${b.cy}`;
+        } else {
+          const down = b.cy > a.cy;
+          const y1 = down ? a.b : a.t;
+          const y2 = down ? b.t - 2 : b.b + 2;
+          const my = (y1 + y2) / 2;
+          d = `M${a.cx} ${y1} C${a.cx} ${my} ${b.cx} ${my} ${b.cx} ${y2}`;
+        }
+        const el = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        el.setAttribute('d', d);
+        el.setAttribute('class', cls);
+        g.append(el);
+      };
+      n.needs.forEach((p, i) => path(p, n.p, 'w-need', i));
+      n.deps.forEach((p, i) => path(n.p, p, 'w-dep', i));
+    }
+
+    // ---------- Selection ----------
+    function select(p: string | null, opts: { scroll?: boolean; hash?: boolean } = {}) {
+      selected = p && byPath.has(p) ? p : null;
+      render();
+      if (opts.hash !== false) {
+        try {
+          const url = new URL(location.href);
+          url.hash = '';
+          if (selected) url.searchParams.set('focus', selected);
+          else url.searchParams.delete('focus');
+          history.replaceState(null, '', url);
+        } catch {
+          /* ignore */
+        }
+      }
+      if (selected && opts.scroll && origin === 'ov') {
+        const o = oels.get(selected)!;
+        ovScroll.scrollTo({ left: Math.max(0, parseFloat(o.style.left) - ovScroll.clientWidth / 2), behavior: 'smooth' });
+        const r = ovSection.getBoundingClientRect();
+        if (r.top < 0 || r.top > innerHeight * 0.6) ovSection.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      } else if (selected && opts.scroll) {
+        const a = els.get(selected)!;
+        const r = a.getBoundingClientRect();
+        if (r.top < 80 || r.bottom > innerHeight - 40) a.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+        if (!root.classList.contains('is-side')) {
+          const dr = detail.getBoundingClientRect();
+          if (dr.bottom > innerHeight) detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+      }
+    }
+
+    root.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const onode = target.closest<HTMLAnchorElement>('.sm-onode');
+      if (onode && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.button === 0) {
+        e.preventDefault();
+        origin = 'ov';
+        select(onode.dataset.p === selected ? null : onode.dataset.p!, { scroll: false });
+        if (selected && detail.parentElement !== ovCanvas) detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        return;
+      }
+      if (target.closest('[data-close]')) {
+        select(null);
+        return;
+      }
+      if (target.closest('[data-sm-full]')) {
+        toggleFull();
+        return;
+      }
+      const node = target.closest<HTMLAnchorElement>('.sm-node');
+      if (node && !e.metaKey && !e.ctrlKey && !e.shiftKey && e.button === 0) {
+        e.preventDefault();
+        origin = 'list';
+        select(node.dataset.p === selected ? null : node.dataset.p!, { scroll: false });
+        if (!root.classList.contains('is-side') && selected) detail.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        return;
+      }
+      const go = target.closest<HTMLElement>('[data-go]');
+      if (go) {
+        origin = 'ov';
+        select(go.dataset.go!, { scroll: true });
+        return;
+      }
+      if (target.closest('[data-toggle]') && selected) {
+        setLearned(selected, !learned(selected));
+        return;
+      }
+      const learn = target.closest<HTMLElement>('[data-learn-p]');
+      if (learn) {
+        setLearned(learn.dataset.learnP!, true);
+        return;
+      }
+      if (target.closest('[data-sm-export]')) {
+        const dump: Record<string, unknown> = {};
+        // Most keys hold JSON; the map's plan and look are stored as plain strings.
+        for (const k of PORTABLE) {
+          let v: string | null = null;
+          try {
+            v = localStorage.getItem(k);
+          } catch {
+            /* storage unavailable */
+          }
+          if (v === null) continue;
+          try {
+            dump[k] = JSON.parse(v);
+          } catch {
+            dump[k] = v;
+          }
+        }
+        dump[PROGRESS_KEY] = loadProgress();
+        const file = { app: 'live-coding-map', v: 1, exported: new Date().toISOString(), data: dump };
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([JSON.stringify(file, null, 1)], { type: 'application/json' }));
+        a.download = `live-coding-progress-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        ioMsg.textContent = t.io.saved;
+        return;
+      }
+      if (target.closest('[data-sm-import]')) {
+        fileInput.click();
+        return;
+      }
+    });
+    wireReset(root);
+    const fileInput = root.querySelector<HTMLInputElement>('[data-sm-file]')!;
+    const ioMsg = root.querySelector<HTMLElement>('[data-sm-io-msg]')!;
+    fileInput.addEventListener('change', async () => {
+      const f = fileInput.files?.[0];
+      fileInput.value = '';
+      if (!f) return;
+      try {
+        const file = JSON.parse(await f.text());
+        const data = file?.data;
+        const prog = data?.[PROGRESS_KEY];
+        if (file?.app !== 'live-coding-map' || !prog || prog.v !== 1 || typeof prog.learned !== 'object') throw new Error('bad');
+        if (!window.confirm(t.io.replace)) return;
+        // A file from before the shared keys: drop the new keys it does not have, so the old
+        // values it does have (the map's plan, per-language flashcards) are migrated below.
+        for (const k of [PLAN_KEY, FLASH_KEY])
+          if (!(k in data) && LEGACY.some((old) => old in data))
+            try {
+              localStorage.removeItem(k);
+            } catch {
+              /* storage unavailable */
+            }
+        for (const k of [...PORTABLE, ...LEGACY]) {
+          if (k === PROGRESS_KEY || !(k in data)) continue;
+          try {
+            const v = data[k];
+            localStorage.setItem(k, typeof v === 'string' ? v : JSON.stringify(v));
+          } catch {
+            /* storage unavailable */
+          }
+        }
+        migrateFlashcards();
+        if (data['lcm-map-skin'] === 'grim' || data['lcm-map-skin'] === 'classic') root.dataset.skin = data['lcm-map-skin'];
+        plan = readPlan();
+        writePlan(plan);
+        for (const r of [...radios, ...root.querySelectorAll<HTMLInputElement>('input[name="sm-skin"]')]) r.checked = r.value === plan || r.value === root.dataset.skin;
+        saveProgress({ v: 1, learned: prog.learned ?? {}, visited: prog.visited ?? {}, activities: prog.activities ?? {}, last: prog.last, migrated: true });
+        ioMsg.textContent = t.io.loaded;
+      } catch {
+        ioMsg.textContent = t.io.bad;
+      }
+    });
+    const fullBtn = root.querySelector<HTMLButtonElement>('[data-sm-full]')!;
+    // Full screen: the browser's own when allowed, else a fixed overlay above the page.
+    const setFull = (on: boolean) => {
+      ovSection.classList.toggle('is-full', on);
+      document.documentElement.classList.toggle('sm-noscroll', on && !document.fullscreenElement);
+      fullBtn.setAttribute('aria-pressed', String(on));
+      root.querySelector('[data-sm-full-label]')!.textContent = on ? fullBtn.dataset.off! : fullBtn.dataset.on!;
+      render();
+      fitOverview();
+    };
+    async function toggleFull(force?: boolean) {
+      const on = force ?? !ovSection.classList.contains('is-full');
+      if (on) {
+        try {
+          await ovSection.requestFullscreen();
+        } catch {
+          /* not allowed here (e.g. inside a frame): use the overlay */
+        }
+        setFull(true);
+      } else {
+        if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
+        setFull(false);
+      }
+    }
+    document.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement && ovSection.classList.contains('is-full')) setFull(false);
+    });
+    root.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (selected) select(null);
+      else if (ovSection.classList.contains('is-full')) toggleFull(false);
+    });
+    const skins = [...root.querySelectorAll<HTMLInputElement>('input[name="sm-skin"]')];
+    for (const r of skins) {
+      r.checked = r.value === (root.dataset.skin || 'classic');
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        root.dataset.skin = r.value;
+        try {
+          localStorage.setItem('lcm-map-skin', r.value);
+        } catch {
+          /* storage unavailable */
+        }
+        render();
+      });
+    }
+    for (const r of radios) {
+      r.checked = r.value === plan;
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        plan = r.value as Timeline;
+        writePlan(plan);
+        render();
+      });
+    }
+    onPlanChange(() => {
+      plan = readPlan();
+      for (const r of radios) r.checked = r.value === plan;
+      render();
+    });
+
+    // Overview: shrink slightly to fit when it is only a little wider than its box; otherwise scroll.
+    const fitOverview = () => {
+      ovCanvas.style.zoom = '';
+      const f = ovScroll.clientWidth / ovCanvas.offsetWidth;
+      if (f < 1 && f >= 0.8) ovCanvas.style.zoom = String(Math.floor(f * 100) / 100);
+    };
+    new ResizeObserver(fitOverview).observe(ovScroll);
+
+    // Layout mode: side panel when the map is wide enough.
+    const setMode = () => {
+      const side = root.clientWidth >= 880;
+      if (side !== root.classList.contains('is-side')) {
+        root.classList.toggle('is-side', side);
+        render();
+      } else requestAnimationFrame(drawWires);
+    };
+    new ResizeObserver(setMode).observe(root);
+    document.fonts?.ready.then(() => requestAnimationFrame(drawWires));
+    onProgressChange(render);
+
+    // Initial selection: ?focus=path (or the older #focus=path), else where the reader is.
+    const asked = new URLSearchParams(location.search).get('focus') ?? /#focus=([\w\-/]+\/)/.exec(location.hash)?.[1] ?? null;
+    const m = asked && byPath.has(asked) ? asked : null;
+    root.classList.toggle('is-side', root.clientWidth >= 880);
+    // Open a topic only when the link asked for one; otherwise show the whole map, with
+    // "you are here" marked and the view scrolled to it.
+    origin = 'ov';
+    select(m, { hash: false, scroll: !!m });
+    const here = progress.last && oels.get(progress.last);
+    if (!m && here) ovScroll.scrollLeft = Math.max(0, parseFloat(here.style.left) - ovScroll.clientWidth / 2);
+  }
+
+  document.querySelectorAll<HTMLElement>('[data-sm]').forEach(init);
+</script>

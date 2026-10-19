@@ -1,0 +1,32 @@
+{
+  // Cmd+Shift+B (Ctrl+Shift+B) in VS Code or Cursor runs the query under the cursor of the open
+  // .sql file against the practice data. Open the exercises/ folder itself as the workspace.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run SQL under the cursor",
+      "type": "shell",
+      "command": "python3",
+      "args": ["db.py", "${file}", "--line", "${lineNumber}"],
+      "group": { "kind": "build", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Run the whole SQL file",
+      "type": "shell",
+      "command": "python3",
+      "args": ["db.py", "${file}"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Check this task (pytest)",
+      "type": "shell",
+      "command": "python3",
+      "args": ["-m", "pytest", "-q", "-k", "${fileBasenameNoExtension}"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
+      "problemMatcher": []
+    }
+  ]
+}

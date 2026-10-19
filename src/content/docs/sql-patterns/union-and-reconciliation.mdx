@@ -1,0 +1,186 @@
+---
+title: UNION ALL and reconciliation
+description: Two feeds in one report with UNION ALL, and two sources compared with FULL OUTER JOIN, COALESCE on the keys and a status for every row.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Some tasks need two sets of rows in one query. A cash-flow report stacks sales and refunds into one feed. A reconciliation puts two sources side by side and finds what is missing on either side. The wrong tool fails without an error: `UNION` drops equal amounts, a `LEFT JOIN` hides one side, and a filter in the wrong place removes the very rows the report is for.
+
+<Aside type="tip" title="TL;DR">
+- Two feeds with the same columns: `UNION ALL`, each branch with its own date, then one `GROUP BY` over the result.
+- Never `UNION` for money: it removes equal rows, like `DISTINCT`.
+- Two sources by key: aggregate each side to the key in its own CTE, then `FULL OUTER JOIN`.
+- Keys through `COALESCE(a.key, b.key)`. The `CASE` status checks presence first (missing, unexpected), then amounts (mismatch).
+- Date filters go inside the CTEs, not in `WHERE` after the join.
+</Aside>
+
+## UNION ALL: one row under another
+
+`JOIN` puts rows side by side: the result gets more columns. `UNION ALL` puts them one under another: the result gets more rows. Use it when two sets of rows describe the same kind of thing: sales and refunds, advances and repayments, events from two tables. Words in a task that point to it: *cash flow*, *movements*, *sales and refunds*, *all events*.
+
+An example: the paid sales of prd_09 in September 2026 with a plus sign, and its refunds with a minus sign.
+
+```sql
+WITH movements AS (
+    SELECT 'sale' AS kind, start_time AS at, charged_usd AS amount
+    FROM transactions
+    WHERE product_id = 'prd_09'
+      AND NOT is_test AND NOT is_trial AND channel <> 'promo'
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    UNION ALL
+    SELECT 'refund', refunded_at, -charged_usd
+    FROM transactions
+    WHERE product_id = 'prd_09'
+      AND NOT is_test AND NOT is_trial AND channel <> 'promo'
+      AND refunded_at >= TIMESTAMP '2026-09-01'
+      AND refunded_at <  TIMESTAMP '2026-10-01'
+)
+SELECT kind, COUNT(*) AS n, SUM(amount) AS usd
+FROM movements
+GROUP BY kind
+ORDER BY kind;
+```
+
+| kind | n | usd |
+|---|---|---|
+| refund | 2 | -15.98 |
+| sale | 15 | 329.85 |
+
+The net total for September is `SUM(amount)` over the whole feed: 313.87.
+
+### Each branch has its own date
+
+A sale belongs to the month of `start_time`. A refund belongs to the month of `refunded_at`. So each branch is a full `SELECT` with its own `WHERE`. Refund t_000482 shows why: the purchase was on 20 August, the refund on 2 September. The refund is in the September feed, and its sale is not. One shared filter on `start_time` would move this refund to August.
+
+### The rules of UNION ALL
+
+1. Columns match by position, not by name. Both branches need the same number of columns and compatible types. The names come from the first branch.
+2. A mistake here fails loudly. A missing column gives `each UNION query must have the same number of columns`. Swapped columns give `invalid input syntax for type numeric: "sale"`.
+3. `ORDER BY` and `LIMIT` at the end apply to the whole result. A filter that is the same for both branches can go outside, on the feed. The first drill below does that with `month`.
+4. A label column (`'sale'`, `'refund'`) lets you count each kind later.
+
+## Why not UNION
+
+`UNION` without `ALL` removes equal rows from the whole result, as `DISTINCT` does. Here is the same feed with only the amount column:
+
+| | rows | sum |
+|---|---|---|
+| `UNION ALL` | 17 | 313.87 |
+| `UNION` | 3 | 49.99 |
+
+The 15 sales are 10 at 7.99 and 5 at 49.99. `UNION` kept one row for each value: 7.99, 49.99 and −7.99. Money disappeared, and there was no error.
+
+The rule: `UNION ALL` for money and events. Use `UNION` only for a list of unique values, for example every `merchant_id` that appears in two tables.
+
+## Why not JOIN
+
+A `JOIN` of the September sales with the September refunds on `product_id` returns 15 × 2 = 30 rows. Every sale is paired with every refund, and the sales add up to 659.70 instead of 329.85. There is no "this sale, this refund" link here. The report needs one feed, not pairs. [Row multiplication](/sql-patterns/row-multiplication/) explains this effect in detail.
+
+## Reconciliation: FULL OUTER JOIN
+
+A reconciliation compares two sources by a key, when a row can be missing on either side: expected and received, our records and a bank statement, advances and the marketplace payouts that repay them. Words in a task: *reconcile*, *compare*, *side by side*, *missing on either side*.
+
+`LEFT JOIN` keeps every row of the left side. `FULL OUTER JOIN` keeps every row of both sides and puts NULL where the pair is missing.
+
+An example from the advances program. For every month with an advance, the channel payout for that month should arrive and cover what the merchant owes for it: the advance plus the fee. Here is mer_09, with payouts from May, so the months before the first advance are visible too.
+
+```sql
+WITH adv AS (                                                 -- 1. each side down to the key
+    SELECT channel, period_month, SUM(amount_usd + fee_usd) AS owed_usd
+    FROM advances
+    WHERE merchant_id = 'mer_09'
+    GROUP BY channel, period_month
+),
+paid AS (
+    SELECT channel, period_month, SUM(amount_usd) AS paid_usd
+    FROM channel_payouts
+    WHERE merchant_id = 'mer_09'
+      AND period_month >= DATE '2026-05-01'                   -- 2. filters inside the CTE
+    GROUP BY channel, period_month
+)
+SELECT COALESCE(a.channel, p.channel)           AS channel,   -- 3. keys through COALESCE
+       COALESCE(a.period_month, p.period_month) AS period_month,
+       a.owed_usd,
+       p.paid_usd,
+       CASE WHEN p.channel IS NULL       THEN 'missing'       -- 4. one status per row
+            WHEN a.channel IS NULL       THEN 'unexpected'
+            WHEN p.paid_usd < a.owed_usd THEN 'mismatch'
+            ELSE 'ok'
+       END AS status
+FROM adv a
+FULL OUTER JOIN paid p
+  ON p.channel = a.channel AND p.period_month = a.period_month
+ORDER BY period_month, channel;
+```
+
+| channel | period_month | owed_usd | paid_usd | status |
+|---|---|---|---|---|
+| north_market | 2026-05-01 | NULL | 137.57 | unexpected |
+| south_market | 2026-05-01 | NULL | 231.06 | unexpected |
+| north_market | 2026-06-01 | 383.53 | 531.94 | ok |
+| south_market | 2026-06-01 | 176.41 | 244.67 | ok |
+| north_market | 2026-07-01 | 195.98 | 135.91 | mismatch |
+| south_market | 2026-07-01 | 128.63 | 178.40 | ok |
+| north_market | 2026-08-01 | 143.31 | NULL | missing |
+| south_market | 2026-08-01 | 128.63 | 178.40 | ok |
+
+How to read it:
+
+- **May, unexpected.** The payouts came, but there was no advance yet: mer_09 joined the program on 16 June. From the program's point of view, nothing repays here.
+- **July North Market, mismatch.** The payout of 135.91 does not cover the 195.98 owed. Two advances were made for this month: a duplicate, which [Q13](/sql-tasks/money-and-reconciliation/) finds.
+- **August North Market, missing.** An advance and no payout. North Market pays about 32 days after the month ends, so this payout is not due before October. A real report needs a "not due yet" status for it; Q12 has one.
+
+### Four rules
+
+1. **Aggregate each side to the key first.** mer_09 has two advances for July on North Market. Join the raw tables, and the one payout row meets both advances: `paid_usd` becomes 271.82, twice 135.91, and the mismatch disappears.
+2. **Take the keys through `COALESCE`.** In a row that exists only on the right, `a.channel` is NULL. Without `COALESCE`, the May rows would have an empty `channel`.
+3. **Check presence first, amounts second.** A comparison with NULL is NULL, so `CASE` falls through to `ELSE`. Without the two `IS NULL` branches, the missing and unexpected rows all come out as 'ok'. When amounts come from different sources, compare with a tolerance, for example `ABS(a - b) > 1.00`, not with `<>`.
+4. **Put the filters inside the CTEs.** A condition on one side in `WHERE` after the join removes the rows where that side is missing. Move the payouts' date filter to `WHERE p.period_month >= DATE '2026-05-01'`, and 7 of the 8 rows remain: the missing August row is gone, and it is the row the reconciliation is for. A `LEFT JOIN` from the advances is wrong for the same reason: 6 rows, and the May payouts disappear.
+
+The same three-way split in Python is a set operation on dict keys: see [Sets and duplicates](/python/sets-and-duplicates/).
+
+## Practice
+
+<Drill id="s-union">
+
+Sales and refunds are two feeds with the same columns: `UNION ALL`, then one `GROUP BY` month. Each branch computes its own month: `start_time` for a sale, `refunded_at` for a refund, which is why the refund branch keeps only rows with `refunded_at IS NOT NULL`. The date filter can sit outside the feed, on `month`, because both branches produce that column. `UNION` without `ALL` would merge two sales of the same amount in the same month into one row. Round once, after the `SUM`.
+
+</Drill>
+
+<Drill id="s-full-outer">
+
+A reconciliation of two sources, where a row can be missing on either side: `FULL OUTER JOIN`. Aggregate each side to (channel, period_month) in its own CTE, and filter the months inside both CTEs. Take the keys through `COALESCE`, otherwise a row that exists only on the right has NULL in `channel`. May has payouts and no advances. Three advances have no payout: July on North Market and August on both channels. A `LEFT JOIN` from either side loses one of these groups: from the advances it drops May, from the payouts it drops the three advances. Only `FULL OUTER JOIN` returns all 8 rows.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+A reconciliation fits in three sentences. Say them in this order, while you type:
+
+1. "Either side can miss a row, so I'll use FULL OUTER JOIN."
+2. "Each side goes down to channel and month first, so one payout can't meet two advances."
+3. "The status checks presence before amounts, because a comparison with NULL is never true."
+
+For the feed of sales and refunds, one sentence is enough: "Same columns, so UNION ALL. Plain UNION would merge two sales of the same amount."
+
+If the next question is "And a month that is missing on both sides?", answer: "Then neither CTE has a row for it. I'd put a calendar of months on the left." The calendar is on [Calendars and active periods](/sql-patterns/calendars-and-active-periods/).
+</Aside>
+
+## Further reading
+
+- [Combining queries](https://www.postgresql.org/docs/current/queries-union.html) — `UNION`, `INTERSECT`, `EXCEPT`, and why `ALL` keeps duplicates.
+- [Joined tables](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-JOIN) — `FULL OUTER JOIN` and how `ON` differs from `WHERE`.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) — the first value that is not NULL.
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) — the branches are checked in order, and the first true one wins.
+
+## Related topics
+
+- [Row multiplication](/sql-patterns/row-multiplication/) — why each side is aggregated to the key before the join.
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — the one-sided version, and why a right-table filter in `WHERE` breaks it.
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — one CTE per side keeps a reconciliation readable.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — the advances program and its ledger.
+- [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/) — the unique key that stops a duplicate advance or payout.
+- [Money and reconciliation](/sql-tasks/money-and-reconciliation/) — Q12 and Q13 use both patterns of this page.

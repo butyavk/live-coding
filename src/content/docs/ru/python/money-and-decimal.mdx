@@ -1,0 +1,169 @@
+---
+title: Деньги и Decimal
+description: Почему деньги не хранят во float, Decimal из строк, округление до центов через quantize и ROUND_HALF_UP, деление суммы в центах и погашение долгов по очереди.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Выручка, комиссии, выплаты, авансы: многие задачи на интервью — про деньги. Интервьюер рано проверяет три вещи. Деньги в `Decimal`? Округление до центов с явным режимом? Части складываются в целое? Float где-то в цепочке или потерянный при делении цент — ошибки, которые прячутся, пока их не найдут в финансовом отделе.
+
+<Aside type="tip" title="Коротко">
+- Деньги — `Decimal` из строки: `Decimal("9.99")`, никогда `Decimal(9.99)`.
+- Округлить до центов: `x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)`. `round(x, 2)` у `Decimal` — банковское округление: `0.125` → `0.12`.
+- Округлить вниз (лимит, сумма, которую можно выдать максимум): `rounding=ROUND_DOWN`.
+- Делить сумму на части — в целых центах: `divmod(cents, n)`, потом по лишнему центу первым `rest` частям.
+- Распределить выплату: `pay = min(left, due)`, записывать только `if pay > 0`, остановиться при `left == 0`.
+</Aside>
+
+## Почему не float
+
+```python
+from decimal import Decimal
+
+print(0.1 + 0.2 == 0.3, 0.1 + 0.2)                         # False 0.30000000000000004
+print(sum([0.10] * 3))                                     # 0.30000000000000004
+print(Decimal("0.1") + Decimal("0.2") == Decimal("0.3"))   # True
+
+print(Decimal(0.1))        # 0.1000000000000000055511151231257827021181583404541015625
+print(Decimal(str(0.1)))   # 0.1
+print(Decimal("9.99") * 3, Decimal("10.00") == Decimal("10"))   # 29.97 True
+```
+
+Float — двоичная дробь. У большинства десятичных сумм, например `0.1`, нет точного двоичного представления, поэтому любая сумма во float чуть-чуть неточна, а при сложении ошибка становится видна. `Decimal` хранит десятичные цифры, и `0.1` в нём — ровно `0.1`.
+
+`Decimal` создают из строки. `Decimal(0.1)` точно копирует float вместе с его двоичной ошибкой. Если значение уже пришло как float, переводите через `str()`. Смешивание двух типов в арифметике громко падает, и это хорошо: `Decimal("1.10") + 0.1` даёт `TypeError: unsupported operand type(s) for +: 'decimal.Decimal' and 'float'`. Сравнение не падает: `Decimal("0.1") == 0.1` — это `False`, без всякой ошибки, потому что во float лежит значение чуть больше 0,1. Так что проверка вроде `amount == expected` может молча ошибиться. С `int` смешивать можно: `Decimal("9.99") * 3` — это `Decimal('29.97')`.
+
+`Decimal` сохраняет нули в конце: `Decimal("10.00")` и `Decimal("10")` равны, но печатаются по-разному. Тестам, которые сравнивают значения, это неважно; отчёту, который их печатает, — может быть важно.
+
+<Talk q="Why not float for money? How do you round to cents?">
+
+"Float is binary, so 0.1 + 0.2 is not exactly 0.3, and the error grows in sums. I use Decimal created from strings, and `quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)` for cents. In the database it is NUMERIC(12, 2)."
+
+`round()` у `Decimal` — банковское округление: `0.125` → `0.12`.
+
+</Talk>
+
+## Округление до центов
+
+```python
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+
+CENT = Decimal("0.01")
+for s in ("0.125", "0.135", "2.675", "23.9976"):
+    x = Decimal(s)
+    print(s,
+          x.quantize(CENT, rounding=ROUND_HALF_UP),
+          round(x, 2),
+          x.quantize(CENT),                    # без rounding=: режим контекста по умолчанию
+          x.quantize(CENT, rounding=ROUND_DOWN))
+
+print(round(2.675, 2))   # 2.67 -- float: 2.675 хранится чуть меньше
+```
+
+| Значение | `quantize`, `ROUND_HALF_UP` | `round(x, 2)` | `quantize` без режима | `quantize`, `ROUND_DOWN` |
+|---|---|---|---|---|
+| `0.125` | `0.13` | `0.12` | `0.12` | `0.12` |
+| `0.135` | `0.14` | `0.14` | `0.14` | `0.13` |
+| `2.675` | `2.68` | `2.68` | `2.68` | `2.67` |
+| `23.9976` | `24.00` | `24.00` | `24.00` | `23.99` |
+
+`quantize(Decimal("0.01"))` значит «округлить до той же экспоненты, что у `0.01`», то есть до центов. Без `rounding=` берётся режим текущего контекста, а по умолчанию это `ROUND_HALF_EVEN`: половина уходит к чётной цифре. `round(x, 2)` у `Decimal` делает то же, поэтому `0.125` в обоих случаях становится `0.12`. «Половина вверх» — то, чего люди ждут от чека, поэтому всегда передавайте `rounding=ROUND_HALF_UP` и говорите вслух почему. `ROUND_DOWN` — когда сумма служит лимитом, который нельзя превысить.
+
+Последняя строка показывает, почему значение должно стать `Decimal` до округления: во float `2.675` хранится чуть меньше, и `round` даёт `2.67`.
+
+### Где округлять
+
+```python
+fee = Decimal("9.99") * Decimal("0.15")
+print(fee, fee.quantize(CENT, rounding=ROUND_HALF_UP))      # 1.4985 1.50
+
+lines = [Decimal("0.125")] * 3
+per_line = sum(x.quantize(CENT, rounding=ROUND_HALF_UP) for x in lines)
+at_end = sum(lines).quantize(CENT, rounding=ROUND_HALF_UP)
+print(per_line, at_end)                                     # 0.39 0.38
+
+print(Decimal("100") / 3)         # 33.33333333333333333333333333 -- 28 значащих цифр
+print(Decimal(-7) // 2, -7 // 2)  # -3 -4 -- у Decimal // идёт к нулю, у int — вниз
+```
+
+Умножение сохраняет все цифры: комиссия 15 % с `9.99` — это `1.4985`. Округление каждой строки и округление итога дают разные ответы: здесь `0.39` и `0.38`. Уточните, что нужно в задаче: *"Do we round each line or only the total?"* Деление по умолчанию даёт 28 значащих цифр, поэтому результат округляют до того, как сохранять или сравнивать.
+
+## Деление суммы в центах
+
+`100.00` на три части нельзя разделить поровну в центах. Если округлять каждую часть отдельно, теряется цент:
+
+```python
+amount, n = Decimal("100.00"), 3
+
+naive = [(amount / n).quantize(CENT, rounding=ROUND_HALF_UP)] * n
+print(naive, sum(naive))   # [Decimal('33.33'), Decimal('33.33'), Decimal('33.33')] 99.99
+
+cents = int(amount * 100)        # 10000
+base, rest = divmod(cents, n)    # по 3333 цента и 1 цент остатка
+print(base, rest)                # 3333 1
+```
+
+`divmod(a, b)` сразу возвращает частное и остаток. Считайте в целых центах: каждая часть получает `base` центов, а первые `rest` частей — на цент больше. Тогда части отличаются не больше чем на цент и всегда складываются в исходную сумму. `int(amount * 100)` отбрасывает всё, что меньше цента, поэтому, если в сумме может быть больше цифр, сначала примените `quantize`.
+
+## Погашение долгов по очереди
+
+Пришла выплата от маркетплейса, а у продавца есть открытые долги, например авансы, от старых к новым. Правило укладывается в одну фразу: *"Each debt gets min(what is left, what is due), and I stop when nothing is left."* С долгами `d1 = 30.00` и `d2 = 50.00`:
+
+| Выплата | Погашения | Остаток продавцу |
+|---|---|---|
+| `0.00` | нет | `0.00` |
+| `20.00` | `d1` 20.00 | `0.00` |
+| `30.00` | `d1` 30.00 | `0.00` |
+| `45.00` | `d1` 30.00, `d2` 15.00 | `0.00` |
+| `100.00` | `d1` 30.00, `d2` 50.00 | `20.00` |
+| `-5.00` | `ValueError` | — |
+
+Каждая строка — граничный случай, который стоит проверить до слова «готово»: ноль, частичное погашение, ровно на границе, больше всех долгов и неверный ввод. Три ошибки встречаются снова и снова:
+
+- **Нулевая строка.** Без `if pay > 0` (или `break` при `left == 0`) выплата `30.00` записывает ещё и `('d2', Decimal('0.00'))`.
+- **Только целые долги.** Каждый цент выплаты сначала идёт в долг. Если гасить только те долги, что помещаются целиком, деньги уйдут продавцу при открытом долге.
+- **Цикл вокруг цикла.** `while left > 0:` вокруг `for` второй раз гасит `d1`, когда выплата больше всех долгов. Хватает одного прохода по отсортированным долгам и `break`.
+
+## Практика
+
+<Drill id="y-split">
+
+Деньги делят в целых центах. `divmod(cents, n)` даёт базу и остаток, а остаток раздаётся по центу первым частям. Округлять каждую часть отдельно нельзя: сумма разойдётся с исходной на цент. Отдать весь остаток одной части тоже нельзя: третья проверка делит `10.00` на 7 и ждёт шесть частей по `1.43`, а не одну часть в `1.48`. Четвёртая проверка смотрит на сумму. Обратно из центов в деньги — через `scaleb(-2)` или `* Decimal("0.01")`: `Decimal(1000) / 100` даёт `Decimal('10')`, а последняя проверка ждёт `Decimal('10.00')`.
+
+</Drill>
+
+<Drill id="y-allocate">
+
+Правило одной фразой: «каждому долгу — min(осталось, к оплате), стоп, когда денег нет». Нулевые строки не пишем: `if pay > 0`. Проверки — это граничные случаи: частичное погашение, ровно на границе, больше всех долгов, ноль и отрицательная выплата, которая должна дать `ValueError`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+| Когда | Что сказать |
+|---|---|
+| До кода | *"Do we round half up or down? Each line, or only the total?"* |
+| Пока пишете | *"Money stays in Decimal, created from strings. I round once, with quantize."* |
+| При делении суммы | *"I work in whole cents, so the parts always add up to the total."* |
+| Если спросят про хранение | *"NUMERIC(12, 2) in the database, never a float type."* |
+
+Прежде чем сказать «готово», прогоните распределение с нулевой выплатой и с выплатой больше всех долгов. Эти два входа ловят нулевую строку и двойное погашение. Если следующая просьба — *"Now each debt has a fee and a principal"*, цикл остаётся тем же: у каждого долга сначала гасится комиссия, потом основная сумма.
+</Aside>
+
+## Что почитать
+
+- [decimal: quick-start tutorial](https://docs.python.org/3/library/decimal.html#quick-start-tutorial) — как создавать значения, контекст и точность по умолчанию.
+- [Decimal.quantize](https://docs.python.org/3/library/decimal.html#decimal.Decimal.quantize) и [режимы округления](https://docs.python.org/3/library/decimal.html#rounding-modes) — `ROUND_HALF_UP`, `ROUND_HALF_EVEN`, `ROUND_DOWN`.
+- [decimal FAQ](https://docs.python.org/3/library/decimal.html#decimal-faq) — рецепт для «двух знаков после запятой».
+- [Floating-point arithmetic: issues and limitations](https://docs.python.org/3/tutorial/floatingpoint.html) — почему `0.1 + 0.2` не равно `0.3`.
+- [divmod()](https://docs.python.org/3/builtins/functions.html#divmod) — частное и остаток одним вызовом.
+- [PostgreSQL: числа произвольной точности](https://www.postgresql.org/docs/current/datatype-numeric.html#DATATYPE-NUMERIC-DECIMAL) — `NUMERIC(precision, scale)` для денег.
+
+## Связанные темы
+
+- [Ошибки и проверка ввода](/python/errors-and-validation/) — как безопасно превратить входную строку в `Decimal`.
+- [dict, defaultdict и Counter](/python/dicts-and-counting/) — суммы по ключу через `defaultdict(Decimal)`.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — те же деньги в SQL: потоки, остатки и журнал проводок.
+- [Задачи про деньги](/python-tasks/money/) — авансы, сопоставление платежей и безопасные выплаты как полные задачи.

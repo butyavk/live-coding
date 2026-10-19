@@ -1,0 +1,209 @@
+---
+title: NULL logic
+description: NULL in interview queries. Three-valued logic, IS NULL and IS DISTINCT FROM, NOT IN with a NULL, empty sums, COALESCE and one type for every branch.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+NULL means "no value" or "unknown". A comparison with NULL is neither true nor false, and `WHERE` keeps only the rows where the condition is true. Most NULL bugs make rows vanish without an error: a list comes back empty, a sum is NULL instead of 0, a filter loses rows.
+
+<Aside type="tip" title="TL;DR">
+- `x = NULL` is never true. Test with `IS NULL` and `IS NOT NULL`.
+- "Different, with NULL as a normal value": `IS DISTINCT FROM`.
+- `NOT IN` with a NULL in the list returns no rows. Use `NOT EXISTS`.
+- `SUM`, `AVG`, `MIN` and `MAX` of no rows are NULL: `COALESCE(SUM(x), 0)`.
+- `COALESCE` and `CASE` return one type: cast a value to text before you mix it with a label.
+</Aside>
+
+## Three values: true, false and unknown
+
+SQL logic has a third value, NULL, read as "unknown". Any comparison with NULL gives NULL, even `NULL = NULL`.
+
+<Trap id="null-eq" q="What do the three comparisons return?">
+
+`eq` and `ne` are NULL, `is_null` is true. Any comparison with NULL gives NULL ("unknown"), and `WHERE` keeps only TRUE. Test with `IS NULL` / `IS NOT NULL`; for "not equal, NULL included" use `IS DISTINCT FROM`.
+
+</Trap>
+
+`AND` and `OR` treat "unknown" with common sense. If the known part already decides the answer, the result is known:
+
+```sql
+SELECT TRUE AND NULL     AS true_and_null,
+       FALSE AND NULL    AS false_and_null,
+       TRUE OR NULL      AS true_or_null,
+       FALSE OR NULL     AS false_or_null,
+       NOT NULL::boolean AS not_null;
+```
+
+| true_and_null | false_and_null | true_or_null | false_or_null | not_null |
+|---|---|---|---|---|
+| NULL | false | true | NULL | NULL |
+
+`FALSE AND unknown` is false, whatever the unknown is. `TRUE OR unknown` is true. The other combinations stay unknown.
+
+`WHERE` keeps a row only when the condition is TRUE. A NULL condition drops the row, and so does its negation:
+
+```sql
+SELECT COUNT(*)                                                         AS all_rows,
+       COUNT(*) FILTER (WHERE refunded_at >= TIMESTAMP '2026-09-01')       AS refunded_in_sep,
+       COUNT(*) FILTER (WHERE NOT (refunded_at >= TIMESTAMP '2026-09-01')) AS not_refunded_in_sep
+FROM transactions;
+```
+
+| all_rows | refunded_in_sep | not_refunded_in_sep |
+|---|---|---|
+| 8294 | 13 | 175 |
+
+13 + 175 is 188, the number of refunded rows. The 8106 rows without a refund are in neither column: for them, the condition and its negation are both NULL. If "not refunded in September" must include them, write it out: `refunded_at IS NULL OR refunded_at < TIMESTAMP '2026-09-01'`.
+
+## IS NULL and IS DISTINCT FROM
+
+`IS NULL` and `IS NOT NULL` are the tests that always answer true or false. In the practice data, `refunded_at IS NOT NULL` means "refunded", and `advances_enrolled_at IS NULL` means "not in the advances program".
+
+`<>` has the same problem as `=`. "Every merchant who did not join on 25 June", written with `<>`, loses the merchants who never joined. `IS DISTINCT FROM` treats NULL as a normal value:
+
+```sql
+SELECT COUNT(*) FILTER (WHERE advances_enrolled_at <> TIMESTAMP '2026-06-25')               AS with_ne,
+       COUNT(*) FILTER (WHERE advances_enrolled_at IS DISTINCT FROM TIMESTAMP '2026-06-25') AS with_distinct
+FROM merchants;
+```
+
+| with_ne | with_distinct |
+|---|---|
+| 4 | 10 |
+
+Two of the 12 merchants joined on 25 June. Ten did not: four joined on another day, and six never joined. `<>` sees only the four.
+
+## NOT IN and NULL
+
+`x NOT IN (a, b)` means `x <> a AND x <> b`. If the list holds a NULL, one part is NULL, and the whole condition can never be true.
+
+<Trap id="not-in-null" q="Will the query return a row?">
+
+No rows. `1 NOT IN (2, NULL)` expands to `1 <> 2 AND 1 <> NULL`, which is `TRUE AND NULL`, which is NULL. One NULL in a `NOT IN` list or subquery, and the result is empty. For "not in the list", use `NOT EXISTS`.
+
+</Trap>
+
+With a subquery, the NULL comes from the data. One NULL `merchant_id` in `advances` is enough:
+
+```sql
+SELECT COUNT(*) AS never_advanced
+FROM merchants
+WHERE id NOT IN (SELECT merchant_id FROM advances
+                 UNION ALL
+                 SELECT NULL);
+```
+
+| never_advanced |
+|---|
+| 0 |
+
+Without the last two lines, the answer is 6. `NOT EXISTS` and `LEFT JOIN … IS NULL` do not have this problem: see [Subqueries and CTE](/sql/subqueries-and-cte/).
+
+## Aggregates skip NULL, and no rows give NULL
+
+Aggregate functions ignore NULL values. `COUNT(*)` is the exception: it counts rows.
+
+```sql
+SELECT SUM(x)   AS sum_x,
+       AVG(x)   AS avg_x,
+       COUNT(x) AS count_x,
+       COUNT(*) AS count_star
+FROM (VALUES (10), (NULL), (20)) AS v(x);
+```
+
+| sum_x | avg_x | count_x | count_star |
+|---|---|---|---|
+| 30 | 15.0000000000000000 | 2 | 3 |
+
+The average is 15, not 10: the NULL row is not in the denominator. [Conditional aggregation](/sql/conditional-aggregation/) uses this on purpose. It is a bug only when you do not expect it.
+
+The second rule: an aggregate over no rows returns NULL. `SUM` of nothing is NULL, not 0. `COUNT` is the exception again and returns 0.
+
+<Trap id="sum-empty" q="mer_02 has no advances at all. What will SUM return?">
+
+NULL, not 0: the sum of an empty set is NULL. For money, and after a `LEFT JOIN`, write `COALESCE(SUM(…), 0)`.
+
+</Trap>
+
+<Trap id="filter-empty" q="Refunded amounts per channel. What is in the promo row?">
+
+NULL. Promo access has no refunds, and `SUM` over an empty set is NULL. `COUNT(*) FILTER` would return 0. For money, write `COALESCE(SUM(x) FILTER (WHERE …), 0)`.
+
+</Trap>
+
+The same NULL appears after a `LEFT JOIN` for every row without a match: see [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+
+## COALESCE: the first value that is not NULL
+
+`COALESCE(a, b, c)` returns the first argument that is not NULL. Typical uses: 0 for an empty sum, a label for a missing value, a fallback column such as `COALESCE(refunded_at, end_time)`.
+
+`NULLIF(a, b)` does the opposite: it returns NULL when `a = b`. Its main use is a safe division. `x / NULLIF(n, 0)` gives NULL instead of an error when `n` is 0.
+
+### One type for every branch
+
+`COALESCE` and `CASE` return one value of one type. PostgreSQL chooses the type from the branches. When one branch is a `timestamp`, it tries to read the text label as a timestamp too:
+
+```sql
+SELECT id, COALESCE(advances_enrolled_at, 'not enrolled') AS enrolled
+FROM merchants;
+```
+
+```text
+ERROR: invalid input syntax for type timestamp: "not enrolled"
+```
+
+`CASE` behaves the same way. `CASE WHEN is_test THEN 'test purchase' ELSE revenue_usd END` fails with `invalid input syntax for type numeric: "test purchase"`. The fix is to make every branch text:
+
+```sql
+SELECT transaction_id,
+       CASE WHEN is_test THEN 'test purchase'
+            ELSE CAST(revenue_usd AS TEXT)
+       END AS price
+FROM transactions
+WHERE transaction_id IN ('t_000001', 't_000115')
+ORDER BY transaction_id;
+```
+
+| transaction_id | price |
+|---|---|
+| t_000001 | 79.99 |
+| t_000115 | test purchase |
+
+## Practice
+
+<Drill id="s-coalesce">
+
+`COALESCE` takes the first value that is not NULL, but all its arguments must have one type. Cast the date to text first. Without the cast, the query fails: `invalid input syntax for type timestamp: "not enrolled"`. `CAST(CAST(x AS DATE) AS TEXT)` gives `YYYY-MM-DD`; `to_char(x, 'YYYY-MM-DD')` does the same.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Put into words what NULL means in each column you use, before the filter that depends on it:
+
+| Column | NULL means | So the filter is |
+|---|---|---|
+| `refunded_at` | no refund | "refunded" = `refunded_at IS NOT NULL` |
+| `advances_enrolled_at` | never joined the program | "not enrolled" = `advances_enrolled_at IS NULL` |
+
+For a column you have not seen before, ask: "Can this column be NULL, and what does NULL mean here?" If you are asked about a `NOT IN` you wrote, the answer is short: "One NULL in the list makes it return nothing, so I'd use NOT EXISTS."
+</Aside>
+
+## Further reading
+
+- [Comparison functions and operators](https://www.postgresql.org/docs/current/functions-comparison.html) — `IS NULL`, `IS DISTINCT FROM` and the other predicates.
+- [Logical operators](https://www.postgresql.org/docs/current/functions-logical.html) — truth tables of `AND`, `OR` and `NOT` with NULL.
+- [COALESCE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-COALESCE-NVL-IFNULL) and [NULLIF](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-NULLIF) — the two NULL helpers.
+- [NOT IN](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-NOTIN) — how a NULL in the subquery changes the result.
+- [UNION, CASE and related constructs](https://www.postgresql.org/docs/current/typeconv-union-case.html) — how PostgreSQL chooses one result type for `CASE` and `COALESCE`.
+
+## Related topics
+
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — NULLs after a join without a match, and `COALESCE` back to 0.
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — `NOT EXISTS`, the safe way to say "never".
+- [Conditional aggregation](/sql/conditional-aggregation/) — `AVG` with `CASE` relies on aggregates skipping NULL.
+- [Grouping and counting](/sql/grouping-and-counting/) — `COUNT(*)` against `COUNT(col)`.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — a balance must be 0, not NULL.

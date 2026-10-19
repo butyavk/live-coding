@@ -1,0 +1,67 @@
+---
+title: Credits and licence
+description: The licences of this project (MIT for the code, CC BY 4.0 for the content), the invented dataset and tasks, and the open-source tools the site is built with.
+sidebar:
+  order: 2
+---
+
+## Licences
+
+The project has two licences:
+
+- **The code** of the site, its components, runtimes and scripts is under the [MIT License](https://opensource.org/license/mit).
+- **The content**, in English and in Russian, is under the [Creative Commons Attribution 4.0 International License (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/). It covers the pages, the exercises and their reference solutions, the flashcards and the practice dataset, unless a file says otherwise.
+
+Third-party libraries used to build and run the site keep their own licences (see below).
+
+The MIT License lets you use, copy and change the code for any purpose, as long as you keep the copyright notice and the licence text. CC BY 4.0 lets you share and adapt the content, including commercially, as long as you:
+
+1. **Credit** this site, with a link.
+2. **Link to the licence**: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+3. **Say whether you made changes.**
+4. **Do not imply endorsement** by this site's maintainers.
+
+A suggested attribution line:
+
+```text
+Based on "Live Coding Map" (https://butyavk.github.io/live-coding/),
+licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+Changes: <describe your changes>.
+```
+
+## The dataset and the tasks
+
+The dataset and the tasks are invented for this site. Every row of the practice data was generated: the merchants, products, customers, prices, payouts and advances are made up, and so are the two partner marketplaces. Names such as "Pocket Quest" or "North Market" are invented, and the numbers do not describe any real business.
+
+The site was written with the help of an AI assistant; every exercise, query and number is checked by automated tests.
+
+## Built with
+
+The site and its exercises run on open-source software:
+
+| Project | What it does here | Licence |
+|---|---|---|
+| [Astro](https://astro.build/) and [Starlight](https://starlight.astro.build/) | The site framework and documentation theme | MIT |
+| [PGlite](https://pglite.dev/) | PostgreSQL compiled to WebAssembly: runs every SQL exercise in your browser | Apache 2.0 (or the PostgreSQL License) |
+| [Pyodide](https://pyodide.org/) | CPython compiled to WebAssembly: runs every Python exercise in your browser | MPL 2.0 |
+| [CodeMirror](https://codemirror.net/) | The code editor in every exercise | MIT |
+| [PostgreSQL](https://www.postgresql.org/) | The database that PGlite is built from | PostgreSQL License |
+| [DuckDB](https://duckdb.org/) | Runs the SQL of the offline exercises | MIT |
+| [pytest](https://docs.pytest.org/) | Checks the offline exercises | MIT |
+| [Onest](https://fontsource.org/fonts/onest), [JetBrains Mono](https://www.jetbrains.com/lp/mono/) and [Cormorant](https://fontsource.org/fonts/cormorant) | The text, code and skill-map fonts | SIL Open Font License 1.1 |
+
+## A sibling project
+
+[System Design Map](https://butyavk.github.io/system-design/) prepares you for the system design round, on the same stack and in the same two languages: topics on a skill map, a study plan, an interview framework, solved case studies and flashcards.
+
+## Further reading
+
+- [The MIT License](https://opensource.org/license/mit): the full text, which is short.
+- [CC BY 4.0 deed](https://creativecommons.org/licenses/by/4.0/): a plain-language summary of the licence.
+- [CC BY 4.0 legal code](https://creativecommons.org/licenses/by/4.0/legalcode.en): the full licence text.
+- [Recommended practices for attribution](https://wiki.creativecommons.org/wiki/Recommended_practices_for_attribution): Creative Commons' guide to crediting a work.
+
+## Related topics
+
+- [Contributing](/about/contributing/): how to report a problem or add a page, a drill or a task.
+- [Practice dataset](/start/dataset/): the tables of the invented dataset and what each column means.

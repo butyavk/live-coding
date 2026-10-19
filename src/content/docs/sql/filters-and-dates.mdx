@@ -1,0 +1,221 @@
+---
+title: Filters and dates
+description: WHERE for interview reports. The three paid filters, half-open date ranges, months as a DATE, typed literals, intervals and a fixed date for today.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Almost every SQL task in an interview starts with `WHERE`: which rows count, and for which period. Mistakes here raise no error. The query runs, and the number is a little wrong: the last day of the month is lost, a test purchase is in the revenue, or two Septembers share one group.
+
+<Aside type="tip" title="TL;DR">
+- Paid means `NOT is_trial AND NOT is_test AND channel <> 'promo'`. Test purchases go out of every number.
+- A period is half-open: `ts >= TIMESTAMP '2026-08-01' AND ts < TIMESTAMP '2026-09-01'`. No `BETWEEN` on timestamps.
+- A month as a column: `CAST(date_trunc('month', ts) AS DATE)`, not `EXTRACT(MONTH FROM ts)`.
+- Write the type of every date literal: `TIMESTAMP '…'`, `INTERVAL '30 days'`.
+- Today is a literal (`TIMESTAMP '2026-09-30'`), never `NOW()`. Mixing `AND` and `OR`: parentheses.
+</Aside>
+
+## The three "paid" filters
+
+One row of `transactions` is one billing period of a subscription. Not every row is a payment. Three columns mark the rows that are not:
+
+| Filter | Removes | Why |
+|---|---|---|
+| `NOT is_test` | test purchases | never part of a business number |
+| `NOT is_trial` | free trial periods | price 0: a trial is not a payment |
+| `channel <> 'promo'` | promo access | price 0: nobody paid |
+
+Trials and promo access depend on the question: they are transactions, but not paid ones. When the task says "paid", apply all three filters. When it says "transactions", ask whether trials count.
+
+What the last two filters change, on July 2026:
+
+```sql
+SELECT NOT is_trial AND channel <> 'promo' AS paid,
+       COUNT(*)                   AS transactions,
+       SUM(charged_usd) AS gross_usd
+FROM transactions
+WHERE NOT is_test
+  AND start_time >= TIMESTAMP '2026-07-01'
+  AND start_time <  TIMESTAMP '2026-08-01'
+GROUP BY 1
+ORDER BY 1;
+```
+
+| paid | transactions | gross_usd |
+|---|---|---|
+| false | 59 | 0.00 |
+| true | 427 | 6876.73 |
+
+The 59 free rows add nothing to the sum. They still change the count (486 against 427) and the average price (14.15 against 16.10). So a forgotten trial filter does not change a revenue total, but it does change a count or an average.
+
+`COUNT(*) FILTER (WHERE …)` in the traps below counts only the rows that pass its condition. [Conditional aggregation](/sql/conditional-aggregation/) explains it in detail.
+
+## AND before OR
+
+`AND` binds tighter than `OR`, in the same way as multiplication binds tighter than addition. `a OR b AND c` means `a OR (b AND c)`. When a filter mixes the two, write the parentheses, even if you think they are not needed.
+
+<Trap id="and-or" q="Web checkout and North Market, test purchases excluded. Will the two numbers match?">
+
+No: 5182 against 5158. `AND` binds tighter than `OR`, so without parentheses the filter means "web checkout, test purchases included" or "North Market without test purchases". When you mix `AND` and `OR`, add parentheses.
+
+</Trap>
+
+## Half-open date ranges
+
+A period is a half-open interval: it includes its start and excludes its end. `[2026-08-01, 2026-09-01)` is all of August, up to the last second.
+
+```sql
+WHERE start_time >= TIMESTAMP '2026-08-01'
+  AND start_time <  TIMESTAMP '2026-09-01'
+```
+
+The same shape works for a day, a week, a month or a year. The end of one period is the start of the next, so no row is lost and none is counted twice. You never need to know how many days a month has.
+
+`BETWEEN` includes both ends. On a `timestamp` column, `BETWEEN '2026-07-01' AND '2026-07-31'` stops at 31 July 00:00:00 and loses the rest of that day.
+
+<Trap id="between-ts" q="July 2026, counted two ways. Will the numbers match?">
+
+No: 490 against 502. `BETWEEN '2026-07-01' AND '2026-07-31'` ends at 31 July 00:00:00, so the rest of that day is lost. For timestamps, use a half-open range: `>=` the start and `<` the start of the next period.
+
+</Trap>
+
+One day is the same pattern with a one-day step.
+
+<Trap id="ts-eq-date" q="Purchases on 1 September, counted three ways. What does each one return?">
+
+0, 20 and 20. `start_time = '2026-09-01'` means exactly midnight, and no purchase happened at 00:00:00. The cast `start_time::date` gives the right answer, but a plain index on `start_time` cannot serve it. The range (c) is right and can use the index.
+
+</Trap>
+
+## Months as a DATE
+
+A report "per month" needs a month column. Two functions look right:
+
+- `date_trunc('month', ts)` cuts the timestamp down to the first moment of its month: `2026-09-15 10:30` becomes `2026-09-01 00:00:00`. The year stays.
+- `EXTRACT(MONTH FROM ts)` returns only the month number, from 1 to 12. September 2025 and September 2026 both become 9.
+
+The practice data starts in January 2025, so the difference is real:
+
+```sql
+SELECT CAST(date_trunc('month', start_time) AS DATE) AS month,
+       COUNT(*) AS transactions
+FROM transactions
+WHERE EXTRACT(MONTH FROM start_time) = 9
+GROUP BY 1
+ORDER BY 1;
+```
+
+| month | transactions |
+|---|---|
+| 2025-09-01 | 433 |
+| 2026-09-01 | 475 |
+
+Grouped by `EXTRACT(MONTH FROM start_time)`, the same 908 rows would fall into one group called 9.
+
+`date_trunc` returns a timestamp, not a date. For a clean month column, cast the result: `CAST(date_trunc('month', ts) AS DATE)`.
+
+<Trap id="trunc-date" q="What type does date_trunc return when you pass it a date?">
+
+`timestamp with time zone`: `2026-09-01 00:00:00+00`, not a date. `date_trunc` always returns a timestamp. For a date in the output, cast it: `CAST(date_trunc('month', x) AS DATE)`. Check on this site compares values as they are printed, and a timestamp never equals a date, so it catches the wrong type.
+
+</Trap>
+
+## Typed literals and intervals
+
+A quoted value such as `'2026-09-01'` has no type at first. PostgreSQL gives it the type of what it meets. Next to a `timestamp` column it becomes a timestamp, so `start_time >= '2026-09-01'` works. Next to an interval, it is read as an interval, and the query fails.
+
+A typed literal removes the guesswork: `TIMESTAMP '2026-09-01'`, `DATE '2026-09-01'`, `INTERVAL '30 days'`. Write the type every time, and the same expression also works in date arithmetic.
+
+<Trap id="literal-interval" q="Purchases in the last 30 days. Will the query run?">
+
+No: `invalid input syntax for type interval: "2026-09-30"`. A quoted string has no type at first and takes the type of its neighbour. Next to `INTERVAL`, PostgreSQL reads it as an interval too. The fix is `TIMESTAMP '2026-09-30' - INTERVAL '30 days'`, which is `2026-08-31 00:00:00`; the answer is 483. On the second line the neighbour is the `start_time` column, so the string becomes a timestamp anyway. Habit: always write `TIMESTAMP '…'`.
+
+</Trap>
+
+Date arithmetic in one query:
+
+```sql
+SELECT TIMESTAMP '2026-09-30' - INTERVAL '30 days'           AS minus_30_days,
+       TIMESTAMP '2026-01-31' + INTERVAL '1 month'           AS plus_1_month,
+       DATE '2026-09-30' - DATE '2026-09-01'                 AS date_minus_date,
+       TIMESTAMP '2026-09-30 12:00' - TIMESTAMP '2026-09-28' AS ts_minus_ts;
+```
+
+| minus_30_days | plus_1_month | date_minus_date | ts_minus_ts |
+|---|---|---|---|
+| 2026-08-31 00:00:00 | 2026-02-28 00:00:00 | 29 | 2 days 12:00:00 |
+
+- A timestamp plus or minus an interval is a timestamp. Adding a month to 31 January gives the last day of February.
+- A date minus a date is a whole number of days.
+- A timestamp minus a timestamp is an `interval`. For a number, take `EXTRACT(EPOCH FROM …)` (seconds) and divide by 86400. For the last column above, this gives `2.5000000000000000` days.
+
+## "Today" is a literal
+
+Interview data is static. `NOW()` and `CURRENT_DATE` move every day, so "the last 30 days" drifts away from the data and the answer changes from run to run. Ask what today is, then write it as a literal. On this site, today is `2026-09-30`. If in doubt, look where the data ends:
+
+```sql
+SELECT MAX(start_time) AS last_purchase
+FROM transactions;
+```
+
+| last_purchase |
+|---|
+| 2026-09-29 23:40:35 |
+
+Then write the window with today as the excluded end, and the agreement as a comment:
+
+```sql
+-- today = 2026-09-30; last 30 days = [today - 30 days, today)
+WHERE start_time >= TIMESTAMP '2026-09-30' - INTERVAL '30 days'
+  AND start_time <  TIMESTAMP '2026-09-30'
+```
+
+Whether today itself counts is a question for the interviewer, not a guess. The same goes for time zones: the timestamps here are UTC, and "per day" for customers in another country may need a different day boundary.
+
+## Practice
+
+<Drill id="s-filter">
+
+All three "paid" filters, and a half-open range: from the first day of August, up to but not including the first day of September. `BETWEEN … '2026-08-31'` would lose 31 August after midnight, and `BETWEEN … '2026-09-01'` would count a sale made exactly at 00:00 on 1 September. The hidden data has both. Next to a column, typed literals are not required, but the habit costs nothing.
+
+</Drill>
+
+<Drill id="s-month">
+
+`CAST(date_trunc('month', start_time) AS DATE)` keeps the year and gives a clean date. `EXTRACT(MONTH …)` would merge the same month of different years, and `date_trunc` alone returns a timestamp. `GROUP BY 1` and `ORDER BY 1` refer to the first column of `SELECT`.
+
+</Drill>
+
+<Drill id="s-interval">
+
+`refunded_at - start_time` is an `interval`. `EXTRACT(EPOCH FROM …)` turns it into seconds; divide by 86400 for days. `ROUND(x, 1)` needs a `numeric`. In PostgreSQL 14 and later `EXTRACT` already returns one, so the cast is a safety net for older versions and other engines. The task asks for the exact time, so do not subtract dates: `refunded_at::date - start_time::date` counts calendar days, a whole number, and gives 11.7 instead of 11.6 on North Market. `EXTRACT(DAY FROM …)` is wrong too: it drops the hours.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Two questions belong before the first line of SQL:
+
+- "Is 'today' a fixed date for this dataset, or the current time?"
+- "Do trials and promo access count as transactions here?"
+
+Then say the range while you type it: "from the first of August, up to but not including the first of September." If time zones come up, say that the timestamps are in UTC and ask which zone defines a day for this report.
+</Aside>
+
+## Further reading
+
+- [Date/Time Functions and Operators](https://www.postgresql.org/docs/current/functions-datetime.html) — the operator table, [`EXTRACT`](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-EXTRACT) and [`date_trunc`](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC).
+- [Interval input](https://www.postgresql.org/docs/current/datatype-datetime.html#DATATYPE-INTERVAL-INPUT) — how `'30 days'` and `'1 month'` are read.
+- [Constants of other types](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-SYNTAX-CONSTANTS-GENERIC) — typed literals such as `TIMESTAMP '…'`.
+- [Operator precedence](https://www.postgresql.org/docs/current/sql-syntax-lexical.html#SQL-PRECEDENCE) — why `AND` is applied before `OR`.
+- [Comparison predicates](https://www.postgresql.org/docs/current/functions-comparison.html) — `BETWEEN` and its inclusive ends.
+
+## Related topics
+
+- [Grouping and counting](/sql/grouping-and-counting/) — the next step: one row per channel or per month.
+- [PostgreSQL dialect](/sql/postgresql-dialect/) — more on literals, casts and what other databases do differently.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — every day even without data, and "active at a moment".
+- [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/) — why a range on the raw column can use an index.
+- [Practice dataset](/start/dataset/) — what each column of `transactions` means.

@@ -1,0 +1,150 @@
+---
+title: Сортировка и топ-k
+description: Сортировка по нескольким ключам через кортеж и минус, почему reverse=True ломает разные направления, что даёт устойчивая сортировка и топ-k через heapq.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Почти у каждого результата в лайвкодинге есть порядок: сначала самые крупные выплаты, сначала последние события, лучшие клиенты по выручке. Обычно порядок состоит из двух частей: главный ключ и правило для равных. Если код не учитывает правило для равных, ответ верен на примере и неверен на скрытом тесте. Если код сортирует миллион строк ради десяти, интервьюер спросит о сложности.
+
+<Aside type="tip" title="Коротко">
+- Несколько ключей: `sorted(rows, key=lambda r: (-r["amount"], r["id"]))` — сумма по убыванию, потом id по возрастанию.
+- Минус работает для чисел (`int`, `Decimal`). `reverse=True` переворачивает все части ключа, в том числе тай-брейк.
+- Строку или дату по убыванию сортируют в два прохода: сначала по второстепенному ключу, потом по главному с `reverse=True`.
+- `sorted` устойчива: строки с равным ключом сохраняют порядок входа.
+- Топ-k: `heapq.nsmallest(k, rows, key=…)`, O(n log k) по времени и O(k) по памяти. Для k = 1 — `min` или `max`.
+</Aside>
+
+## sorted и list.sort
+
+```python
+from decimal import Decimal
+
+payouts = [
+    {"id": "po_3", "amount": Decimal("10.00")},
+    {"id": "po_1", "amount": Decimal("25.50")},
+    {"id": "po_2", "amount": Decimal("10.00")},
+]
+
+print(sorted(payouts, key=lambda p: p["amount"]))
+# [{'id': 'po_3', 'amount': Decimal('10.00')}, {'id': 'po_2', 'amount': Decimal('10.00')}, {'id': 'po_1', 'amount': Decimal('25.50')}]
+
+result = payouts.sort(key=lambda p: p["id"])   # сортирует на месте...
+print(result)                                  # None -- ...и возвращает None
+print([p["id"] for p in payouts])              # ['po_1', 'po_2', 'po_3']
+```
+
+`sorted()` принимает любой итерируемый объект и возвращает новый список. `list.sort()` меняет список на месте и возвращает `None`, поэтому `rows = rows.sort()` теряет данные. Обе принимают `key` — функцию, которая превращает строку в значение для сравнения. Обе работают за O(n log n).
+
+## Несколько ключей, разные направления
+
+Кортежи сравниваются поэлементно: сначала первые элементы, при равенстве — вторые. Поэтому ключ-кортеж даёт «по сумме, потом по id». Чтобы одна часть шла по убыванию, перед ней ставят минус:
+
+```python
+print([p["id"] for p in sorted(payouts, key=lambda p: (-p["amount"], p["id"]))])
+# ['po_1', 'po_2', 'po_3'] -- сумма по убыванию, id по возрастанию
+
+print([p["id"] for p in sorted(payouts, key=lambda p: (p["amount"], p["id"]), reverse=True)])
+# ['po_1', 'po_3', 'po_2'] -- сумма по убыванию, но и id по убыванию
+```
+
+`reverse=True` переворачивает весь порядок, поэтому переворачивается и тай-брейк: `po_3` встаёт перед `po_2`. Это верно, только когда все ключи идут в одну сторону.
+
+### Когда минус не поставить
+
+Минус работает только для чисел. `-"north_market"` падает с `TypeError: bad operand type for unary -: 'str'`, то же будет с `datetime`. Дату можно превратить в число: `-d.toordinal()` или `-ts.timestamp()`. Строку сортируют в два прохода, и всю работу делает устойчивость:
+
+```python
+rows = [("north_market", 3), ("web", 1), ("north_market", 1), ("south_market", 2), ("web", 5)]
+
+# канал по убыванию, потом сумма по возрастанию: канал — строка, минус не поставить
+by_amount = sorted(rows, key=lambda r: r[1])                 # 1. второстепенный ключ
+result = sorted(by_amount, key=lambda r: r[0], reverse=True) # 2. главный ключ; равные сохраняют шаг 1
+print(result)
+# [('web', 1), ('web', 5), ('south_market', 2), ('north_market', 1), ('north_market', 3)]
+```
+
+Проходы идут в обратном порядке по сравнению с тем, как правило звучит: главный порядок задаёт последний проход.
+
+## Устойчивость
+
+Устойчивая (stable) сортировка сохраняет порядок входа для строк с равным ключом:
+
+```python
+events = [("evt_9", "2026-09-02"), ("evt_4", "2026-09-01"), ("evt_1", "2026-09-02"), ("evt_2", "2026-09-01")]
+
+print(sorted(events, key=lambda e: e[1]))
+# [('evt_4', '2026-09-01'), ('evt_2', '2026-09-01'), ('evt_9', '2026-09-02'), ('evt_1', '2026-09-02')]
+```
+
+Внутри дня `evt_4` остаётся перед `evt_2`, потому что пришёл раньше. Python это гарантирует, и сортировка в два прохода выше на этом держится. Но разрешать через неё равенство, которого требует задача, не стоит: порядок во входных данных редко бывает частью договорённости. Если в условии «при равенстве — по id», кладите id в ключ. Первый пример на странице показывает то же: когда ключом была только сумма, `po_3` остался перед `po_2`.
+
+## Топ-k через heapq
+
+`heapq.nsmallest(k, iterable, key=…)` возвращает тот же список, что `sorted(iterable, key=key)[:k]`. Но в куче (heap) он держит только k лучших строк на текущий момент. Каждая новая строка стоит O(log k), весь проход — O(n log k) и O(k) памяти вместо O(n log n) со всеми строками в памяти. Он работает и с генератором, так что строки не обязаны лежать в одном списке.
+
+```python
+import heapq
+from decimal import Decimal
+
+revenue = {"prd_09": Decimal("329.85"), "prd_03": Decimal("120.00"), "prd_12": Decimal("120.00"),
+           "prd_01": Decimal("120.00"), "prd_07": Decimal("15.98")}
+
+# 3 самых больших; при равенстве — меньший id продукта раньше
+print(heapq.nsmallest(3, revenue.items(), key=lambda kv: (-kv[1], kv[0])))
+# [('prd_09', Decimal('329.85')), ('prd_01', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+
+print(heapq.nlargest(3, revenue.items(), key=lambda kv: (kv[1], kv[0])))
+# [('prd_09', Decimal('329.85')), ('prd_12', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+
+print(sorted(revenue.items(), key=lambda kv: (-kv[1], kv[0]))[:3])
+# [('prd_09', Decimal('329.85')), ('prd_01', Decimal('120.00')), ('prd_03', Decimal('120.00'))]
+```
+
+Почему `nsmallest` для «самых больших»? `nlargest` устроен как `sorted(…, reverse=True)` и переворачивает все части ключа. С ключом `(revenue, id)` при равенстве он предпочтёт больший id и вернёт `prd_12` вместо `prd_01`. С `nsmallest` и `(-revenue, id)` направления ровно такие, как написаны. Для k = 1 проще `min` или `max` с тем же ключом: O(n).
+
+В базе то же делает `ORDER BY … LIMIT k`. На 8 294 учебных транзакциях `EXPLAIN ANALYZE` для `SELECT transaction_id, charged_usd FROM transactions ORDER BY charged_usd DESC, transaction_id LIMIT 10` показывает `Sort Method: top-N heapsort  Memory: 17kB`.
+
+<Talk q="Top 10 out of a million rows — do you sort everything?">
+
+"No. heapq.nsmallest or nlargest keeps a heap of the 10 best so far: O(n log k) time and O(k) memory instead of O(n log n). If the data is in the database, ORDER BY … LIMIT 10 does the same — Postgres shows 'top-N heapsort' in the plan."
+
+Когда k близко к числу строк, быстрее `sorted()` — так сказано и в документации heapq.
+
+</Talk>
+
+## Практика
+
+<Drill id="y-sort">
+
+Несколько ключей — кортеж в `key`. Минус перед суммой делает убывающей только эту часть ключа. `reverse=True` перевернул бы и id, и `p3` встал бы перед `p2`.
+
+</Drill>
+
+<Drill id="y-topk">
+
+`heapq.nsmallest(k, …, key=lambda kv: (-kv[1], kv[0]))` — O(n log k) по времени и O(k) по памяти вместо полной сортировки за O(n log n). Вторая проверка просит больше клиентов, чем есть, третья передаёт пустой словарь: оба случая должны работать без особого кода. На вопрос «а если строк миллиард?» ответ — `ORDER BY … LIMIT k` в базе: PostgreSQL сделает тот же top-N heapsort.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Запишите правило порядка комментарием до кода, словами интервьюера, и прочитайте его вслух: *"So: amount from high to low, and for equal amounts the smaller id first. Is that right?"* Ключ следует из комментария: `(-amount, id)`. Если часть ключа — строка или дата, скажите, почему минуса нет, и сортируйте в два прохода.
+
+Когда важны только первые несколько строк, назовите стоимость до вопроса: *"I don't need a full sort. heapq keeps the k best, so it is O(n log k). In the database it would be ORDER BY … LIMIT k."*
+</Aside>
+
+## Что почитать
+
+- [sorted()](https://docs.python.org/3/builtins/functions.html#sorted) — аргументы `key` и `reverse` и гарантия устойчивости.
+- [Sorting techniques](https://docs.python.org/3/howto/sorting.html) — функции-ключи, по возрастанию и по убыванию, [устойчивость и сложные сортировки](https://docs.python.org/3/howto/sorting.html#sort-stability-and-complex-sorts).
+- [heapq.nsmallest и nlargest](https://docs.python.org/3/library/heapq.html#heapq.nsmallest) — чему они эквивалентны и когда быстрее сортировки.
+
+## Связанные темы
+
+- [dict, defaultdict и Counter](/python/dicts-and-counting/) — `Counter.most_common` и почему для равенства нужен ключ-кортеж.
+- [Интервалы](/python/intervals/) — слияние периодов начинается с сортировки по началу.
+- [Тесты и сложность](/python/testing-and-complexity/) — как назвать O(n log n) и O(n log k) вслух.
+- [Лучший в группе](/sql-patterns/top-n-per-group/) — те же правила для равенства через `ROW_NUMBER` и `ORDER BY … DESC, id`.

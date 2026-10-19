@@ -1,0 +1,103 @@
+---
+title: Conversion and churn
+description: "Three SQL tasks on product metrics: trial conversion by plan, daily revenue with a running total and a 7-day average, and monthly churn per product."
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Product metrics come next: the share of trials that converted, a daily revenue line with a running total and a 7-day average, and the share of subscriptions that were not renewed. Each is a few CTEs, a rate without integer division, and a clear answer to "who is in the denominator?". They build on [CTE and EXISTS](/sql/subqueries-and-cte/), [CASE, FILTER and rates](/sql/conditional-aggregation/) and [Shares and running totals](/sql-patterns/running-totals-and-shares/).
+
+<Aside type="tip" title="How to practise">
+Each answer is a rate or an average, so say the denominator first: *"Out of the trials that started in Q2, how many converted?"* Then build one CTE at a time and run it on its own before you add the next.
+</Aside>
+
+## Q08. Trial conversion by plan — Q2 2026
+
+<Task id="q08" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The share of free trials that turned into a payment: the main number of a trial funnel. The trial and the first payment are different rows of one chain, with the same `original_transaction_id`.
+
+**Steps.**
+
+1. A CTE `trials`: trials that started in April–June.
+2. A CTE `conversions`: the chains that have a row with `is_trial_conversion`.
+3. `trials LEFT JOIN conversions`: `COUNT(*)` is the number of trials, `COUNT(c.original_transaction_id)` the number of conversions, and the rate is `1.0 * conversions / trials`.
+
+**Traps.**
+
+- An `INNER JOIN` loses the trials that did not convert, and every rate becomes 1.
+- Integer division gives 0, or 1 when every trial converted.
+- Each chain here has at most one conversion row. `DISTINCT` in `conversions` keeps the count right if a chain ever has two.
+- A trial can convert in July. The start of the trial decides the quarter, so do not filter conversions by date. Here 3 trials converted in July.
+
+**Check.** 39 rows, one per plan. Overall there are 139 trials and 63 conversions, a rate of 0.453. prd_02.monthly: 5 trials, 2 conversions, 0.400.
+
+**Follow-up.** "Can we trust the number for June?" A trial lasts 7 days, so trials from the last week before "today" have no outcome yet. For Q2 that week is long past, but for a report on the last month it matters: mark that period as incomplete. More follow-ups of this kind are on [Database concepts](/sql-patterns/database-concepts/).
+
+**In production.** A trial reaches its conversion through `original_transaction_id`, so index that column. It can be a partial index on the side the query looks up: `WHERE is_trial_conversion`.
+
+</Reveal>
+
+## Q09. Running revenue and 7-day average per merchant
+
+<Task id="q09" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Daily revenue of each merchant with a running total and a 7-day average: a typical dashboard chart.
+
+**Steps.**
+
+1. `daily`: net revenue per merchant and day.
+2. A grid: `merchants CROSS JOIN days`, then `LEFT JOIN daily` with `COALESCE(net_usd, 0)`.
+3. Windows over the grid: `SUM(net_usd) OVER (PARTITION BY merchant_id ORDER BY day)` for the running total, and `AVG(net_usd) OVER (… ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)` for the average.
+
+**Traps.**
+
+- Without the grid, empty days drop out, and "7 rows" stop being 7 days. Only 222 merchant-days have sales; the grid has 348.
+- `AVG` without a frame uses the default one, from the start of the partition to the current row. That is a running average, not a 7-day one. For mer_01 on 8 September the default frame gives 3.50; the 7-day average is 3.00.
+- `ROWS` counts rows, so it is right only when there is exactly one row per day. The grid guarantees that.
+
+**Check.** 348 rows: 12 merchants × 29 days. mer_01 has 6.99 on 1 September and a net of 0 on 2 September, so the average on the 2nd is 3.50: over the two days that exist.
+
+**In production.** The windows work on a small set, days × merchants. The expensive part is reading transactions, so an index on `start_time`.
+
+</Reveal>
+
+## Q10. Churn rate per product — August 2026
+
+<Task id="q10" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Churn: of the subscriptions that were paid on 1 August, how many were not renewed in August. One subscription is all its rows with one `original_transaction_id`. It lives from the first `start_time` to the last `end_time` of its paid rows.
+
+**Steps.**
+
+1. A CTE `chains`: paid rows only, `GROUP BY original_transaction_id, product_id` → `MIN(start_time)` and `MAX(end_time)`.
+2. A CTE `active`: chains alive on 1 August.
+3. The result: `GROUP BY product_id` → `COUNT(*)`, `COUNT(*) FILTER (WHERE last_end <= '2026-09-01')` and the rate.
+
+**Traps.**
+
+- `MAX(start_time)` instead of `MAX(end_time)`. The end of a subscription is the end of its last period.
+- `last_end < '2026-09-01'` misses a subscription that ends exactly at 1 September 00:00. It is active on 1 August and no longer active on 1 September, so it churned in August; with `<` it never counts as churn in any month. No practice chain ends exactly at that midnight. The hidden edge-case data has one, so `<` fails there.
+- `refunded_at IS NOT NULL` instead of `IS NULL` keeps only the refunds.
+- Forgotten trials move the start of a subscription 7 days earlier. For example, a subscription paid from 3 August after a trial from 27 July would look active on 1 August.
+- The rate needs `1.0 *`; integer division gives 0.
+
+**Check.** The worst product is prd_08: 7 of 60, 0.1167. In total, 993 subscriptions were active on 1 August and 52 churned.
+
+**Follow-up.**
+
+- "And for every month of the year?" A calendar of months instead of one date: `generate_series` and a grid. Answer with the idea.
+- "Why is prd_08 the worst?" Look at the plans. Annual subscriptions rarely end in a given month: 14 of 696 churned in August, against 31 of 284 monthly and 7 of 13 weekly ones. So churn per plan differs much more than churn per product. prd_08 has 40 annual subscriptions out of 60; its 7 losses are 3 monthly, 3 weekly and 1 annual.
+
+**In production.** The query groups the whole table, so an index does not make it cheaper: EXPLAIN shows a hash aggregate over a sequential scan, with or without an index on `(original_transaction_id, start_time)`. Two things help. Keep a table with one row per subscription (`first_start`, `last_end`), updated with every renewal: churn for any month is then a pass over that small table. Or first pick the chains that have a period ending after 1 August (an index on `end_time` finds them) and group only those. On this small table one full pass is still cheaper, as EXPLAIN shows, so check it on the real one.
+
+</Reveal>

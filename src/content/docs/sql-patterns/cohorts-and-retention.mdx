@@ -1,0 +1,210 @@
+---
+title: Cohorts and retention
+description: Customers grouped by their first paid month, retention checked with EXISTS, the share without integer division, and a cohort table of months by months.
+sidebar:
+  order: 10
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+"Of the customers who first paid in June, how many paid again in July?" is a cohort question. It takes three steps: find each customer's first paid month over all time, check whether each one paid in the next month, then divide. Two mistakes break it without an error: a first purchase computed inside the report window, and a `JOIN` that counts payments instead of customers.
+
+<Aside type="tip" title="TL;DR">
+- A cohort is the customers whose **first** paid transaction falls in a month: `MIN(start_time)` over all their payments, not only the report's months.
+- Retained means at least one paid transaction in the next month: `EXISTS (SELECT 1 …)`, linked to the outer customer.
+- A `JOIN` to next month's payments multiplies rows: a customer with two payments counts twice.
+- The share is `ROUND(1.0 * retained / cohort, 3)`; `1.0 *` avoids integer division.
+- A cohort table: one row per (customer, month) first, then group by cohort month and month number.
+</Aside>
+
+## Step 1: the cohort
+
+A paid transaction is not a trial, not a test purchase and not promo access. The cohort is defined by each customer's first one:
+
+```sql
+WITH paid AS (
+    SELECT customer_id, start_time
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (
+    SELECT customer_id, MIN(start_time) AS first_at   -- over all time
+    FROM paid
+    GROUP BY customer_id
+),
+cohort AS (
+    SELECT customer_id
+    FROM first_paid
+    WHERE first_at >= TIMESTAMP '2026-06-01' AND first_at < TIMESTAMP '2026-07-01'
+)
+SELECT COUNT(*) AS cohort
+FROM cohort;
+```
+
+The June cohort has 111 customers.
+
+The usual mistake is to filter the payments to June before the `MIN`. Then every customer who paid in June gets June as their "first" month, including those who first paid a year ago. That cohort has 393 customers, and most of them are not new.
+
+Ask how far back the data goes. The practice data starts on 1 January 2025. A customer who first paid before that would look new in the first months, so early cohorts are less reliable than the 2026 ones.
+
+## Step 2: retained, with EXISTS
+
+For each customer of the cohort, the question is yes or no: is there at least one paid transaction in July? That is exactly what `EXISTS` answers. The query continues from the same three CTEs:
+
+```sql
+SELECT COUNT(*) AS cohort,
+       COUNT(*) FILTER (WHERE EXISTS (
+           SELECT 1
+           FROM paid p
+           WHERE p.customer_id = c.customer_id          -- the link to the outer customer
+             AND p.start_time >= TIMESTAMP '2026-07-01'
+             AND p.start_time <  TIMESTAMP '2026-08-01'
+       )) AS retained
+FROM cohort c;
+```
+
+| cohort | retained |
+|---|---|
+| 111 | 47 |
+
+`EXISTS` gives true or false for each outer row and never multiplies rows. `SELECT 1` is a convention: what the subquery selects does not matter, only whether it finds a row. More on `EXISTS` is in [Subqueries and CTE](/sql/subqueries-and-cte/).
+
+Two mistakes give a wrong number here:
+
+- **A JOIN instead of EXISTS.** Joining the cohort to the July payments returns 53 rows, because some customers paid twice in July. `COUNT(*)` then says 53. `COUNT(DISTINCT c.customer_id)` gives 47 again, but only because `DISTINCT` hides the extra rows. [Row multiplication](/sql-patterns/row-multiplication/) explains why.
+- **No link to the outer row.** Without `p.customer_id = c.customer_id`, the subquery asks "did anyone pay in July?". The answer is yes for everyone, and retained becomes 111, or 100 %. A share of exactly 100 % or 0 % is a reason to check the query before you say "done" (the plausibility check of the [interview protocol](/start/interview-protocol/)).
+
+## Step 3: the share
+
+In PostgreSQL, an integer divided by an integer is an integer: `47 / 111` is 0. Multiply by `1.0` first: `ROUND(1.0 * 47 / 111, 3)` is 0.423. The same trap appears on [Conditional aggregation](/sql/conditional-aggregation/).
+
+To use the `EXISTS` once and not twice (for `retained` and for the share), compute it as a column in one more CTE: one row per customer with a boolean `retained`. The final `SELECT` then counts `COUNT(*) FILTER (WHERE retained)` and divides.
+
+### What "retained" means: ask
+
+"Paid again next month" fits monthly plans. A yearly subscriber does not pay next month, but has not left. Split the June cohort by the plan of the first payment:
+
+```sql
+WITH paid AS (
+    SELECT customer_id, start_time, plan_period
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (                                  -- the first payment and its plan
+    SELECT DISTINCT ON (customer_id) customer_id, start_time AS first_at, plan_period
+    FROM paid
+    ORDER BY customer_id, start_time
+)
+SELECT f.plan_period,
+       COUNT(*) AS cohort,
+       COUNT(*) FILTER (WHERE EXISTS (
+           SELECT 1
+           FROM paid p
+           WHERE p.customer_id = f.customer_id
+             AND p.start_time >= TIMESTAMP '2026-07-01'
+             AND p.start_time <  TIMESTAMP '2026-08-01'
+       )) AS retained
+FROM first_paid f
+WHERE f.first_at >= TIMESTAMP '2026-06-01'
+  AND f.first_at <  TIMESTAMP '2026-07-01'
+GROUP BY f.plan_period
+ORDER BY f.plan_period;
+```
+
+| plan_period | cohort | retained |
+|---|---|---|
+| P1M | 50 | 40 |
+| P1W | 12 | 7 |
+| P1Y | 49 | 0 |
+
+Forty of the 50 monthly customers paid again, and none of the 49 yearly ones, as expected. So ask before you write the query: *"Does retained mean a new payment, or an active subscription?"* For an active subscription, the check becomes "active at a moment", as on [Calendars and active periods](/sql-patterns/calendars-and-active-periods/).
+
+## The cohort table: months by months
+
+A follow-up often asks for every cohort and several months at once. Each row is a cohort month, and each column is the number of months since the first payment:
+
+```sql
+WITH paid AS (                                   -- one row per (customer, month)
+    SELECT DISTINCT customer_id,
+           CAST(date_trunc('month', start_time) AS DATE) AS month
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+),
+first_paid AS (
+    SELECT customer_id, MIN(month) AS cohort_month
+    FROM paid
+    GROUP BY customer_id
+),
+grid AS (
+    SELECT f.cohort_month,
+           CAST(12 * (EXTRACT(YEAR FROM p.month) - EXTRACT(YEAR FROM f.cohort_month))
+                + EXTRACT(MONTH FROM p.month) - EXTRACT(MONTH FROM f.cohort_month) AS INT) AS month_number,
+           p.customer_id
+    FROM first_paid f
+    JOIN paid p ON p.customer_id = f.customer_id
+)
+SELECT cohort_month,
+       COUNT(*) FILTER (WHERE month_number = 0) AS m0,
+       COUNT(*) FILTER (WHERE month_number = 1) AS m1,
+       COUNT(*) FILTER (WHERE month_number = 2) AS m2,
+       COUNT(*) FILTER (WHERE month_number = 3) AS m3,
+       ROUND(1.0 * COUNT(*) FILTER (WHERE month_number = 3)
+                 / COUNT(*) FILTER (WHERE month_number = 0), 3) AS m3_share
+FROM grid
+WHERE cohort_month >= DATE '2026-01-01' AND cohort_month < DATE '2026-07-01'
+GROUP BY cohort_month
+ORDER BY cohort_month;
+```
+
+| cohort_month | m0 | m1 | m2 | m3 | m3_share |
+|---|---|---|---|---|---|
+| 2026-01-01 | 102 | 40 | 28 | 24 | 0.235 |
+| 2026-02-01 | 72 | 42 | 29 | 24 | 0.333 |
+| 2026-03-01 | 103 | 46 | 27 | 24 | 0.233 |
+| 2026-04-01 | 108 | 44 | 33 | 22 | 0.204 |
+| 2026-05-01 | 106 | 55 | 41 | 38 | 0.358 |
+| 2026-06-01 | 111 | 47 | 36 | 26 | 0.234 |
+
+How it is built:
+
+- **`paid` has one row per customer and month**, thanks to `DISTINCT`. That is why the `JOIN` in `grid` is safe here: it cannot multiply a customer within a month.
+- **`m0` is the cohort size**, and the June row repeats the numbers above: 111 and 47. Divide any cell by `m0` to get its share.
+- **`month_number`** counts whole months between the two month starts. `EXTRACT` returns `numeric`, so the result is cast to `INT`.
+- **Future cells.** For a recent cohort, the later columns are months that have not happened yet, and `COUNT` returns 0 for them, which reads like "everyone left". This table stops at the June cohort, so its `m3` is September, the last month of the data. For later cohorts, show such cells as NULL instead of 0.
+
+In an interview, the long form (`cohort_month`, `month_number`, `customers`) is often enough; the pivot is for reading.
+
+## Practice
+
+<Drill id="s-retention">
+
+The cohort comes from the first payment, a `MIN` per customer over all time, and then a check "was there a payment in the next month". The order of steps is `paid` → `first_paid` → `cohort` → `flagged` → the count. `EXISTS` with a link to the outer customer counts each customer once. It is written once, in `flagged`, as a `retained` flag per customer, and the final query counts that flag for both `retained` and the rate. The share needs `1.0 *` before the division.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+One word in the definition decides the result, so say it with care:
+
+- not "the June cohort is everyone who paid in June" (393 customers),
+- but "everyone whose **first** paid transaction over all time was in June" (111).
+
+Retention needs the same care: "Retained means at least one paid transaction in July. I only need to know that such a row exists, so EXISTS, not a join." When the number comes back, hold it against what you expect: "Monthly plans keep 40 of 50, yearly plans none. That fits, because yearly subscribers don't pay every month."
+
+A request for every cohort at once is the cohort table above. A question about yearly plans is a cue to ask whether retained should mean an active subscription.
+</Aside>
+
+## Further reading
+
+- [EXISTS](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-EXISTS) — a subquery that only answers "is there at least one row".
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — `FILTER (WHERE …)` on an aggregate.
+- [date_trunc](https://www.postgresql.org/docs/current/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC) — the start of the month as the cohort key.
+- [WITH queries](https://www.postgresql.org/docs/current/queries-with.html) — the CTE steps the cohort is built from.
+
+## Related topics
+
+- [Subqueries and CTE](/sql/subqueries-and-cte/) — `EXISTS`, `NOT EXISTS` and step-by-step CTEs.
+- [Filters and dates](/sql/filters-and-dates/) — months as half-open ranges and `date_trunc`.
+- [Row multiplication](/sql-patterns/row-multiplication/) — why the `JOIN` counts payments, not customers.
+- [Conditional aggregation](/sql/conditional-aggregation/) — `COUNT(*) FILTER` and the integer division trap.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — "active at a moment", for retention by subscription.
+- [Conversion and churn](/sql-tasks/funnels-and-churn/) — trial conversion and churn, the other side of retention.

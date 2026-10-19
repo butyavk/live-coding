@@ -1,0 +1,173 @@
+---
+title: Think aloud
+description: Short English phrases for every stage of a live-coding task, from the first questions to the follow-up, so you can explain your work while you code.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+
+In a live-coding interview the interviewer grades what they can see and hear. Silence hides good thinking; a short sentence shows it, and makes a wrong idea easy to correct. This page collects plain phrases for every stage of a task. They are short, with no idioms, so they are easy to say under pressure.
+
+<Aside type="tip" title="TL;DR">
+- Do not learn every phrase. Pick two or three per stage and say them in every practice session until they come without effort.
+- Never stay silent for more than 30 seconds: if you are thinking, say what you are thinking about.
+- Ask one question about the environment and three to five about the task. Write the answers and the rest of your assumptions as comments, so you and the interviewer both see them.
+- Before "done", say that you are checking, and check.
+</Aside>
+
+## The order for any task
+
+A task takes about 20–25 minutes; an interview has one or two, often one SQL and one Python. Each stage has its phrases below.
+
+1. **Repeat**: restate the task in your own words (30 seconds).
+2. **Ask**: three to five questions about the task, each with the answer you would assume: one to two minutes for an easy task, about three for a medium one, up to five for a hard one. Write the answers and your other assumptions as comments in the code.
+3. **Example**: a small input and the output you expect.
+4. **Plan**: two to four steps, out loud, before any code.
+5. **Code**: a simple, correct solution first.
+6. **Test**: run it on the example, then on the edge cases.
+7. **Discuss**: the complexity, what changes for large data, and what you would do in production.
+
+The full protocol with a time budget is on the [interview protocol](/start/interview-protocol/) page.
+
+## Before you start: the environment
+
+One question is enough. Ask it before the task, or right after you hear it:
+
+- "Can I run code here, and can I use the docs?"
+
+If you can run code, find the rest yourself instead of asking: `SELECT version();` shows the database and its version, and `import sys; print(sys.version)` shows the Python version. Who uses the result, refunds and tests are questions about the task, so they come later, with the other task questions.
+
+**If the editor cannot run code.** Some editors are a plain shared document with no data behind them. Then add one question and say how you will check:
+
+- "Which database should I write it for? PostgreSQL?"
+- "Since I can't run it, I'll write a small example with the expected output and walk through the code on it."
+
+## Repeat
+
+The restatement shows that you understood, and gives the interviewer a chance to correct you before you write code.
+
+- "Let me repeat the task in my own words, to make sure I understand it."
+- "So the input is …, and the output is … . Is that right?"
+- "The goal is to find … for each … ."
+
+## Ask: questions for data tasks
+
+Pick three to five questions, the ones that change the result most, and ask them in one batch, each with the answer you would assume. Spend one to two minutes on this for an easy task, about three for a medium one, and up to five for a hard one. Every other point on the list becomes an assumption: write it in the comment block and say it once, so the interviewer can correct it.
+
+- "Who will use this result: finance, support or the product team? For finance I'd subtract refunds."
+- "Which time zone should I use? Is UTC fine?"
+- "Is the end of the period included or excluded?"
+- "Can there be duplicates? Which copy should I keep?"
+- "Can this column be NULL? What does NULL mean here?"
+- "Should I exclude test purchases?"
+- "What about refunds and free trials?"
+- "Do you want rows with zero, or only rows with data?"
+- "How should I order the result? What about ties?"
+- "How big is the data? Thousands of rows or billions?"
+- "Can I assume the input is sorted?"
+- "Do you want me to write tests, or is it enough to check it on examples?"
+- "Let me write down your answers as comments, so we both see them."
+- "For the rest I'll assume: today is 30 September, test purchases are excluded, and ties go by id. Tell me if any of that is wrong."
+
+In the editor, the questions you asked and the points you only assumed sit side by side:
+
+```sql
+-- asked:   refunds subtracted (a finance report); promo stays, with 0 revenue; UTC
+-- assumed: today = 2026-09-30; test purchases excluded; periods are [start, end);
+--          ties broken by id
+```
+
+## Example and plan
+
+A small example catches a misunderstanding before it costs you ten minutes of code.
+
+- "Let me take a small example: two customers, three transactions."
+- "For this input I expect this output: … ."
+- "My plan has three steps. First, … . Second, … . Third, … ."
+- "I will start with a simple version that is correct, and then improve it if we have time."
+- "I see two options. The first is simpler, the second is faster. I will start with the first."
+
+## Code: say what and why
+
+Name the reason for each decision, not only the decision.
+
+- "Here I use a LEFT JOIN, because days without data must still appear."
+- "I filter here, before the join, so the join works on fewer rows."
+- "I use a half-open interval: the start is included, the end is not."
+- "I use a window function, because I need the previous row for the same customer."
+- "I keep money in Decimal, not float, because float cannot store cents exactly."
+- "I use a dictionary here, so each lookup takes constant time."
+- "I will name this CTE `daily_revenue`, so the next step reads clearly."
+
+## Test
+
+Say that you are checking, then check out loud.
+
+- "Let me run it on my small example."
+- "Before I say it's done, let me check the code against the answers I wrote down: test purchases, trials, refunds."
+- "The first row looks right: … ."
+- "Now the edge cases: an empty input, one row, duplicates, a period that ends exactly at midnight."
+- "This number looks too high. Let me check the join: I think it multiplies rows."
+- "I found a bug: I forgot to exclude test purchases. Let me fix it."
+
+## Discuss: complexity and production
+
+This is where experience shows. One or two concrete sentences are enough.
+
+- "The time complexity is O(n log n), because of the sort. The memory is O(n)."
+- "For a large table, I would add an index on (product_id, start_time)."
+- "In production, I would process webhooks idempotently, with a unique constraint on event_id."
+- "I would add a test for this edge case, because it is easy to break later."
+- "If this runs every day, I would add an alert when the numbers do not match."
+- "Another option is … . It is faster, but harder to read. For this task I prefer the simple one."
+
+## If you are stuck
+
+Asking for a direction is normal; staying silent is not.
+
+- "Let me go back to the example and check it again."
+- "I am not sure about the exact syntax. In PostgreSQL I think it is `date_trunc('month', ts)`. May I check the documentation?"
+- "I have the general idea, but I'm not sure about the details yet. Let me write the simple part first."
+- "Could you point me in the right direction?"
+- "I would like to check one assumption with you: … ."
+
+## Time
+
+Keep an eye on the clock and say what you will do with the time left.
+
+- "I have about ten minutes left. I will finish the main case first, then talk about the edge cases."
+- "This part works. Do you want me to optimise it, or move to the next part?"
+- "If I had more time, I would add tests for … ."
+
+## Words to say out loud
+
+These terms come up in almost every data task, and the stress or a sound is easy to get wrong. The stressed syllable is in capitals. Say each one three times.
+
+| Word | Say it like |
+|---|---|
+| cache | KASH, like "cash" |
+| deque | DECK |
+| debt | DET: the b is silent |
+| schema | SKEE-muh |
+| tuple | TOO-pul or TUP-ul |
+| query | KWEER-ee |
+| aggregate (noun) | AG-ri-gut |
+| aggregate (verb) | AG-ri-gate |
+| coalesce | koh-uh-LESS |
+| idempotent | eye-dem-POH-tent |
+| cohort | KOH-hort |
+| reconciliation | rek-un-sil-ee-AY-shun |
+| PostgreSQL | POST-gres-kyoo-el, or just POST-gres |
+
+Practise the phrases too: half-open interval, window function, partition by, deduplicate, churn, test purchase, timestamp.
+
+<Aside type="note" title="In the interview">
+A common verdict after a weak round is "the code was fine, but the thinking was hard to follow". The fix is mechanical: one sentence before each step, one after it. "Now I join products, so each transaction gets its merchant. … Twelve rows, one per merchant, as expected."
+</Aside>
+
+## Related topics
+
+- [Interview protocol](/start/interview-protocol/): the steps these phrases belong to, with a time budget.
+- [Mock interview](/start/mock-interview/): the next page, where you say these phrases against the clock.
+- [Questions to ask](/start/questions-to-ask/): the phrases for the last five minutes of the interview.
+- [Glossary](/reference/glossary/): the words of the domain, in one line each.

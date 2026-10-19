@@ -1,0 +1,226 @@
+---
+title: Итерация и генераторы
+description: "Соседние пары через zip и pairwise, пачки по n, генераторы и yield для входа, который не помещается в память, и почему groupby нужен отсортированный вход."
+sidebar:
+  order: 13
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+Многие задачи — это циклы по событиям по порядку: сравнить каждый платёж с предыдущим, отправить строки пачками, сгруппировать соседей по ключу. Стандартная библиотека превращает каждое из этого в одну строку. Генераторы добавляют ещё одно: цикл продолжает работать, когда вход не помещается в память, — а это обычный вопрос-продолжение.
+
+<Aside type="tip" title="Коротко">
+- Соседи: `zip(xs, xs[1:])` или `itertools.pairwise(xs)`. Номера: `enumerate(xs, 1)`.
+- `zip` молча останавливается на самом коротком входе. `zip(a, b, strict=True)` падает, если длины разные.
+- Пачки по n: `range` с шагом n и срезы или `itertools.batched(xs, n)` в Python 3.12+. `n <= 0` — ошибка, а не бесконечный цикл.
+- Генератор (`yield`) выдаёт по одному элементу, и память не растёт даже на файле в 50 миллионов строк. Прочитать его можно только один раз.
+- `itertools.groupby` группирует только *соседние* одинаковые ключи: сначала отсортируйте по тому же ключу.
+</Aside>
+
+## Пары: zip, enumerate, pairwise
+
+Промежуток между соседними платежами — классика: продления, пришедшие с опозданием, сессии с паузой, события не по порядку. Каждый элемент ставят в пару со следующим:
+
+```python
+from datetime import date
+from itertools import pairwise
+
+renewals = [date(2026, 6, 3), date(2026, 7, 3), date(2026, 8, 3), date(2026, 9, 14)]
+
+print([(b - a).days for a, b in zip(renewals, renewals[1:])])
+print([(b - a).days for a, b in pairwise(renewals)])
+
+for n, (a, b) in enumerate(pairwise(renewals), start=2):
+    if (b - a).days > 35:
+        print(f"payment {n} came {(b - a).days} days after the previous one")
+```
+
+```text
+[30, 31, 42]
+[30, 31, 42]
+payment 4 came 42 days after the previous one
+```
+
+- `zip(xs, xs[1:])` работает везде, но копирует список. `pairwise` (Python 3.10+) работает с любым итерируемым объектом, в том числе с генератором, и ничего не копирует.
+- `enumerate(..., start=2)` нумерует второй элемент каждой пары, поэтому в сообщении стоит номер, который назвал бы человек. Пишите `enumerate`, а не `range(len(xs))`.
+- Обоим вариантам нужен вход, отсортированный по времени. Если условие этого не обещает, сначала отсортируйте.
+
+У `zip` есть тихая ловушка: он останавливается на самом коротком входе.
+
+```python
+products = ["prd_01", "prd_02", "prd_03"]
+revenue = ["114.93", "88.92"]
+print(list(zip(products, revenue)))
+print(list(zip(products, revenue, strict=True)))
+```
+
+```text
+[('prd_01', '114.93'), ('prd_02', '88.92')]
+Traceback (most recent call last):
+  ...
+ValueError: zip() argument 2 is shorter than argument 1
+```
+
+`prd_03` пропал без ошибки. Когда два списка обязаны быть одной длины, передавайте `strict=True` (Python 3.10+).
+
+## Пачки по n
+
+Вставки, вызовы API и сообщения часто идут порциями: 500 строк на `INSERT`, 100 id на запрос. Для списка хватает `range` с шагом n и срезов — это и просит упражнение ниже. Для всего остального есть два инструмента:
+
+```python
+from itertools import batched, islice
+
+ids = ["t1", "t2", "t3", "t4", "t5"]
+print(list(batched(ids, 2)))
+
+
+def chunks(iterable, n):
+    it = iter(iterable)
+    while batch := list(islice(it, n)):
+        yield batch
+
+
+print(list(chunks(ids, 2)))
+print(list(chunks((f"t{i}" for i in range(1, 6)), 2)))
+```
+
+```text
+[('t1', 't2'), ('t3', 't4'), ('t5',)]
+[['t1', 't2'], ['t3', 't4'], ['t5']]
+[['t1', 't2'], ['t3', 't4'], ['t5']]
+```
+
+- `itertools.batched` (Python 3.12+) возвращает кортежи, работает с любым итерируемым объектом и при `n = 0` бросает `ValueError: n must be at least one`. В Python 3.13 появился `strict=True`: ошибка, если последняя пачка неполная.
+- `chunks` делает то же в старых версиях. `islice` каждый раз берёт до n элементов из одного и того же итератора, поэтому работает и с генератором, как показывает третья строка.
+- При `n = 0` `chunks` молча ничего не возвращает. Сначала проверьте `n` и бросьте `ValueError`, как в упражнении.
+
+## Генераторы и yield
+
+Список хранит все элементы сразу. Генератор выдаёт следующий элемент, только когда цикл его попросит:
+
+```python
+import sys
+
+squares_list = [i * i for i in range(1_000_000)]
+squares_gen = (i * i for i in range(1_000_000))
+print(sys.getsizeof(squares_list), sys.getsizeof(squares_gen))
+print(sum(squares_gen), sum(squares_gen))
+```
+
+```text
+8448728 200
+333332833333500000 0
+```
+
+Один только массив списка занимает 8,4 МБ (сами числа — ещё больше). Генератор занимает 200 байт при любой длине. Вторая строка показывает цену: генератор проходится один раз. Второй `sum` ничего не получает и возвращает 0. `len()` к нему тоже не применить.
+
+Функция с `yield` — тоже генератор. Это обычная форма для файла, который не помещается в память: прочитать строку, разобрать, передать дальше, хранить только итоги:
+
+```python
+import io
+from collections import defaultdict
+from decimal import Decimal
+
+f = io.StringIO("cus_01,9.99\ncus_02,4.99\ncus_01,0.01\n\ncus_03,49.99\n")      # вместо open("payments.csv")
+
+
+def read_payments(lines):
+    for line in lines:                  # файл выдаёт по одной строке
+        line = line.strip()
+        if not line:
+            continue
+        customer_id, amount = line.split(",")
+        yield customer_id, Decimal(amount)
+
+
+totals = defaultdict(Decimal)
+for customer_id, amount in read_payments(f):
+    totals[customer_id] += amount
+print(dict(totals))
+```
+
+```text
+{'cus_01': Decimal('10.00'), 'cus_02': Decimal('4.99'), 'cus_03': Decimal('49.99')}
+```
+
+Теперь память зависит от числа покупателей, а не от числа строк. Разбор и суммирование разделены, поэтому каждую часть легко проверить на коротком списке вместо файла. `next(gen)` достаёт один элемент вручную — удобно при отладке.
+
+<Talk q="The input file has 50 million lines and does not fit in memory. What changes in your code?">
+
+"I process it as a stream: iterate over the file line by line or use a generator with yield, and keep only the aggregates — a dict of totals, not the rows. If I need grouping by a key with many values, I push the work to the database or process it in chunks."
+
+Добавьте стоимость: один проход, O(n) по времени, O(k) памяти на k ключей. Если не помещаются даже итоги, данным место в базе (см. [Python и SQL](/python/python-and-sql/)).
+
+</Talk>
+
+## groupby нужен отсортированный вход
+
+`itertools.groupby` начинает новую группу каждый раз, когда ключ меняется. Назад он не смотрит, поэтому одинаковые ключи, которые стоят не рядом, попадают в разные группы:
+
+```python
+from itertools import groupby
+from operator import itemgetter
+
+rows = [("north_market", 8), ("south_market", 9), ("north_market", 3), ("web", 4)]
+
+print([(channel, len(list(g))) for channel, g in groupby(rows, key=itemgetter(0))])
+
+rows.sort(key=itemgetter(0))
+print([(channel, sum(n for _, n in g)) for channel, g in groupby(rows, key=itemgetter(0))])
+```
+
+```text
+[('north_market', 1), ('south_market', 1), ('north_market', 1), ('web', 1)]
+[('north_market', 11), ('south_market', 9), ('web', 4)]
+```
+
+В первом результате `north_market` встречается дважды, и никакая ошибка об этом не предупреждает. Сначала отсортируйте по тому же ключу — это стоит O(n log n). `defaultdict` сортировки не требует и работает за O(n), поэтому обычно выбирают его (см. [dict и Counter](/python/dicts-and-counting/)). `groupby` уместен, когда вход уже отсортирован — например, строки из SQL с `ORDER BY` — и нужно обработать группы по одной, не держа остальные.
+
+## Ещё немного из itertools
+
+```python
+from itertools import accumulate, chain, islice, count
+from decimal import Decimal
+
+daily = [Decimal("10.00"), Decimal("4.99"), Decimal("0.01")]
+print(list(accumulate(daily)))                                   # нарастающий итог
+print(list(chain.from_iterable([["prd_01"], ["prd_02", "prd_03"]])))   # раскрыть один уровень
+print(list(islice(count(1), 3)))                                 # первые 3 из бесконечного итератора
+```
+
+```text
+[Decimal('10.00'), Decimal('14.99'), Decimal('15.00')]
+['prd_01', 'prd_02', 'prd_03']
+[1, 2, 3]
+```
+
+Не уверены, что ещё есть в модуле? `dir(itertools)` перечислит все функции, а в конце его страницы документации есть рецепты (см. [Тесты и сложность](/python/testing-and-complexity/)).
+
+## Практика
+
+<Drill id="y-batches">
+
+`range` с шагом n и срез для каждого начала. Для потока, который не помещается в память, — генератор с `yield` или `itertools.batched` (Python 3.12+). `batched` отдаёт кортежи, а задача просит списки: `[list(b) for b in batched(items, n)]`. `n <= 0` — ошибка, а не бесконечный цикл, поэтому проверьте это первым и бросьте `ValueError`.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+Для каждого цикла по входу говорите, сколько из него остаётся в памяти, а не только сколько он работает: *"This reads one line at a time and keeps a dict of totals, so memory grows with the number of customers, not with the size of the file."* Эта фраза часто отвечает на вопрос про 50 ГБ раньше, чем его зададут.
+
+Если вывод выглядит странно, прочитайте его вслух и назовите причину: *"north_market is here twice, so groupby got unsorted input. I'll sort by channel first, or use a defaultdict."*
+</Aside>
+
+## Что почитать
+
+- [itertools.batched](https://docs.python.org/3/library/itertools.html#itertools.batched), [itertools.pairwise](https://docs.python.org/3/library/itertools.html#itertools.pairwise) и [itertools.groupby](https://docs.python.org/3/library/itertools.html#itertools.groupby) — у каждой есть эквивалент на обычном Python.
+- [itertools recipes](https://docs.python.org/3/library/itertools.html#itertools-recipes) — короткие готовые помощники из функций модуля.
+- [Functional Programming HOWTO: Generators](https://docs.python.org/3/howto/functional.html#generators) — как `yield` приостанавливает и продолжает функцию.
+- [zip()](https://docs.python.org/3/builtins/functions.html#zip) — встроенная функция и её аргумент `strict`.
+
+## Связанные темы
+
+- [dict и Counter](/python/dicts-and-counting/) — группировка без сортировки, обычная альтернатива `groupby`.
+- [Python и SQL](/python/python-and-sql/) — `fetchmany` и `executemany` с пачками с этой страницы.
+- [Интервалы](/python/intervals/) — сортировка по началу и один проход по соседям.
+- [Тесты и сложность](/python/testing-and-complexity/) — как называть стоимость по памяти вместе со временем.

@@ -1,0 +1,202 @@
+---
+title: Interview protocol
+description: A protocol for one live-coding task, from the restatement to the follow-up, with a time budget by difficulty, questions, comments, a plan and a check.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+
+A live-coding task is lost more often in the process than in the code: a requirement forgotten, a filter missed, a "done" said before anyone checked. This page is a fixed protocol for one task: about 25 minutes, the slot a task gets in a round with two tasks. The main idea is simple: **keep the requirements in comments at the top of the editor, not in your head, and check the code against them before you say "done"**.
+
+<Aside type="tip" title="TL;DR">
+- Restate the task in one sentence and say what one row of the result is.
+- Clarify: one question about the environment (once per interview), then three to five about the task, in one batch, each with the answer you would assume. One or two minutes on an easy task, about three on a medium one, up to five on a hard one.
+- Write the answers and your other assumptions as comments at the top of the editor; end with a two- or three-step plan.
+- Code in small steps and run after each one.
+- Before "done": every comment is in the code, the row count is right, one row checks out by hand.
+</Aside>
+
+## Time budget for one task
+
+Every task on this site has a **target time**: the time a prepared candidate needs to write and check the solution once the questions are settled. The task header shows it as "Target time: N min". The restatement, the questions and the plan come before it, and the follow-up comes after it.
+
+The clock for one task is 25 minutes, the slot a task gets in a round with two tasks. A task with a target time over 15 minutes gets its target plus 10 minutes instead: such a task usually comes alone, in a longer slot. The [mock interview](/start/mock-interview/) uses the same clock.
+
+| Step | Easy | Medium | Hard | Sign that it is going well |
+|---|---|---|---|---|
+| Restate the task and one row of the result | 1 min | 1 min | 1–2 min | "So for each merchant I return one row: …" |
+| Clarify: the environment, then three to five questions about the task | 1–2 min | about 3 min | up to 5 min | Answers and assumptions written as comments |
+| Say the plan out loud: two to four steps | 1 min | 1–2 min | 2 min | CTE or function names chosen |
+| Code in small steps, run each one, check before "done" | the target time | the target time | the target time | Every comment line is found in the code |
+| The follow-up: index, complexity, production | the rest | the rest | the rest | One or two sentences each |
+
+So you start to write code at about minute 4 on an easy task, minute 6 on a medium one and minute 9 on a hard one. On this site the target times are 5–15 minutes for easy tasks, 10–20 for medium ones, 15–25 for hard ones and 12–20 for the debug tasks.
+
+If the time for questions is over and you are still asking, stop and start: "Let me start with these assumptions and adjust later."
+
+## 1. Restate the task and the result row
+
+- "Let me repeat the task in my own words."
+- "So the result has one row per …, with the columns … ."
+
+If you cannot say what one row of the result is, you do not understand the task yet. Ask: "Can you show me what one row of the result should look like?"
+
+## 2. Clarify in one batch, with assumptions
+
+Clarify in this order:
+
+1. **The environment, once per interview:** "Can I run code here, and can I use the docs?"
+2. **The task:** three to five questions that change the result, in one batch. Offer the answer that seems reasonable for each one, so the interviewer only has to say yes or correct you.
+3. **Everything else** goes into the comment block as an assumption (step 3). The interviewer reads it and corrects what is wrong.
+
+"A few questions, with what I would assume. Today is 2026-09-30, not now(). Test purchases excluded. Refunds: excluded, or net? Which channels? Ties broken by id. Is that right?"
+
+Do not ask one question at a time, and do not ask everything on the checklist below: pick the questions whose answer changes the numbers.
+
+### Where the questions come from
+
+You see the schema for the first time, and getting to know it is a fair part of the task. The task questions come from two places, in this order.
+
+**First the domain, right after the restatement.** These you can ask without knowing the columns, and the interviewer will name the column for you: "Are there test purchases? Free trials? Refunds? Which sales channels count? What is today?" One question covers most data-quality problems at once: "Anything I should know about data quality: duplicates, test data, missing values?"
+
+**Then the columns.** In this order:
+
+1. "Could you walk me through the tables and how they connect?" In one minute the interviewer tells you more than you would read in five.
+2. `SELECT * FROM <the main table> LIMIT 5`: the columns and a sample row.
+3. Each kind of column is a question:
+   - a flag (`is_test`, `is_trial`): "Include or exclude?"
+   - a category (`channel`, `type`, `entry_type`): run `SELECT channel, COUNT(*) FROM … GROUP BY channel`, then ask "Which of these count?" This is how you find `promo`.
+   - a timestamp that can be NULL (`refunded_at`, `advances_enrolled_at`): "What does NULL mean here?"
+   - two similar amounts (`revenue_usd` and `charged_usd`): "Which amount is the right one?"
+   - several dates: "Which date puts a row into the period?"
+   - an event or payment id (`event_id`, `payout_id`): "Can the same event arrive twice?" Webhooks and payouts are usually delivered at least once, so duplicates are almost certain.
+
+A Python task usually has no schema. Spend the time for questions on a small example of the input and the expected output instead.
+
+### The checklist
+
+Go through it in your head before you write a line of code. Ask about the items that change the result; write the rest down as assumptions:
+
+- **Today.** A fixed date, or `now()`?
+- **Every limiting word** in the task (*enrolled, paid, active, last 30 days, marketplace proceeds*): which column says it? If you do not know, ask or look at the table.
+- **Filters.** Test purchases, trials, promo access, refunds, which channels.
+- **The result row.** One row per what? Do rows with zero and empty groups appear?
+- **Ties and order.** What happens with equal values, and how is the result sorted?
+- **Edge cases.** A negative amount, zero, an empty input, too much: what should happen?
+- **Who uses the result.** Not a separate question, one phrase in the batch, next to refunds: "Is this for finance or for a product dashboard? It decides refunds and rounding." "It doesn't matter" is an answer too; move on.
+
+## 3. Write the answers as comments
+
+This is the most important step of the protocol. Type the answers at the top of the editor as soon as you hear them. For SQL:
+
+```sql
+-- RESULT: one row per enrolled merchant: merchant_id, headroom_usd
+-- today = 2026-09-30; last 30 days = [today - 30 days, today)
+-- filters: no test purchases; north_market + south_market; refunded rows excluded
+-- "enrolled" = merchants.advances_enrolled_at IS NOT NULL
+-- every enrolled merchant, zero if no sales; negative allowed
+-- order: headroom_usd ASC, merchant_id
+-- PLAN: 1) proceeds per merchant  2) debt per merchant  3) merchants LEFT JOIN both
+```
+
+For Python:
+
+```python
+# RETURNS: list of (advance_id, "fee" | "principal", amount) + what is left for the merchant
+# rules: oldest advance first (created_at, then id); fee before principal
+# partial payments allowed; stop when the money runs out
+# negative payout -> ValueError; money is Decimal
+# edge cases: 0 / less than the first fee / exactly a boundary / more than all debt / equal dates
+# PLAN: sort advances; for each part pay min(left, due); stop when left == 0
+```
+
+The first line is the **RESULT** (one row per …, or what the function returns), and the last line is the **PLAN** in two or three steps. This way the restatement and the plan are in the editor too, where you and the interviewer can both see them.
+
+## 4. Plan out loud
+
+Say the plan before you code: "My plan has three steps: first …, then …, then … ." For SQL, seven questions take you from the task text to a plan:
+
+1. **What is one row of the result?** A row of a table: a plain `SELECT … WHERE`. A group (a merchant, a month): `GROUP BY` that group.
+2. **Is everything in one table?** If not, `JOIN` on the key: transaction, then `products`, then `merchants`.
+3. **Do you need every X, even without data?** `FROM x LEFT JOIN …` and `COALESCE(…, 0)`.
+4. **Do you need a CTE, and which one?** A value computed from the rows of a group, then counted one level up ("how many advances are open"): a chain, `GROUP BY` the advance first, then `GROUP BY` the merchant over that CTE. Data from two different tables: reduce each to one row per key, then `JOIN`.
+5. **Do you need a row and something about its group or its neighbour?** A window function. `GROUP BY` collapses rows into one; a window keeps them all and adds a column.
+6. **What does the output look like?** `ORDER BY` with an id to break ties; `ROUND` only at the very end.
+7. **How will you check it?** The row count, one row by hand, every comment found in the code.
+
+Two checks before you write a `JOIN` or a `GROUP BY`:
+
+- **Row multiplication.** Before a `JOIN`, ask yourself: *can both sides have many rows per key?* If yes, aggregate each side to one row per key in a CTE first, then join. Otherwise every sum grows. See [row multiplication](/sql-patterns/row-multiplication/).
+- **The grouping key.** Before a `GROUP BY` or `PARTITION BY`, ask: *within what am I counting or choosing?* If the key is the same as the grouping of the previous step, the step does nothing.
+
+For Python, say the rule in one sentence before the code: "For each part I pay min(what is left, what is due), and I stop when nothing is left."
+
+## 5. Code in small steps
+
+- SQL: after each CTE, run `SELECT * FROM cte LIMIT 5` and look at the rows.
+- Python: run the example from the task with `print` under `if __name__ == "__main__":`.
+- If something breaks, **restate the rule first**, then change the code. Patching code without a rule takes three rounds instead of one.
+
+## 6. Check before "done"
+
+The order is always the same:
+
+1. **Go through the comments** line by line: where is each one in the code? Say it: "Let me check the code against what we agreed."
+2. **The row count.** Is it what you expect? A report "for every merchant" on the practice data must have 12 rows, because `merchants` has 12.
+3. **A known number.** Check one row by hand, with a separate simple query or on paper: "Let me sanity-check one merchant with a separate query."
+4. **The zero row.** If the task says "every X", find an X with no data and make sure it shows 0, not a missing row or NULL.
+5. **Plausibility.** Is the maximum ten times the average? Look at that row. Does `COUNT(*)` differ from `COUNT(DISTINCT id)`? Then there are duplicates. Say it: "The maximum looks too big compared to the average. Let me look at that row."
+6. **Python: the edge cases** from your comment: zero, a partial amount, exactly on a boundary, more than everything, equal values.
+
+On this site, run your own check first and press Check once per task, after it. Check also runs SQL on hidden edge-case data, so a failure after your own check points to a case you did not think of. In the interview there is no Check button; the only check is yours.
+
+If the interviewer asks "Is this what we agreed?", do not answer "yes" at once. Say "Let me re-read what we agreed", and compare.
+
+## 7. The discussion
+
+One or two sentences each, as concrete as you can make them:
+
+- SQL: "For a big table I would add an index on … . I would check it with EXPLAIN ANALYZE."
+- Python: "It's O(n log n) because of the sort, and the memory is O(n)."
+- Production: "In production I would add a unique key, or run it in one transaction, or keep a summary table."
+
+## If AI is allowed
+
+Some companies now allow an AI assistant in the round. Then writing the code is fast, and the grade moves to how you check it. Keep the protocol: steps 1–3 are yours, and the comment block becomes both your prompt and your test list.
+
+- **Read every line it writes** before you run it. If you cannot explain a line, do not keep it.
+- **Run it on a small example** first and look at the rows, not only at "no errors".
+- **Check the edge cases** from step 6 yourself: the zero row, duplicates, ties, NULL, the last day of a month, a refund. AI code often handles the main case and misses these.
+- **Say what you verified**, and what you did not: "I checked the row count, one merchant by hand and the zero row. I haven't checked ties yet."
+
+## If you are stuck
+
+- Silent for more than 30 seconds: say where you are stuck. "I'm not sure how to … . Can I think out loud?"
+- Ask for a direction, not for the answer: "Could you point me in the right direction?"
+- Five minutes before the end: "I'll finish the main case first, then the edge cases."
+
+## The last five minutes
+
+Stop changing the code. Ask your two [questions](/start/questions-to-ask/): one about the interviewer's work, one about what matters to you. Close with: "Thank you for your time. I enjoyed working on this problem with you."
+
+## A sticker for the monitor
+
+Write it on a sticky note and put it where you can see it during practice:
+
+**REPEAT → ASK (batch) → COMMENTS → PLAN → CODE → CHECK vs COMMENTS**
+
+<Aside type="note" title="In the interview">
+Answer the follow-up from your comment block: point at the line the change touches. "We agreed to exclude refunds. If finance needs them, I'd change this one line and keep the rest." A rule that lives in one visible line is easy to change, and the interviewer sees that you planned for it.
+</Aside>
+
+## Further reading
+
+- [PostgreSQL: Using EXPLAIN](https://www.postgresql.org/docs/current/using-explain.html): how to read a plan when the follow-up is about speed.
+- [Python wiki: time complexity](https://wiki.python.org/moin/TimeComplexity): the cost of common operations on list, dict and set.
+
+## Related topics
+
+- [Think aloud](/start/think-aloud/): the English phrases for each step of this protocol.
+- [Questions to ask](/start/questions-to-ask/): what to ask in the last five minutes.
+- [Practice dataset](/start/dataset/): the tables and columns the questions above refer to.
+- [Row multiplication](/sql-patterns/row-multiplication/): the check before every join.

@@ -1,0 +1,322 @@
+---
+title: Понятия баз данных
+description: Вопросы, на которые отвечают вслух, когда запрос готов. Ограничения, транзакции, уровни изоляции, блокировки строк, типы данных, N+1, масштаб и доверие к числу.
+sidebar:
+  order: 9
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+
+Кроме запроса, на многих интервью проверяют «понятия баз данных» (database concepts): почему ограничение, а не проверка в коде, что гарантирует транзакция, что будет, если два воркера работают одновременно, какой индекс обслужит отчёт. На эти вопросы отвечают вслух, в два-три предложения, с примером из только что решённой задачи.
+
+<Aside type="tip" title="Коротко">
+- Идемпотентность держит база: уникальный ключ плюс `INSERT … ON CONFLICT DO NOTHING`.
+- Транзакция — всё или ничего. Внутри неё никогда не вызывают внешний сервис.
+- В PostgreSQL по умолчанию Read Committed: каждый оператор видит свежий снимок. «Проверить, потом записать» для денег требует `SELECT … FOR UPDATE` или Serializable с повторами.
+- Деньги — `NUMERIC`, время — `timestamptz` в UTC, а «день» зависит от часового пояса: спросите, какого.
+- После задачи ждите «а на миллиарде строк?» и «можно ли верить числу за последний месяц?».
+</Aside>
+
+Если времени мало, чаще всего спрашивают эти шесть: какой индекс поможет отчёту, что делать с медленным запросом, как обработать вебхук один раз, что даёт транзакция, можно ли верить последнему месяцу и в каком типе хранить деньги.
+
+## Ограничения и идемпотентность
+
+<Talk q="How do you make sure a webhook is processed only once?">
+
+"A unique constraint on event_id, and `INSERT … ON CONFLICT (event_id) DO NOTHING`. The database guarantees it even with two workers. A check in application code is not enough, because of races. The insert and the processing commit in one transaction, so a crash between them rolls back both."
+
+Два воркера оба спрашивают «а нет ли уже такого события?», оба ничего не находят и оба вставляют. Уникальный ключ пропустит только одну вставку. `RETURNING` сообщает коду, новая ли это строка:
+
+```sql
+CREATE TEMP TABLE processed_events (event_id TEXT PRIMARY KEY);
+INSERT INTO processed_events VALUES ('evt_000834')
+ON CONFLICT (event_id) DO NOTHING
+RETURNING event_id;   -- в первый раз: evt_000834; повтор: 0 строк
+```
+
+Обычный вопрос-продолжение: «а если вы упадёте сразу после вставки?». Если вставка зафиксирована отдельно, а воркер потом упал, повтор найдёт event_id и пропустит событие, которое так и не обработали. Поэтому вставка и записи в базу по этому событию идут в одной транзакции: падение откатывает обе, и повтор начинает заново. Внешний вызов в эту транзакцию не войдёт (см. ниже).
+
+Подробнее — в [дублях и идемпотентности](/sql-patterns/duplicates-and-idempotency/).
+
+</Talk>
+
+<Talk q="Primary key, unique, foreign key, check: what are they for?">
+
+"They keep the data correct even when the code has a bug: no duplicates, no orphans, no negative amounts. For money I prefer to let the database reject bad data."
+
+`PRIMARY KEY` не пускает повтор и NULL, `UNIQUE` — повтор, `REFERENCES` — ссылку на несуществующую строку, `CHECK (amount_usd >= 0)` — строку, где условие ложно. PostgreSQL создаёт индекс для ограничений `PRIMARY KEY`, `UNIQUE` и `EXCLUDE`, но не для колонки внешнего ключа.
+
+</Talk>
+
+## Транзакции
+
+<Talk q="What does a transaction give you?">
+
+"All or nothing: either every change is saved, or none. For example, an advance to a merchant and its ledger entries are written together, so the books never show one without the other. Also, other sessions don't see my changes until I commit, and once COMMIT returns, the changes survive a crash."
+
+</Talk>
+
+<Talk q="What would you never do inside a transaction?">
+
+"Call an external service, like a bank or a payment API. The transaction holds locks and a connection while we wait. If it rolls back after a timeout, the external request may already have been sent, and the two systems no longer agree."
+
+Обычное решение — сначала зафиксировать транзакцию, а сервис вызвать после, с ключом идемпотентности, чтобы повтор после тайм-аута не заплатил дважды.
+
+</Talk>
+
+## Уровни изоляции
+
+<Talk q="Which isolation levels do you know, and when do they matter?">
+
+"The default in PostgreSQL is Read Committed. Every statement sees a snapshot of the data that was committed before that statement started, never uncommitted changes. So two SELECTs in one transaction can return different results if another transaction commits between them.
+
+Repeatable Read takes one snapshot for the whole transaction, so every statement sees the same data. If I try to update a row that another transaction has already changed, PostgreSQL raises an error and I retry the transaction.
+
+Serializable is the strictest: the result is as if the transactions ran one after another. When PostgreSQL cannot guarantee that, one transaction fails with a serialization error, and the application must retry it.
+
+For money, for example checking the debt before a new advance, I lock the merchant's row with `SELECT … FOR UPDATE`, so a second worker waits until the first one commits. Or I use Serializable and retry on errors."
+
+Снимок — фотография зафиксированных (COMMIT) данных в один момент. Шаги ниже это показывают.
+
+</Talk>
+
+### Снимки по шагам
+
+В Read Committed каждый оператор делает новый снимок:
+
+| шаг | транзакция A | транзакция B |
+|---|---|---|
+| 1 | `BEGIN; SELECT balance` → 100 | |
+| 2 | | `BEGIN; UPDATE … SET balance = 50`, ещё без COMMIT |
+| 3 | `SELECT balance` → 100: незафиксированное не видно никогда | |
+| 4 | | `COMMIT` |
+| 5 | `SELECT balance` → **50**: новый оператор — новый снимок | |
+
+В Repeatable Read на шаге 5 снова будет 100: снимок один на всю транзакцию.
+
+### Ради чего спрашивают: гонка на лимите долга
+
+Продавец (merchant) должен 700, лимит долга — 1 000. Два воркера одновременно выдают аванс 250:
+
+| шаг | транзакция A | транзакция B |
+|---|---|---|
+| 1 | `SELECT SUM(amount_usd) …` → 700 | |
+| 2 | | тот же `SELECT` → 700 |
+| 3 | 700 + 250 ≤ 1 000 → `INSERT` аванса, `COMMIT` | |
+| 4 | | 700 + 250 ≤ 1 000 → `INSERT` аванса, `COMMIT` |
+
+Долг теперь 1 200. Лимит пробит, хотя обе проверки были честными. Repeatable Read здесь не спасает: транзакции вставляют разные строки, конфликта записи нет. Спасает блокировка строки. В Read Committed по умолчанию обе транзакции начинают с блокировки строки продавца:
+
+```sql
+BEGIN;
+SELECT id FROM merchants WHERE id = 'mer_11' FOR UPDATE;   -- второй воркер ждёт здесь
+SELECT SUM(amount_usd) AS owed_usd
+FROM ledger_entries
+WHERE merchant_id = 'mer_11';                              -- видит каждый зафиксированный аванс
+-- долг + новый аванс <= лимит? Тогда INSERT записей аванса и комиссии.
+COMMIT;
+```
+
+B ждёт, пока A зафиксируется. Потом её `SUM` делает новый снимок, видит 950 и отказывает. Serializable тоже работает: одна из двух транзакций упадёт с ошибкой сериализации, а её повтор увидит 950.
+
+<Talk q="Two workers take the same job. How do you prevent it?">
+
+"`SELECT … FOR UPDATE SKIP LOCKED` in a job table: each worker locks different rows. Plus a unique key on the business key, so a duplicate fails even if something goes wrong."
+
+Воркер берёт следующую задачу так: `SELECT job_id FROM jobs WHERE status = 'new' ORDER BY job_id LIMIT 1 FOR UPDATE SKIP LOCKED;`. Строки, заблокированные другими воркерами, пропускаются, а не ждутся.
+
+</Talk>
+
+## Типы данных
+
+<Talk q="Which types would you use for money and for time?">
+
+"NUMERIC(12, 2) for money, never float, and Decimal in Python. For time, timestamptz, stored in UTC and converted only for display. For durations, interval, because a month is not 30 days. And I'd ask which time zone defines a day."
+
+В учебных данных колонки — `TIMESTAMP`, в которых лежит UTC, поэтому перевод в два шага: `start_time AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'`. За 15 сентября 21 транзакция по дню UTC и 19 — по дню Нью-Йорка, без тестовых покупок. Почему float теряет центы — на странице [деньги и журнал проводок](/sql-patterns/money-and-ledgers/).
+
+</Talk>
+
+## Приёмы запросов
+
+<Talk q="OFFSET pagination on a big table: is there a problem?">
+
+"OFFSET gets slower with every page, because the database still reads all the skipped rows. Keyset pagination is better: `WHERE (created_at, id) > (:last_created_at, :last_id) ORDER BY created_at, id LIMIT 100`, with an index on (created_at, id)."
+
+Сравнение строк `(a, b) > (x, y)` идёт колонка за колонкой, в том же порядке, что и сортировка, поэтому вторая колонка разбивает равенства.
+
+</Talk>
+
+<Talk q="What is the N+1 problem?">
+
+"One query for a list, then one more query for each item: 100 payouts become 101 queries. The fix is a join, or one query with `WHERE id IN (…)` for all the items."
+
+Часто прячется в цикле, который читает связанный объект через ORM. См. [Python и SQL](/python/python-and-sql/).
+
+</Talk>
+
+<Talk q="COUNT(*) or COUNT(column)?">
+
+"COUNT(*) counts rows; COUNT(column) skips NULLs. After a LEFT JOIN this difference matters: COUNT(*) gives 1 for a row without a match."
+
+См. [LEFT JOIN и нули](/sql/left-join-and-zeros/).
+
+</Talk>
+
+<Talk q="Normalise or denormalise?">
+
+"Normalise by default, so one fact lives in one place. Denormalise for read-heavy reports, for example a daily summary table, and accept that it must be rebuilt or kept in sync."
+
+</Talk>
+
+## После задачи SQL: вопросы-продолжения
+
+Когда запрос готов, интервьюер часто спрашивает «а если данных много?» или «можно ли верить этому числу?». Первые одно-два предложения каждого ответа — обязательный минимум. Остальное — если расспрашивают дальше.
+
+<Talk q="On a table with a billion rows, which index would help this report, and would the database actually use it?">
+
+"I'd add an index on start_time. The filter compares the raw column with a range, so the index can be used; if I wrapped it in EXTRACT, it couldn't. Whether PostgreSQL actually uses it depends on how much of the table the range covers, and on how the rows lie on disk. Transactions are appended in time order, so a date range reads neighbouring pages, and the index stays cheaper for quite a large share. I'd check with EXPLAIN ANALYZE. The other filters aren't selective, so I wouldn't index them, maybe a partial index at most. But for a billion rows I'd rather not scan history every time: I'd keep a monthly summary table per product and only update the current month."
+
+Индекс выгоден, когда запрос читает малую долю страниц таблицы, а не только строк. Какая доля уже слишком велика, зависит от физического порядка строк. В `transactions` строки дописываются по времени: `pg_stats` даёт `start_time` корреляцию (correlation) 0,9994, где 1 — тот же порядок, что на диске. Поэтому строки одного месяца лежат на соседних страницах. С индексом по `start_time` планировщик держится за индекс до 65 % таблицы и переходит на `Seq Scan` примерно с двух третей. Колонка в случайном порядке, например `customer_id` (корреляция 0,0002), стоит чтения страницы почти на каждую строку. Планы — на странице [индексы и EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+### BRIN для таблиц, куда только дописывают
+
+На том же физическом порядке держится индекс BRIN. B-tree хранит запись для каждой строки. Индекс BRIN хранит только минимум и максимум колонки для каждого диапазона блоков таблицы (128 страниц, около 1 МБ). Запрос по диапазону читает эти сводки и идёт только в подходящие части таблицы, а там проверяет каждую строку. На сгенерированной таблице в 1 000 000 строк по порядку времени таблица занимает 43 МБ, B-tree по времени — 21 МБ, BRIN — 24 кБ:
+
+```sql
+CREATE TABLE tx AS
+SELECT g AS id, TIMESTAMP '2025-01-01' + g * INTERVAL '30 seconds' AS start_time
+FROM generate_series(1, 1000000) AS g;
+CREATE INDEX tx_btree ON tx (start_time);
+CREATE INDEX tx_brin ON tx USING brin (start_time);
+```
+
+Подсчёт за одну неделю, с 1 по 8 марта 2025, когда остался только BRIN:
+
+```text
+Bitmap Heap Scan on tx  (actual rows=20160.00 loops=1)
+  Rows Removed by Index Recheck: 27200     -- строки на краях диапазонов: прочитали и выбросили
+  Heap Blocks: lossy=256                   -- индекс знает только «где-то в этих страницах»
+  ->  Bitmap Index Scan on tx_brin  (actual rows=2560.00 loops=1)
+```
+
+- Работает, только если физический порядок строк идёт за датой: таблицы, куда только дописывают, — транзакции, события вебхуков, журнал проводок.
+- Не годится, если старые строки догружают не по порядку, если строки часто обновляют или нужен поиск одного точного значения. Там — B-tree.
+- `CREATE INDEX transactions_start_brin ON transactions USING brin (start_time);`
+- Вслух: «For an append-only table ordered by time, a BRIN index on start_time is tiny and good enough for date ranges. For exact lookups I'd still use a B-tree.»
+
+<Talk q="The query is slow. How do you find out why?">
+
+"I run EXPLAIN ANALYZE and read it from the most expensive node. I look at three things: a Seq Scan on a big table where I expected an index; estimated rows very different from actual rows, which is often stale statistics, so I run ANALYZE, or columns that depend on each other, which CREATE STATISTICS can fix; and a sort or hash that spills to disk. Then I fix the biggest problem first and measure again."
+
+Планировщик выбирает план по оценкам числа строк. Если он ждёт 10 строк, а получает миллион, план построен под неверные числа, и дело не в индексе. Пример зависимых колонок — на странице [индексы и EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+### Сортировки и хеши, которые уходят на диск
+
+Узел `Sort` появляется для `ORDER BY`, `DISTINCT`, оконных функций, части `GROUP BY` и merge join. Узел `Hash` — для hash join и `HashAggregate`. Каждая такая операция получает `work_mem` памяти, по умолчанию 4 МБ. Что не поместилось, пишется во временные файлы и сливается по частям; на настоящем сервере это заметно медленнее. Одна и та же сортировка 8 294 транзакций по `customer_id, start_time`:
+
+```text
+-- work_mem по умолчанию = 4MB
+Sort Method: quicksort  Memory: 1382kB
+-- SET LOCAL work_mem = '64kB'
+Sort Method: external merge  Disk: 1096kB
+Buffers: shared hit=200, temp read=271 written=294
+```
+
+Признаки: у сортировки — `external merge  Disk:`, у hash join — `Batches:` больше 1, у хеш-агрегации — `Disk Usage:`, везде — `temp read/written`. Что делать, по порядку:
+
+1. Подать в операцию меньше строк: фильтровать до соединения и сворачивать каждую сторону в CTE до соединения (та же привычка, что против [размножения строк](/sql-patterns/row-multiplication/)).
+2. Подать более узкие строки: только нужные колонки, а не `SELECT *`. Сортировка одних двух ключевых колонок из примера выше уходит на диск на 296 кБ, а не на 1 096 кБ.
+3. Индекс, который уже отдаёт строки в нужном порядке: тогда узла `Sort` нет вообще. Планировщик выбирает его для небольшого диапазона, для `LIMIT` или для index-only scan. При полном проходе по таблице `Seq Scan` с одной сортировкой часто дешевле (см. вопрос про `ROW_NUMBER` ниже).
+4. Поднять `work_mem` только для этого запроса: `BEGIN; SET LOCAL work_mem = '64MB'; …; COMMIT;`. Простой `SET` действует на всю сессию. Поднимать глобально опасно: память выделяется на каждую операцию, и запрос с тремя сортировками на сотне соединений съест всю RAM сервера.
+
+Вслух: «If I see 'external merge Disk' or more than one hash batch, the operation didn't fit in work_mem. First I'd reduce the rows and columns going into it; raising work_mem for that one query is the last step.»
+
+<Talk q="Do these joins need indexes?">
+
+"Primary keys already have an index, so joining to products.id and merchants.id is fine. But PostgreSQL does not index foreign key columns automatically: transactions.product_id has no index unless I create one. If we filter or join transactions by product, for example in one product's report, I'd add an index on (product_id, start_time)."
+
+Частая ошибка — думать, что внешний ключ даёт индекс. В PostgreSQL индекс создают только ограничения `PRIMARY KEY`, `UNIQUE` и `EXCLUDE`.
+
+</Talk>
+
+<Talk q="You take the latest row per customer with ROW_NUMBER. What about 50 million customers?">
+
+"For the whole table, an index doesn't save the work: every row is read anyway, and a sequential scan with one sort is usually cheaper than reading the table in index order. I'd check it with EXPLAIN. An index on (customer_id, product_id, start_time DESC) helps when I need one customer's latest row, or when it holds every column the query reads, so an index-only scan returns the rows already sorted. But if the service needs the current status all the time, I wouldn't compute it from history: I'd keep a current_subscriptions table with one row per customer, updated from webhooks with INSERT … ON CONFLICT DO UPDATE."
+
+На учебных данных после `CREATE INDEX ON transactions (customer_id, product_id, start_time DESC)` и `ANALYZE` последняя строка каждой пары «клиент — продукт» всё равно считается через `Seq Scan`, `Sort` и `WindowAgg`, общая стоимость 1085. С `SET enable_seqscan = off` план читает индекс и обходится без `Sort`, но стоит 1394: он ходит в таблицу в порядке индекса, по одной строке. Для одного клиента (`WHERE customer_id = 'cus_00042'`) планировщик индекс берёт, и стоимость — 15. Сортировка исчезает и тогда, когда запрос читает только колонки индекса, а по таблице прошёл `VACUUM`: это `Index Only Scan`, 602 против 1068 у чтения с сортировкой.
+
+</Talk>
+
+<Talk q="This report runs every hour on the production database. Any concerns?">
+
+"A heavy report should not compete with live traffic. I'd run it on a read replica, set a statement_timeout, and make it incremental: only the current month changes, the past months can be stored once. If it's a dashboard, a materialized view refreshed on a schedule is a simple first step."
+
+</Talk>
+
+<Talk q="Can we trust the number for the last month?">
+
+"Not fully. Refunds come after the purchase: in our data the median is 11 days and the longest is three weeks. So any month younger than that looks better than it really is, because some of its refunds haven't happened yet. I'd mark those months as incomplete, or compare months by the refund rate within the first 30 days after purchase, counting only purchases that already had 30 days."
+
+Это продуктовое мышление: понимать, когда число ещё не окончательное. То же с конверсией триала: триалы, начатые на прошлой неделе, ещё не успели сконвертироваться.
+
+</Talk>
+
+Сколько месяцев «сырые», зависит от окна созревания: сколько дней после покупки ещё приходят возвраты. Его меряют по данным — максимум или 99-й перцентиль `refunded_at - start_time`. В учебных данных это 21 день (медиана 11, 90-й перцентиль 19). «Сегодня» — 30 сентября, поэтому сентябрь сырой: его покупкам после 9 сентября меньше 21 дня. Август уже готов: 31 августа плюс 21 день — это 21 сентября. При окне в 60 дней сырым был бы и август. Честное сравнение берёт только покупки, которые уже достаточно старые:
+
+```sql
+SELECT CAST(date_trunc('month', start_time) AS DATE) AS month,
+       ROUND(1.0 * COUNT(*) FILTER (WHERE refunded_at < start_time + INTERVAL '30 days')
+                 / COUNT(*), 4) AS refund_rate_30d
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND start_time < TIMESTAMP '2026-09-30' - INTERVAL '30 days'   -- покупки, у которых уже было 30 дней
+GROUP BY 1
+ORDER BY 1;
+```
+
+Триал в этих данных длится 7 дней, поэтому конверсия триалов сырая только за последнюю неделю. Вслух: «I'd check how late refunds arrive in our data and treat every month younger than that as incomplete.»
+
+<Talk q="What is 'a day' in your daily report?">
+
+"It depends on who reads it. I'd keep timestamps in UTC as timestamptz, and group by the business time zone only in the report, for example (start_time AT TIME ZONE 'America/New_York')::date for a timestamptz column. I'd ask which time zone finance uses, because a day in UTC and a day in New York give different numbers."
+
+</Talk>
+
+<Talk q="How would you test this query?">
+
+"First a few sanity checks: the number of rows I expect, one row recalculated by hand, and the total compared with a simpler query without grouping. Then a tiny test dataset with the edge cases: a refund, a trial, a test purchase, a sale exactly at midnight on the first day of the month, and the expected result for each."
+
+Вторую часть на этом сайте делает за вас «Проверить»: он запускает SQL-ответы ещё и на скрытых данных с граничными случаями — день без продаж, равенство, выплата, которую никто не ждал.
+
+</Talk>
+
+<Aside type="note" title="На интервью">
+У хорошего короткого ответа три части: инструмент, причина и связь с задачей на экране. Для вопроса про вебхук:
+
+- **Инструмент:** «A unique key on event_id, with INSERT … ON CONFLICT DO NOTHING.»
+- **Причина:** «A check in code races when two workers get the same event.»
+- **Связь:** «In this report, it would make the duplicate count zero.»
+
+Потом остановитесь и дайте интервьюеру выбрать, куда копать дальше. «It depends» — нормальное начало, если закончить фразу: «It depends on how much of the table the range covers.»
+</Aside>
+
+## Что почитать
+
+- [Transaction isolation](https://www.postgresql.org/docs/current/transaction-iso.html) — четыре уровня, что каждый допускает и какие ошибки сериализации повторять.
+- [Explicit locking](https://www.postgresql.org/docs/current/explicit-locking.html) — блокировки строк, `FOR UPDATE`, ожидания и взаимоблокировки.
+- [Constraints](https://www.postgresql.org/docs/current/ddl-constraints.html) — `CHECK`, `NOT NULL`, `UNIQUE`, первичные и внешние ключи.
+- [INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT) — `DO NOTHING`, `DO UPDATE` и `EXCLUDED`.
+- [BRIN indexes](https://www.postgresql.org/docs/current/brin.html) — сводки по диапазонам блоков и когда они помогают.
+
+## Связанные темы
+
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — ограничения и `ON CONFLICT` в запросах, которые можно запустить.
+- [Индексы и EXPLAIN](/sql-patterns/indexes-and-explain/) — планы за ответами про индексы.
+- [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — `NUMERIC`, округление и журнал, по которому проверяют лимит долга.
+- [Python и SQL](/python/python-and-sql/) — параметры, N+1 и где делать работу, когда Python говорит с базой.
+- [Вопросы интервьюеру](/start/questions-to-ask/) — часовой пояс и другие вопросы, которые стоит решить до запроса.

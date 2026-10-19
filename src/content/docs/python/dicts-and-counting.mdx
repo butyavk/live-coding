@@ -1,0 +1,244 @@
+---
+title: dict, defaultdict and Counter
+description: Group, sum and count in one pass with dict, defaultdict(Decimal) and Counter, break ties on purpose, keep the latest row per key and keep keys with zero.
+sidebar:
+  order: 1
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Most Python live-coding tasks start the same way: a list of rows, and a total, a count or the latest value per key. Revenue per customer, events per subscription, units in stock per item. A dict finds a key in O(1) on average, so one pass over the input is enough. Without it, the code grows a nested loop, loses the keys with zero or picks the wrong row when the input is out of order.
+
+<Aside type="tip" title="TL;DR">
+- Group and sum: `totals = defaultdict(Decimal)`, `totals[key] += amount`, then `return dict(totals)`.
+- Count: `Counter(items)`. For "ties in alphabetical order", sort with `key=lambda kv: (-kv[1], kv[0])`: `most_common` keeps the order of first appearance.
+- Latest per key: keep the best row so far in a dict and compare timestamps, not the arrival order.
+- Every X, even with zero: loop over X, not over the rows, and read with `.get(key, 0)`.
+- Two levels: `defaultdict(lambda: defaultdict(int))`, or one dict with a tuple key.
+</Aside>
+
+## Three ways to read a key
+
+```python
+from decimal import Decimal
+
+prices = {"prd_03.monthly": Decimal("4.99"), "prd_03.annual": Decimal("79.99")}
+
+print(prices["prd_03.monthly"])                   # 4.99
+print(prices.get("prd_03.weekly"))                # None
+print(prices.get("prd_03.weekly", Decimal("0")))  # 0
+print("prd_03.weekly" in prices)                  # False
+print(prices["prd_03.weekly"])                    # KeyError: 'prd_03.weekly'
+```
+
+| Expression | Key exists | Key is missing |
+|---|---|---|
+| `d[k]` | the value | `KeyError` |
+| `d.get(k)` | the value | `None` |
+| `d.get(k, default)` | the value | `default` |
+| `k in d` | `True` | `False` |
+
+Use `d[k]` when a missing key is a bug and the code should fail loudly. Use `.get()` or `in` when a missing key is a normal case. All four are O(1) on average, because a dict is a hash table.
+
+## Group and sum with defaultdict
+
+A plain dict needs a check before every update: `if channel not in totals: totals[channel] = Decimal("0")`. A `defaultdict` does this for you. For a new key it calls its factory: `Decimal()` returns `Decimal('0')`, `int()` returns `0`, `list()` returns `[]`.
+
+```python
+from collections import defaultdict
+from decimal import Decimal
+
+sales = [
+    ("north_market", Decimal("7.99")),
+    ("south_market", Decimal("49.99")),
+    ("north_market", Decimal("7.99")),
+    ("web", Decimal("2.99")),
+]
+
+totals = defaultdict(Decimal)          # a new key starts at Decimal('0')
+for channel, amount in sales:
+    totals[channel] += amount
+
+print(dict(totals))
+# {'north_market': Decimal('15.98'), 'south_market': Decimal('49.99'), 'web': Decimal('2.99')}
+```
+
+Money stays in `Decimal` from the first row to the result. The reasons are on [Money and Decimal](/python/money-and-decimal/).
+
+### Reading a missing key adds it
+
+A `defaultdict` creates the key on every read with `[]`, not only on `+=`:
+
+```python
+totals = defaultdict(Decimal)
+totals["north_market"] += Decimal("7.99")
+
+print(totals["promo"])   # 0 -- reading a missing key...
+print(dict(totals))      # {'north_market': Decimal('7.99'), 'promo': Decimal('0')}
+```
+
+A report that should list one channel now lists two. So return `dict(totals)`: the caller gets a normal dict, and a wrong key gives `KeyError` instead of a silent zero. Inside your own code, check with `k in totals` or `totals.get(k)`: neither of them adds the key.
+
+### A list per key, and the order of keys
+
+`defaultdict(list)` collects the rows of each key:
+
+```python
+by_product = defaultdict(list)
+for product_id, tx_id in [("prd_03", "t1"), ("prd_09", "t2"), ("prd_03", "t3")]:
+    by_product[product_id].append(tx_id)
+print(dict(by_product))   # {'prd_03': ['t1', 't3'], 'prd_09': ['t2']}
+```
+
+A dict keeps its keys in insertion order. When the result must be sorted, sort the items before you build it:
+
+```python
+from datetime import datetime
+
+rows = [(datetime(2026, 9, 2), Decimal("9.99")), (datetime(2026, 8, 31, 23, 59), Decimal("4.99"))]
+
+totals = defaultdict(Decimal)
+for start, amount in rows:
+    totals[start.strftime("%Y-%m")] += amount
+
+print(dict(totals))                  # {'2026-09': Decimal('9.99'), '2026-08': Decimal('4.99')}
+print(dict(sorted(totals.items())))  # {'2026-08': Decimal('4.99'), '2026-09': Decimal('9.99')}
+```
+
+## Two levels of grouping
+
+```python
+events = [("prd_03", "2026-09-01"), ("prd_03", "2026-09-01"), ("prd_09", "2026-09-01"), ("prd_03", "2026-09-02")]
+
+per_day = defaultdict(lambda: defaultdict(int))   # product_id -> day -> count
+for product_id, day in events:
+    per_day[product_id][day] += 1
+print({product_id: dict(days) for product_id, days in per_day.items()})
+# {'prd_03': {'2026-09-01': 2, '2026-09-02': 1}, 'prd_09': {'2026-09-01': 1}}
+
+flat = defaultdict(int)                           # the same with a tuple key
+for product_id, day in events:
+    flat[(product_id, day)] += 1
+print(dict(flat))
+# {('prd_03', '2026-09-01'): 2, ('prd_09', '2026-09-01'): 1, ('prd_03', '2026-09-02'): 1}
+```
+
+The argument of `defaultdict` must be a function that makes the default value. `defaultdict(defaultdict(int))` passes a dict instead and fails with `TypeError: first argument must be callable or None`. `lambda: defaultdict(int)` is a function, so each new product gets its own inner dict.
+
+A tuple key is often simpler: one level, and `sorted(flat.items())` orders the rows by product, then by day.
+
+## Counter and equal counts
+
+```python
+from collections import Counter
+
+c = Counter(["south_market", "web", "north_market", "web", "north_market", "south_market"])
+print(c)                                                      # Counter({'south_market': 2, 'web': 2, 'north_market': 2})
+print(c.most_common(2))                                       # [('south_market', 2), ('web', 2)]
+print(sorted(c.items(), key=lambda kv: (-kv[1], kv[0]))[:2])  # [('north_market', 2), ('south_market', 2)]
+print(c["promo"], "promo" in c)                               # 0 False
+```
+
+`Counter` is a dict that counts. `most_common(k)` sorts by count, and for equal counts it keeps the order in which the keys first appeared. Here `south_market` came first, so `north_market` was dropped. That is not alphabetical, and the input order is rarely part of the task. When the task says how to break ties, sort with a tuple key: minus the count for descending, then the name. Tuple keys are explained on [Sorting and top-k](/python/sorting-and-top-k/).
+
+Unlike a `defaultdict`, a `Counter` returns `0` for a missing key and does not add it.
+
+## Latest per key: compare timestamps
+
+Events often arrive out of order. Then the last row in the list is not the latest event:
+
+```python
+from datetime import datetime as dt
+
+events = [
+    ("s1", dt(2026, 9, 1), "active"),
+    ("s1", dt(2026, 9, 5), "expired"),
+    ("s1", dt(2026, 9, 3), "billing_issue"),   # arrived late
+]
+
+last_arrived = {}
+for sub_id, ts, status in events:
+    last_arrived[sub_id] = status
+print(last_arrived)                                # {'s1': 'billing_issue'}
+
+latest = {}                                        # sub_id -> (ts, status)
+for sub_id, ts, status in events:
+    if sub_id not in latest or ts > latest[sub_id][0]:
+        latest[sub_id] = (ts, status)
+print({k: status for k, (ts, status) in latest.items()})   # {'s1': 'expired'}
+```
+
+The rule is "keep the best so far": a dict from the key to `(timestamp, value)`. Replace the value only when the new timestamp is later. The comparison sign decides ties: with `>` the first of two equal timestamps stays, with `>=` the later one in the list wins. Ask which one the task wants.
+
+This is one pass, O(n). Sorting by time first also works, but costs O(n log n). In SQL the same task is `ROW_NUMBER` or `DISTINCT ON`, see [Top N per group](/sql-patterns/top-n-per-group/).
+
+## Every key, even with zero
+
+A loop over the rows can only produce keys that appear in the rows. When the task says "every product" or "every channel, even without sales", loop over that side instead:
+
+```python
+from collections import Counter
+
+products = ["prd_03", "prd_09", "prd_12"]
+purchases = ["prd_03", "prd_09", "prd_03"]
+
+counts = Counter(purchases)
+print(dict(counts))                               # {'prd_03': 2, 'prd_09': 1} -- prd_12 is missing
+print({p: counts.get(p, 0) for p in products})   # {'prd_03': 2, 'prd_09': 1, 'prd_12': 0}
+```
+
+This is the Python form of `LEFT JOIN` with `COALESCE(…, 0)`, see [LEFT JOIN and zeros](/sql/left-join-and-zeros/). Read with `.get()` in this loop: on a `defaultdict`, `counts[p]` would add an empty entry for every product without data.
+
+## Practice
+
+<Drill id="y-group-sum">
+
+`defaultdict(Decimal)` starts each new customer at `Decimal('0')`, so the loop needs no `if`. Return `dict(totals)`: a caller who reads a missing customer gets `KeyError` or `None` from `.get()`, and the result does not grow. Money is `Decimal`, never `float`.
+
+</Drill>
+
+<Drill id="y-by-month">
+
+The month key is `start.strftime("%Y-%m")`; `(start.year, start.month)` works too when the format is free. A dict keeps insertion order, so sort the items before you build the result. This is `GROUP BY date_trunc('month', …)` written in Python. The row at 23:59 on 31 August belongs to August.
+
+</Drill>
+
+<Drill id="y-counter">
+
+`Counter` counts, and the tuple key `(-count, name)` sets the order: count descending, then channel name ascending. On the first check `most_common(2)` returns `[('south', 2), ('north', 2)]`, because `south` appears first in the input, so it fails. The slice `[:k]` also works when `k` is larger than the number of channels, as in the second check.
+
+</Drill>
+
+<Drill id="y-latest">
+
+One pass with a dict of the best row so far. The events are out of order (for `s1`, the event of 5 September comes before the one of 3 September), so compare timestamps instead of taking the last row. `>=` lets the later of two equal timestamps win, as the task asks: that is the `s2` case.
+
+</Drill>
+
+<Drill id="y-stock-on-hand">
+
+Loop over the items, not over the moves: the stapler has no moves and still needs its row `(4, 'Stapler', 0, Decimal('0.00'))`, the Python form of a `LEFT JOIN`. Key the units by `id`, never by name: two items are called Pen, and grouping by name would give one Pen with 25 units. Check every move against the known ids before the date filter, so a bad move raises `ValueError` whatever its date. The cutoff is excluded (`moved_at < cutoff`): the move of item 3 on 2026-10-01 falls on the cutoff and does not count. ISO dates in one format compare correctly as strings. `unit_cost * 0` is already `Decimal('0.00')`, so the zero rows need no special code.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Two questions settle most of the edge cases on this page, so ask them before the first line: *"How should I order the result, and how do I break ties?"* and *"Should a key with no rows appear with zero?"*
+
+When the code runs, give the cost in one sentence: *"One pass with a defaultdict, so it is O(n) time and O(k) memory for k keys."* If the input stops fitting in memory, the same loop reads a stream, or the database does the grouping: see [Iteration and generators](/python/iteration-and-generators/) and [Python and SQL](/python/python-and-sql/).
+</Aside>
+
+## Further reading
+
+- [collections.defaultdict](https://docs.python.org/3/library/collections.html#collections.defaultdict) — the factory argument, with examples for `list` and `int`.
+- [collections.Counter](https://docs.python.org/3/library/collections.html#collections.Counter) — counting, `most_common` and the order of equal counts.
+- [Mapping types — dict](https://docs.python.org/3/builtins/stdtypes.html#typesmapping) — `get`, `in`, `setdefault` and insertion order.
+- [strftime() and strptime() format codes](https://docs.python.org/3/library/datetime.html#strftime-and-strptime-format-codes) — `%Y-%m` and other keys made from dates.
+
+## Related topics
+
+- [Sets and duplicates](/python/sets-and-duplicates/) — the same hash table, for "have I seen this id?".
+- [Sorting and top-k](/python/sorting-and-top-k/) — tuple keys for ties, and top-k without a full sort.
+- [Money and Decimal](/python/money-and-decimal/) — why the totals are `Decimal`.
+- [Grouping and counting](/sql/grouping-and-counting/) — the same tasks with `GROUP BY`.
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — "every X, even with zero" in SQL.
+- [Iteration and generators](/python/iteration-and-generators/) — when the rows do not fit in memory.

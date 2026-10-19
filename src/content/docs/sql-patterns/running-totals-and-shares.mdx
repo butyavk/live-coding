@@ -1,0 +1,303 @@
+---
+title: Shares and running totals
+description: Wrap the working query and add a window on top — share of the total and of a group, running totals, frames for a moving average, LAG for the change.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Talk from '~/components/practice/Talk.astro';
+
+"Now add each channel's share of the total." "Show a running total by day." "And the change from last month." These follow-ups come after a report already works, usually with a few minutes left. Do not rewrite the query. Wrap it in a CTE and add one window on top: the rows stay, and each row can see its group or its neighbours.
+
+<Aside type="tip" title="TL;DR">
+- The main move: the working query goes into `WITH base AS (…)` unchanged; the window goes into a new `SELECT … FROM base`.
+- Share of the total: `100.0 * x / SUM(x) OVER ()`. Share inside a group: `OVER (PARTITION BY g)`.
+- Running total: `SUM(x) OVER (ORDER BY day)`. Add `PARTITION BY` to restart it for each group.
+- Moving average of 7 rows: `AVG(x) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`. It is a 7-day average only if every day is a row.
+- Previous value: `LAG(x) OVER (ORDER BY month)`; the change is `x - LAG(x) OVER (…)`. The first row gets NULL.
+</Aside>
+
+## The main move: wrap what you have
+
+1. Put the whole working query into `WITH base AS (…)`. Change nothing inside, except that its `ORDER BY` is no longer needed.
+2. On top, write a new `SELECT … FROM base` with the window function.
+3. If you need to filter on the window (`rn = 1`), add one more step: `WHERE` cannot see a window.
+
+Here the base is September net revenue per plan period, and the follow-up asks for the share of each period:
+
+```sql
+WITH by_period AS (
+    SELECT plan_period, COUNT(*) AS transactions, SUM(revenue_usd) AS net_usd
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY plan_period
+)
+SELECT plan_period, transactions, net_usd,
+       SUM(net_usd) OVER () AS total_usd,
+       ROUND(100.0 * net_usd / SUM(net_usd) OVER (), 1) AS share_pct
+FROM by_period
+ORDER BY net_usd DESC, plan_period;
+```
+
+| plan_period | transactions | net_usd | total_usd | share_pct |
+|---|---|---|---|---|
+| P1Y | 79 | 3449.35 | 5961.81 | 57.9 |
+| P1M | 304 | 2282.23 | 5961.81 | 38.3 |
+| P1W | 80 | 230.23 | 5961.81 | 3.9 |
+
+- `SUM(net_usd)` without `OVER` would collapse the result into one row. `OVER ()` means "the sum over all rows, but keep the rows": every row sees the total 5961.81.
+- The rounded shares add up to 100.1, not 100. That is rounding, not a bug; say so when you check.
+- Write `100.0`, not `100`. With integer columns, such as counts, `100 * a / b` is integer division (see [Conditional aggregation](/sql/conditional-aggregation/)).
+
+### What the window sees
+
+A window runs after `WHERE` and before `ORDER BY` and `LIMIT`. So `LIMIT 2` keeps the shares 57.9 and 38.3: they are still shares of the full total. But a filter in the same `SELECT`, such as `WHERE plan_period <> 'P1W'`, removes the row before the window. The total shrinks and the shares become 60.2 and 39.8. Decide which total the task means, and filter in the right step.
+
+Without a window, the total is a scalar subquery: `100.0 * net_usd / (SELECT SUM(net_usd) FROM by_period)`. It is longer, but it gives the same numbers.
+
+## Share inside a group
+
+`PARTITION BY` gives each group its own total. Here is each product's share of its merchant's September revenue:
+
+```sql
+WITH per_product AS (
+    SELECT p.merchant_id, t.product_id, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+    GROUP BY p.merchant_id, t.product_id
+)
+SELECT merchant_id, product_id, net_usd,
+       ROUND(100.0 * net_usd / SUM(net_usd) OVER (PARTITION BY merchant_id), 1) AS share_in_merchant_pct
+FROM per_product
+WHERE merchant_id IN ('mer_02', 'mer_06')
+ORDER BY merchant_id, net_usd DESC;
+```
+
+| merchant_id | product_id | net_usd | share_in_merchant_pct |
+|---|---|---|---|
+| mer_02 | prd_02 | 542.84 | 45.7 |
+| mer_02 | prd_13 | 377.79 | 31.8 |
+| mer_02 | prd_16 | 266.75 | 22.5 |
+| mer_06 | prd_18 | 313.80 | 56.7 |
+| mer_06 | prd_06 | 239.90 | 43.3 |
+
+The `WHERE` here filters by the partition key, so each merchant keeps all its products and the shares still add up to 100 per merchant.
+
+Ask yourself "a share of what?" before you write `PARTITION BY`. If you partition by the same key as the `GROUP BY` before it, each group has one row and every share is 100%. For the report by channel this is worse: `promo` has 0 revenue, so it divides 0 by 0 and the query fails with `division by zero`. If a group total can be 0, divide by `NULLIF(SUM(x) OVER (…), 0)`.
+
+## Running totals
+
+With `ORDER BY` inside `OVER`, `SUM` adds up the rows from the start of the group to the current row. Here are advances per merchant and month, with a running total that restarts for each merchant:
+
+```sql
+WITH monthly AS (
+    SELECT merchant_id, period_month, SUM(amount_usd) AS advanced_usd
+    FROM advances
+    WHERE merchant_id IN ('mer_01', 'mer_03')
+    GROUP BY merchant_id, period_month
+)
+SELECT merchant_id, period_month, advanced_usd,
+       SUM(advanced_usd) OVER (PARTITION BY merchant_id ORDER BY period_month) AS running_usd
+FROM monthly
+ORDER BY merchant_id, period_month;
+```
+
+| merchant_id | period_month | advanced_usd | running_usd |
+|---|---|---|---|
+| mer_01 | 2026-06-01 | 89.18 | 89.18 |
+| mer_01 | 2026-07-01 | 145.09 | 234.27 |
+| mer_01 | 2026-08-01 | 125.45 | 359.72 |
+| mer_03 | 2026-05-01 | 214.13 | 214.13 |
+| mer_03 | 2026-06-01 | 220.06 | 434.19 |
+| mer_03 | 2026-07-01 | 169.50 | 603.69 |
+| mer_03 | 2026-08-01 | 175.44 | 779.13 |
+
+Check: the last running value of each merchant equals its plain `SUM(amount_usd)`, 359.72 and 779.13.
+
+### Frames: what "up to the current row" means
+
+The set of rows a window function sees for each row is its **frame**. With `ORDER BY` and no frame written, PostgreSQL uses `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Rows with an equal `ORDER BY` value are peers, and they enter the frame together. Without the monthly aggregation, mer_01 has two advances in each month:
+
+```sql
+SELECT advance_id, channel, period_month, amount_usd,
+       SUM(amount_usd) OVER (ORDER BY period_month) AS default_frame,
+       SUM(amount_usd) OVER (ORDER BY period_month, advance_id
+                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS rows_frame
+FROM advances
+WHERE merchant_id = 'mer_01'
+ORDER BY period_month, advance_id;
+```
+
+| advance_id | channel | period_month | amount_usd | default_frame | rows_frame |
+|---|---|---|---|---|---|
+| adv_0001 | north_market | 2026-06-01 | 68.38 | 89.18 | 68.38 |
+| adv_0004 | south_market | 2026-06-01 | 20.80 | 89.18 | 89.18 |
+| adv_0002 | north_market | 2026-07-01 | 48.75 | 234.27 | 137.93 |
+| adv_0005 | south_market | 2026-07-01 | 96.34 | 234.27 | 234.27 |
+
+These are the first four of six rows. The default frame gives both June rows 89.18, the total of the whole month. `ROWS` with a unique order counts row by row. Neither is wrong, but you must know which one you get. The simple rule: aggregate to one row per `ORDER BY` value first, as in the monthly query above. Then both frames give the same result.
+
+### Moving average
+
+A frame can also have a start that moves: `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` is the current row and the six before it. Here is daily net revenue of all merchants together, with a 7-day moving average:
+
+```sql
+WITH daily AS (
+    SELECT CAST(start_time AS DATE) AS day, SUM(revenue_usd) AS net_usd
+    FROM transactions
+    WHERE NOT is_test
+      AND start_time >= TIMESTAMP '2026-09-01'
+      AND start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT day, net_usd,
+       COUNT(*) OVER w AS days_in_frame,
+       ROUND(AVG(net_usd) OVER w, 2) AS avg_7d_usd
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+```
+
+| day | net_usd | days_in_frame | avg_7d_usd |
+|---|---|---|---|
+| 2026-09-01 | 201.82 | 1 | 201.82 |
+| 2026-09-02 | 108.93 | 2 | 155.38 |
+| 2026-09-06 | 293.87 | 6 | 226.36 |
+| 2026-09-07 | 105.91 | 7 | 209.15 |
+| 2026-09-08 | 57.89 | 7 | 188.59 |
+
+Five of ten rows are shown. The `WINDOW` clause names a window once, so two functions can share it.
+
+- The first six days average fewer than seven days. Ask whether the task wants that, or NULL until seven days exist (`CASE WHEN COUNT(*) OVER w = 7 THEN … END`).
+- `ROWS` counts rows, not days. If a day has no sales, it has no row, and "6 preceding" reaches eight days back. Here every day has sales. For one merchant it often does not: build a calendar first, see [Calendars and active periods](/sql-patterns/calendars-and-active-periods/).
+
+PostgreSQL can also measure the frame in days: `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` takes the rows whose `day` is at most six days before the current one. It needs exactly one `ORDER BY` column, here `day`. A missing day then cannot stretch the frame. But it does not replace the calendar: `AVG` divides by the rows that exist, not by seven, and a day without sales still has no row of its own. mer_01 has no sales from 5 to 8 September. Its 7-day average on 9 September:
+
+| frame | days with sales only | on a calendar |
+|---|---|---|
+| `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` | 6.99 | 3.99 |
+| `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW` | 9.32 | 3.99 |
+
+Without the calendar, `ROWS` reaches back to 1 September, and `RANGE` averages only the three days with sales: 3, 4 and 9 September. On the calendar both give 3.99, and 8 September gets its own row, with 3.00. So the calendar with `COALESCE(…, 0)` is what puts the zero days into the average. `RANGE` with an interval only makes sure that a gap cannot widen the frame.
+
+## LAG: the previous value and the change
+
+`LAG(x)` returns `x` from the previous row in the window order. `LEAD(x)` returns it from the next row. Here are mer_01's South Market payouts, each with the previous one and the change:
+
+```sql
+SELECT period_month, amount_usd,
+       LAG(amount_usd) OVER (ORDER BY period_month)              AS prev_usd,
+       amount_usd - LAG(amount_usd) OVER (ORDER BY period_month) AS change_usd
+FROM channel_payouts
+WHERE merchant_id = 'mer_01'
+  AND channel = 'south_market'
+ORDER BY period_month;
+```
+
+| period_month | amount_usd | prev_usd | change_usd |
+|---|---|---|---|
+| 2026-01-01 | 29.71 | NULL | NULL |
+| 2026-02-01 | 41.59 | 29.71 | 11.88 |
+| 2026-03-01 | 103.63 | 41.59 | 62.04 |
+| 2026-04-01 | 35.65 | 103.63 | -67.98 |
+
+These are the first four of seven rows. The first month has no previous row, so it gets NULL, and the change is NULL too. `LAG(x, 1, 0)` would put 0 there instead, but then January shows a change of +29.71 that did not happen. Usually NULL is the honest answer. For several channels at once, add `PARTITION BY channel`.
+
+`LAG` takes the previous **row**, not the previous day or month. mer_01 has no sales from 5 to 8 September:
+
+```sql
+WITH daily AS (
+    SELECT CAST(t.start_time AS DATE) AS day, SUM(t.revenue_usd) AS net_usd
+    FROM transactions t
+    JOIN products p ON p.id = t.product_id
+    WHERE p.merchant_id = 'mer_01'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-09-11'
+    GROUP BY 1
+)
+SELECT day, net_usd,
+       LAG(day)     OVER (ORDER BY day) AS prev_day,
+       LAG(net_usd) OVER (ORDER BY day) AS prev_usd
+FROM daily
+ORDER BY day;
+```
+
+| day | net_usd | prev_day | prev_usd |
+|---|---|---|---|
+| 2026-09-01 | 6.99 | NULL | NULL |
+| 2026-09-02 | 0.00 | 2026-09-01 | 6.99 |
+| 2026-09-03 | 13.98 | 2026-09-02 | 0.00 |
+| 2026-09-04 | 6.99 | 2026-09-03 | 13.98 |
+| 2026-09-09 | 6.99 | 2026-09-04 | 6.99 |
+
+For 9 September the "previous day" is 4 September. If the task says "compared with the day before", fill the calendar first. Without a window, a self-join on `cur.month = prev.month + INTERVAL '1 month'` also handles gaps: a missing month simply finds no match.
+
+## How it comes up in the interview
+
+The base task is [Q01, revenue by channel](/sql-tasks/revenue-reports/): transactions, gross and net per channel for September. You ask the usual questions, write it, and check it out loud. Then the interviewer says: "Nice. Finance also wants each channel's share of the total net revenue."
+
+1. **Ask first:** "In percent, rounded to one decimal? And the total is all channels together, including promo?"
+2. **Plan out loud:** "I'll keep my query as a CTE and add one column on top: net divided by the total. The total comes from a window over all rows, so I keep one row per channel."
+3. **Wrap:** the Q01 query becomes the first CTE, and the share is one new column in the outer `SELECT`.
+4. **Check:** "The shares add up to 100: 49.5 plus 38 plus 12.5."
+
+The first drill below is this step.
+
+<Talk q="What if I add LIMIT 2 to the query with the shares?">
+
+"The window is computed before ORDER BY and LIMIT, so the two rows keep their shares of the full total. Only a filter in WHERE of the same SELECT would change the total."
+
+</Talk>
+
+## Practice
+
+<Drill id="s-share">
+
+The share of the total is `SUM(…) OVER ()` over all rows of the result. `PARTITION BY channel` would give every channel 100%, because there is one row per channel, and it would divide `promo` by zero. Without a window, divide by a scalar subquery that sums `net_usd` over the same CTE.
+
+</Drill>
+
+<Drill id="s-running">
+
+A running total is `SUM(…) OVER (ORDER BY day)` on top of the daily totals. The task asks for days with sales only. mer_04 has no sales on 14, 18 and 19 September, so the result has four rows, and the running total jumps from 17 to 20 September. If the task said "every day", you would start from a calendar built with `generate_series`, as in the drill on [calendars](/sql-patterns/calendars-and-active-periods/). The hidden data has a sale late on 20 September, so the range must be half-open.
+
+</Drill>
+
+<Drill id="s-lag">
+
+The previous row is `LAG(x) OVER (ORDER BY month)`. `WHERE` runs before the window, so a filter on 2026 in `WHERE` hides December 2025 from `LAG`, and January gets NULL. Compute the months from December 2025, take `LAG`, and only then keep 2026 in the outer query: January's previous value is December's 4676.54. Without a window, join `monthly` to itself on `m.month = p.month + INTERVAL '1 month'`.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Say one sentence before you type the clause it describes:
+
+- before `PARTITION BY`: "This is the share of all channels, not of each channel."
+- before a moving average: "First one row per day, so that seven rows are seven days."
+- before `LAG`: "LAG takes the previous row, so I check that no month is missing."
+
+If you are asked to do it without a window, the total becomes a scalar subquery, and `LAG` becomes a self-join on the previous month.
+</Aside>
+
+## Further reading
+
+- [Window functions tutorial](https://www.postgresql.org/docs/current/tutorial-window.html) — `SUM() OVER`, partitions and the default frame, with examples.
+- [Window function calls](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — the full frame syntax: `ROWS`, `RANGE`, `GROUPS`, `PRECEDING`.
+- [Window functions](https://www.postgresql.org/docs/current/functions-window.html) — `LAG`, `LEAD`, `FIRST_VALUE` and their arguments.
+- [WINDOW clause](https://www.postgresql.org/docs/current/sql-select.html#SQL-WINDOW) — naming a window once and reusing it.
+
+## Related topics
+
+- [Top N per group](/sql-patterns/top-n-per-group/) — window functions from zero, and filtering on a window in the next step.
+- [Calendars and active periods](/sql-patterns/calendars-and-active-periods/) — one row for every day, so frames and `LAG` count days.
+- [Conditional aggregation](/sql/conditional-aggregation/) — rates and integer division, the other half of a share.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — a running balance is a running total of ledger entries.
+- [Conversion and churn](/sql-tasks/funnels-and-churn/) — Q09, running revenue and a 7-day average per merchant.
+- [Cohorts and retention](/sql-patterns/cohorts-and-retention/) — shares of a cohort, month by month.

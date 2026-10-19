@@ -1,0 +1,202 @@
+---
+title: Conditional aggregation
+description: CASE buckets, COUNT(*) FILTER, several counters in one pass, rates without integer division, the AVG and ELSE 0 trap, and a median with PERCENTILE_CONT.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+import Trap from '~/components/practice/Trap.astro';
+
+Many tasks want several numbers per group: all transactions, trials, refunds and a refund rate. One `GROUP BY` with conditional aggregates computes them in a single pass over the table. The typical bugs are a rate of 0 from integer division and an average pulled down by zeros.
+
+<Aside type="tip" title="TL;DR">
+- Label rows with `CASE WHEN … THEN … ELSE … END`: the first true branch wins.
+- Count a subset with `COUNT(*) FILTER (WHERE …)`. Portable form: `SUM(CASE WHEN … THEN 1 ELSE 0 END)`.
+- A rate is `1.0 * part / NULLIF(whole, 0)`, with `ROUND` at the very end.
+- Average of a subset: `FILTER`, or `CASE` without `ELSE`. `ELSE 0` is only for shares.
+- Median: `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`, cast to `numeric` before `ROUND`.
+</Aside>
+
+## CASE: a label for each row
+
+`CASE` checks its branches from top to bottom and returns the first one that is true. Without `ELSE`, a row that matches nothing gets NULL. Group by the label to count the rows in each bucket:
+
+```sql
+SELECT CASE
+         WHEN is_trial       THEN 'trial'
+         WHEN channel = 'promo' THEN 'promo'
+         ELSE 'paid'
+       END AS kind,
+       COUNT(*) AS transactions
+FROM transactions
+WHERE NOT is_test
+  AND start_time >= TIMESTAMP '2026-07-01'
+  AND start_time <  TIMESTAMP '2026-08-01'
+GROUP BY 1
+ORDER BY 1;
+```
+
+| kind | transactions |
+|---|---|
+| paid | 427 |
+| promo | 8 |
+| trial | 51 |
+
+The order of branches matters when a row can match two of them. A trial granted as promo access would be labelled `trial` here, because that branch comes first. The practice data has no such rows, but say the order out loud anyway.
+
+`GROUP BY 1` groups by the first column of `SELECT`, so the long `CASE` is written only once.
+
+## FILTER: several counters in one pass
+
+`COUNT(*) FILTER (WHERE …)` counts only the rows that pass its condition. Any aggregate accepts a `FILTER`: `SUM(x) FILTER (…)`, `AVG(x) FILTER (…)`. The same counter has two portable forms:
+
+```sql
+SELECT COUNT(*) FILTER (WHERE is_trial)          AS with_filter,
+       SUM(CASE WHEN is_trial THEN 1 ELSE 0 END) AS with_sum_case,
+       COUNT(CASE WHEN is_trial THEN 1 END)      AS with_count_case
+FROM transactions
+WHERE NOT is_test;
+```
+
+| with_filter | with_sum_case | with_count_case |
+|---|---|---|
+| 906 | 906 | 906 |
+
+`FILTER` works in PostgreSQL, SQLite and DuckDB. In MySQL or SQL Server, write `SUM(CASE …)`. `COUNT(CASE WHEN … THEN 1 END)` also works, because `COUNT` skips the NULL that `CASE` returns without `ELSE`.
+
+Several counters in one `SELECT` read the table once. Three separate queries joined together read it three times and add three chances to get a filter wrong.
+
+## Rates without integer division
+
+`COUNT` returns a `bigint`. In PostgreSQL, an integer divided by an integer is an integer, and the fraction is cut off:
+
+```sql
+SELECT 7 / 2            AS int_div,
+       7.0 / 2          AS numeric_div,
+       1.0 * 7 / 2      AS times_one,
+       7 / NULLIF(0, 0) AS by_zero;
+```
+
+| int_div | numeric_div | times_one | by_zero |
+|---|---|---|---|
+| 3 | 3.5000000000000000 | 3.5000000000000000 | NULL |
+
+Make one side `numeric` before you divide: `1.0 * a / b` or `a::numeric / b`. Protect an empty group with `NULLIF(b, 0)`: the rate becomes NULL instead of a `division by zero` error.
+
+<Trap id="int-div" q="The share of trials. What will share_a and pct_b contain?">
+
+`share_a` is 0: `COUNT` is an integer, and an integer divided by an integer drops the fraction. `pct_b` is 11.3, because `100.0` makes the expression `numeric`. Write `1.0 * a / b` or `a::numeric / b`, and add `NULLIF(b, 0)` against division by zero.
+
+</Trap>
+
+Round once, at the end. Ask what the interviewer wants to see: a share (0.035) or a percentage (3.5).
+
+## AVG and the ELSE 0 trap
+
+`AVG` skips NULL. `CASE` without `ELSE` returns NULL for the other rows, so `AVG(CASE WHEN channel = 'web' THEN charged_usd END)` averages the web checkout rows only. `ELSE 0` puts a zero for every other row into the average.
+
+<Trap id="avg-else0" q="The average paid web checkout purchase (trials left out), computed three ways. Which one is wrong?">
+
+`c` is wrong: 1.18 instead of 13.19. With `ELSE 0`, a zero for every row of the other channels goes into the average. Free trials would do the same: each costs 0.00, which is why `WHERE` leaves them out. For `AVG`, use `FILTER` or `CASE` without `ELSE`: NULL does not take part in `AVG`. For a share, `ELSE 0` is exactly what you need: `AVG(CASE WHEN … THEN 1.0 ELSE 0 END)`.
+
+</Trap>
+
+For a share, every row must count: matching rows as 1, the others as 0.
+
+```sql
+SELECT ROUND(AVG(CASE WHEN is_trial THEN 1.0 ELSE 0 END), 3) AS trial_share
+FROM transactions
+WHERE NOT is_test;
+```
+
+| trial_share |
+|---|
+| 0.113 |
+
+This equals the fixed `share_a` in the trap above: trials are 11.3% of the rows without test purchases.
+
+## Median and percentiles
+
+A few expensive purchases pull an average up. A median is the middle value, and rare large values do not move it. PostgreSQL computes it with an ordered-set aggregate:
+
+```sql
+SELECT channel,
+       ROUND(AVG(charged_usd), 2) AS avg_usd,
+       ROUND(CAST(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY charged_usd) AS numeric), 2) AS median_usd
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+GROUP BY channel
+ORDER BY channel;
+```
+
+| channel | avg_usd | median_usd |
+|---|---|---|
+| north_market | 14.91 | 7.99 |
+| south_market | 15.37 | 7.99 |
+| web | 13.19 | 7.99 |
+
+Every channel has a median of 7.99, while the averages are between 13 and 16: a smaller number of annual plans pulls them up.
+
+- The syntax is `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`; the 90th percentile is `0.9`. It works with `GROUP BY` like any other aggregate.
+- `PERCENTILE_CONT` interpolates between neighbours; `PERCENTILE_DISC` returns a value that exists in the data.
+- It returns `double precision`, so `ROUND(…, 2)` without a cast fails with `function round(double precision, integer) does not exist`.
+- It is not a window function. `OVER (PARTITION BY …)` fails with `OVER is not supported for ordered-set aggregate percentile_cont`. Compute it with `GROUP BY`, and join the result back if every row needs it.
+
+```sql
+SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS cont,
+       PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY x) AS disc
+FROM (VALUES (1), (2), (3), (10)) AS v(x);
+```
+
+| cont | disc |
+|---|---|
+| 2.5 | 2 |
+
+## Practice
+
+<Drill id="s-case">
+
+`CASE` checks the branches from top to bottom and takes the first true one. So the second branch is simply `<= 20`: everything under 5 was caught above. The hidden data has sales of exactly 5.00 and 20.00, so `<= 5` in the first branch or `< 20` in the second fails Check. `GROUP BY 1` groups by the first column of `SELECT`. Row order is not checked here.
+
+</Drill>
+
+<Drill id="s-filter-multi">
+
+Several counters in one grouping: `COUNT(*) FILTER (WHERE …)`. The portable form is `SUM(CASE WHEN … THEN 1 ELSE 0 END)`. Three separate queries and a join are not needed.
+
+</Drill>
+
+<Drill id="s-rate">
+
+`COUNT` is an integer, and an integer divided by an integer in PostgreSQL would give 0 here. You need `1.0 *` or `::numeric`. September is left out on purpose: refunds arrive up to three weeks after the purchase, so the last month is not complete yet.
+
+</Drill>
+
+<Drill id="s-median">
+
+Median and percentiles: `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x)`; p90 is `0.9`, p95 is `0.95`. The result is `double precision`, so cast it to `numeric` for `ROUND` with two decimals. Every weekly plan costs 2.99, so both P1W percentiles are equal.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+Before each rate, name its two parts out loud: "The numerator is refunded paid transactions; the denominator is all paid transactions in the same months." It often catches a filter that sits in one part and not in the other.
+
+If you are asked whether the query would run on MySQL, one sentence is enough: "Not as it is. I'd rewrite each FILTER as SUM(CASE WHEN … THEN 1 ELSE 0 END), and the numbers stay the same."
+</Aside>
+
+## Further reading
+
+- [CASE](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-CASE) — searched and simple forms, and what happens without `ELSE`.
+- [Aggregate expressions](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES) — the `FILTER` clause and `WITHIN GROUP`.
+- [Ordered-set aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html#FUNCTIONS-ORDEREDSET-TABLE) — `percentile_cont`, `percentile_disc` and `mode`.
+- [Mathematical operators](https://www.postgresql.org/docs/current/functions-math.html) — integer division truncates; `round` with decimal places takes `numeric`.
+- [NULLIF](https://www.postgresql.org/docs/current/functions-conditional.html#FUNCTIONS-NULLIF) — the guard against division by zero.
+
+## Related topics
+
+- [Grouping and counting](/sql/grouping-and-counting/) — the `GROUP BY` that conditional aggregates live in.
+- [NULL logic](/sql/null-logic/) — why `CASE` without `ELSE` works in `AVG` and why an empty `SUM` is NULL.
+- [Shares and running totals](/sql-patterns/running-totals-and-shares/) — a share of the total with a window function.
+- [Money and ledgers](/sql-patterns/money-and-ledgers/) — signed sums and rounding money.
+- [Funnels and churn](/sql-tasks/funnels-and-churn/) — interview tasks built from several counters and rates.

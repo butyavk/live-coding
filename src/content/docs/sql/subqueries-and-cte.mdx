@@ -1,0 +1,200 @@
+---
+title: Subqueries and CTE
+description: Subqueries, CTEs as named steps, EXISTS for "at least one such row", and NOT EXISTS or LEFT JOIN … IS NULL for "never". Why NOT IN is not safe.
+sidebar:
+  order: 7
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Many tasks take two steps: aggregate first, then filter or count the aggregates. A CTE gives each step a name and lets you run it on its own. `EXISTS` answers "has at least one such row" without multiplying rows, and `NOT EXISTS` answers "never".
+
+<Aside type="tip" title="TL;DR">
+- A CTE is a named step: `WITH per_customer AS (…) SELECT … FROM per_customer`. Name it after what is inside.
+- A filter on an alias, an aggregate of aggregates or a filter on a window function needs a step before it.
+- "Has at least one …": `EXISTS (SELECT 1 FROM … WHERE <link to the outer row>)`.
+- "Never": `NOT EXISTS (…)` or `LEFT JOIN … WHERE right.key IS NULL`. Not `NOT IN`.
+- Run each CTE on its own before you write the next one.
+</Aside>
+
+## Subqueries: a query inside a query
+
+A subquery is a `SELECT` in brackets inside another query. Three places are common:
+
+| Where | Returns | Example |
+|---|---|---|
+| in `WHERE` or `SELECT` | one value | `price > (SELECT AVG(price) FROM …)` |
+| after `IN` or `EXISTS` | rows to test against | `id IN (SELECT merchant_id FROM advances)` |
+| in `FROM` | a table | `FROM (SELECT … GROUP BY …) AS per_product` |
+
+Paid transactions above the average paid price:
+
+```sql
+SELECT COUNT(*) AS above_average
+FROM transactions
+WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  AND charged_usd > (
+      SELECT AVG(charged_usd)
+      FROM transactions
+      WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+  );
+```
+
+| above_average |
+|---|
+| 1185 |
+
+The inner query returns one value, the average of 14.91, and the outer query compares every row with it. A subquery used as a value must return one row. With more rows, the query fails: `more than one row returned by a subquery used as an expression`.
+
+## CTE: named steps
+
+`WITH name AS (…)` defines a step that the next steps read like a table. It does the same job as a subquery in `FROM`, but it reads from top to bottom, and each step has a name.
+
+The typical case is an aggregate of aggregates. "How many customers paid more than once in August?" needs the purchases per customer first, then a count over customers:
+
+```sql
+WITH per_customer AS (
+    SELECT customer_id, COUNT(*) AS purchases
+    FROM transactions
+    WHERE NOT is_trial AND NOT is_test AND channel <> 'promo'
+      AND start_time >= TIMESTAMP '2026-08-01'
+      AND start_time <  TIMESTAMP '2026-09-01'
+    GROUP BY customer_id
+)
+SELECT COUNT(*)                              AS customers,
+       COUNT(*) FILTER (WHERE purchases > 1) AS repeat_customers,
+       ROUND(AVG(purchases), 2)              AS avg_purchases
+FROM per_customer;
+```
+
+| customers | repeat_customers | avg_purchases |
+|---|---|---|
+| 432 | 23 | 1.12 |
+
+`COUNT(*)` in the outer query counts customers, because each row of `per_customer` is one customer. `AVG(purchases)` is an average of counts. Neither is possible in a single `GROUP BY`.
+
+A step is needed for:
+
+- a filter on a `SELECT` alias;
+- an aggregate of an aggregate, as above;
+- a filter on a window function, such as `WHERE rn = 1` (see [Top N per group](/sql-patterns/top-n-per-group/));
+- two "many" tables, each aggregated to one row per key before the join (see [LEFT JOIN and zeros](/sql/left-join-and-zeros/)).
+
+Work in small steps. Write the first CTE, finish the query with `SELECT * FROM per_customer LIMIT 5`, run it and look at the rows. Only then write the next step. A CTE that is used once costs nothing extra: PostgreSQL folds it into the main query.
+
+## EXISTS: at least one such row
+
+Some conditions are about other rows: "customers who also had a refund", "merchants with at least one advance". Words to listen for: *also*, *at least one*, *ever*, *any*. `EXISTS (subquery)` is true when the subquery returns at least one row. What the subquery selects does not matter, so it is written `SELECT 1`.
+
+```sql
+SELECT COUNT(*) AS merchants_with_advance
+FROM merchants m
+WHERE EXISTS (
+    SELECT 1
+    FROM advances v
+    WHERE v.merchant_id = m.id
+);
+```
+
+| merchants_with_advance |
+|---|
+| 6 |
+
+The line `v.merchant_id = m.id` links the subquery to the outer row. The subquery is checked for each merchant, and the answer is true or false, so each merchant counts once. A `JOIN` would return one row per advance: 38 rows for the same six merchants.
+
+Without the link, `EXISTS` is true for every row as soon as the table has any rows: the same query without `WHERE v.merchant_id = m.id` returns 12. A result of 100% is a reason to check the link.
+
+For the positive case, `IN (SELECT …)` gives the same answer: `WHERE m.id IN (SELECT merchant_id FROM advances)` also returns 6. The negative form is where `IN` breaks.
+
+## "Never": NOT EXISTS and LEFT JOIN … IS NULL
+
+An anti-join keeps the rows that have no match. Words to listen for: *never*, *without*, *no …*. Two forms are safe. Products with no web checkout sale in September, test purchases excluded:
+
+```sql
+SELECT p.id AS product_id, p.name
+FROM products p
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM transactions t
+    WHERE t.product_id = p.id
+      AND t.channel = 'web'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+)
+ORDER BY p.id;
+```
+
+| product_id | name |
+|---|---|
+| prd_18 | Product 18 |
+| prd_20 | Product 20 |
+
+The same with `LEFT JOIN`: keep the rows of NULLs, and only them. It returns the same two products.
+
+```sql
+SELECT p.id AS product_id, p.name
+FROM products p
+LEFT JOIN transactions t
+       ON t.product_id = p.id
+      AND t.channel = 'web'
+      AND NOT t.is_test
+      AND t.start_time >= TIMESTAMP '2026-09-01'
+      AND t.start_time <  TIMESTAMP '2026-10-01'
+WHERE t.transaction_id IS NULL
+ORDER BY p.id;
+```
+
+Test `IS NULL` on a column that is never NULL in a real match, such as the key of the right table. All other conditions on the right table stay in `ON`.
+
+### Why not NOT IN
+
+`NOT IN (SELECT …)` looks like the shortest form. But if the subquery returns one NULL, the condition is never true, and the result is empty without an error. [NULL logic](/sql/null-logic/) shows it on the practice data. `NOT EXISTS` checks row by row, and a NULL does not affect it.
+
+| Form | A NULL in the subquery | Reads as |
+|---|---|---|
+| `NOT EXISTS (…)` | safe | "there is no such row" |
+| `LEFT JOIN … WHERE r.key IS NULL` | safe | "the match is missing" |
+| `NOT IN (SELECT …)` | the result is empty | "not in the list" |
+
+## Practice
+
+<Drill id="s-exists">
+
+"Does the customer have at least one row of this kind" is `EXISTS` with a link to the same customer: `r.customer_id = t.customer_id`. A `JOIN` would multiply the rows if a customer had several refunds. The hidden data has such a customer, so Check catches it. `IN (SELECT customer_id …)` also works here.
+
+</Drill>
+
+<Drill id="s-anti">
+
+An anti-join: `NOT EXISTS`, or `LEFT JOIN advances v … WHERE v.advance_id IS NULL`. `NOT IN` is dangerous: one NULL in the subquery, and the result is empty. `advances.merchant_id` has no NULL here, so `NOT IN` returns the right rows and Check cannot catch it. It is still the habit to avoid.
+
+</Drill>
+
+<Aside type="note" title="In the interview">
+For a query in steps, say the plan and type it as comments before any SQL:
+
+```sql
+-- 1. per_customer: paid purchases per customer in August
+-- 2. from per_customer: all customers, and those with more than one purchase
+```
+
+Then fill in one step, run it, and look at the rows before the next one. When you pick `EXISTS`, give the reason in the same sentence: "I only need to know whether such a row exists, so EXISTS. A join would repeat the customer for every refund."
+
+Asked to do an anti-join without a subquery? "I'd LEFT JOIN the advances and keep the rows where advance_id is NULL."
+</Aside>
+
+## Further reading
+
+- [WITH queries (common table expressions)](https://www.postgresql.org/docs/current/queries-with.html) — named steps, and [when a CTE is folded into the main query](https://www.postgresql.org/docs/current/queries-with.html#QUERIES-WITH-CTE-MATERIALIZATION).
+- [Subquery expressions](https://www.postgresql.org/docs/current/functions-subquery.html) — [`EXISTS`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-EXISTS), [`IN`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-IN) and [`NOT IN`](https://www.postgresql.org/docs/current/functions-subquery.html#FUNCTIONS-SUBQUERY-NOTIN).
+- [Scalar subqueries](https://www.postgresql.org/docs/current/sql-expressions.html#SQL-SYNTAX-SCALAR-SUBQUERIES) — a subquery used as one value.
+- [Subqueries in FROM](https://www.postgresql.org/docs/current/queries-table-expressions.html#QUERIES-SUBQUERIES) — a subquery used as a table.
+
+## Related topics
+
+- [Row multiplication](/sql-patterns/row-multiplication/) — why you aggregate in a CTE before a join.
+- [Top N per group](/sql-patterns/top-n-per-group/) — a CTE with `ROW_NUMBER()` and `WHERE rn = 1` outside.
+- [Cohorts and retention](/sql-patterns/cohorts-and-retention/) — `EXISTS` for "paid again in the next month".
+- [NULL logic](/sql/null-logic/) — the `NOT IN` problem in detail.
+- [LEFT JOIN and zeros](/sql/left-join-and-zeros/) — the `LEFT JOIN` side of the anti-join.

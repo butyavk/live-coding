@@ -1,0 +1,178 @@
+---
+title: Множества и дубли
+description: Проверка «уже было?» за O(1) через set, первая доставка каждого id в порядке прихода, первый повтор и сравнение двух наборов по ключам.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Drill from '~/components/practice/Drill.astro';
+
+Вебхуки доставляются «хотя бы один раз» (at least once), поэтому одно и то же событие может прийти дважды. В учебных данных в `webhook_events` лежит 1 285 доставок 1 226 событий. Задачи просят оставить одну копию каждого события, найти первый повтор или сравнить ожидаемое с пришедшим. Множество (set) отвечает на вопрос «это уже было?» за O(1). Список отвечает за O(n), а внутри цикла это превращается в O(n²).
+
+<Aside type="tip" title="Коротко">
+- «Уже было?»: `seen = set()`, затем `if x in seen: continue` и `seen.add(x)`.
+- `x in list` просматривает весь список. Внутри цикла по n элементам это O(n²).
+- `set(items)` теряет порядок. Чтобы оставить первую копию в порядке прихода — один проход циклом или `list(dict.fromkeys(ids))`.
+- Сравнить два словаря по ключам: `a.keys() - b.keys()`, `b.keys() - a.keys()`, `a.keys() & b.keys()`, потом `sorted(…)`.
+- В продакшене уникальность id держит база: ключ `UNIQUE` и `ON CONFLICT DO NOTHING`.
+</Aside>
+
+## `in` у множества и у списка
+
+Две функции ниже дают одинаковый результат. Разница только в том, где они ищут id.
+
+```python
+import time
+
+def dedupe_list(ids):
+    out = []
+    for x in ids:
+        if x not in out:          # просмотр списка: O(n)
+            out.append(x)
+    return out
+
+def dedupe_set(ids):
+    seen, out = set(), []
+    for x in ids:
+        if x not in seen:         # один поиск по хешу: O(1)
+            seen.add(x)
+            out.append(x)
+    return out
+
+for n in (5_000, 10_000, 20_000):
+    ids = [f"evt_{i}" for i in range(n)]
+    for f in (dedupe_list, dedupe_set):
+        t = time.perf_counter()
+        f(ids)
+        print(f"{n:>6} {f.__name__:<11} {time.perf_counter() - t:.3f} s")
+```
+
+Один запуск:
+
+| n | `dedupe_list` | `dedupe_set` |
+|---|---|---|
+| 5 000 | 0.081 s | 0.001 s |
+| 10 000 | 0.386 s | 0.001 s |
+| 20 000 | 1.167 s | 0.003 s |
+
+Время зависит от машины, а форма роста — нет. Когда n удваивается, цикл O(n²) должен работать в четыре раза дольше, а цикл O(n) — в два; колонка списка близка к этому. Версия с множеством остаётся в пределах нескольких миллисекунд. На 100 000 id версия со списком на той же машине работала около минуты.
+
+В множестве могут лежать только хешируемые значения: строки, числа, кортежи, замороженные dataclass. Словарь или список элементом множества быть не может: `seen.add(event)` со словарём падает с `TypeError`, в тексте которого есть `unhashable type: 'dict'`. Кладите в множество id или кортеж полей, из которых состоит ключ, например `(e["product_id"], e["event_id"])`.
+
+## Первая доставка каждого id
+
+Приём — один цикл: если id есть в `seen`, пропустить, иначе добавить его в `seen` и оставить строку. Результат сохраняет порядок прихода, потому что цикл идёт по входу один раз и добавляет строки в том же порядке.
+
+`set(ids)` тоже убирает дубли, но порядок у него такой, на который нельзя полагаться. Для строк он меняется от запуска к запуску:
+
+```python
+ids = ["evt_7", "evt_2", "evt_7", "evt_5", "evt_2"]
+
+print(set(ids))                  # один запуск: {'evt_5', 'evt_7', 'evt_2'}, другой: {'evt_2', 'evt_5', 'evt_7'}
+print(list(dict.fromkeys(ids)))  # ['evt_7', 'evt_2', 'evt_5'] -- порядок первого появления
+```
+
+`dict.fromkeys` работает, потому что словарь хранит ключи в порядке вставки и не добавляет повторный ключ второй раз. Для простых id это удобно. Для строк-словарей понятнее цикл с `seen`.
+
+Если нужна последняя доставка, перезаписывайте значение в словаре. Значением станет последняя копия, а ключ останется на месте первой вставки:
+
+```python
+deliveries = [("evt_7", "10:00"), ("evt_2", "10:01"), ("evt_7", "10:05")]
+
+last = {}
+for event_id, received_at in deliveries:
+    last[event_id] = received_at       # повтор перезаписывает значение...
+print(last)                            # {'evt_7': '10:05', 'evt_2': '10:01'} -- ...а ключ остаётся на месте
+```
+
+Какую копию оставлять — вопрос к интервьюеру: *"Can the same id come twice? Which copy should I keep?"*
+
+## Первый повтор
+
+«Первый id, который встретился второй раз» и «первый id, у которого есть дубль» звучат похоже. Это разные вопросы:
+
+```python
+from collections import Counter
+
+ids = ["a", "b", "c", "b", "a"]
+
+seen = set()
+for x in ids:
+    if x in seen:
+        print("first repeat:", x)          # first repeat: b
+        break
+    seen.add(x)
+
+counts = Counter(ids)
+print("first id with a copy:", next(x for x in ids if counts[x] > 1))   # first id with a copy: a
+```
+
+Первый цикл останавливается на четвёртой позиции, где вернулся `b`. Второму нужен весь список: о втором `a` нельзя узнать раньше конца. Проговорите ответ для примера вслух до кода — тогда интервьюер поправит вас сразу.
+
+## Сравнение двух наборов по ключам
+
+Сверка (reconciliation) сравнивает два источника по ключу: что должны были заплатить и что заплатили. `dict.keys()` сразу поддерживает операции множеств:
+
+```python
+from decimal import Decimal
+
+expected = {"po_1": Decimal("10.00"), "po_2": Decimal("5.00"), "po_3": Decimal("7.50")}
+paid     = {"po_2": Decimal("5.00"), "po_3": Decimal("7.55"), "po_4": Decimal("1.00")}
+
+print(sorted(expected.keys() - paid.keys()))   # ['po_1'] -- ждали, не пришло
+print(sorted(paid.keys() - expected.keys()))   # ['po_4'] -- пришло, не ждали
+print(sorted(expected.keys() & paid.keys()))   # ['po_2', 'po_3'] -- есть в обоих: сравнить суммы
+print(sorted(expected.keys() | paid.keys()))   # ['po_1', 'po_2', 'po_3', 'po_4'] -- все ключи
+print(sorted(expected.keys() ^ paid.keys()))   # ['po_1', 'po_4'] -- только с одной стороны
+```
+
+| Выражение | Значит | В сверке |
+|---|---|---|
+| `a.keys() - b.keys()` | в `a`, нет в `b` | missing: ждали, не пришло |
+| `b.keys() - a.keys()` | в `b`, нет в `a` | unexpected: пришло, не ждали |
+| `a.keys() & b.keys()` | в обоих | сравнить суммы |
+
+Каждый результат — множество, а у множества нет порядка, поэтому оборачивайте его в `sorted()`. Для ключей из обоих источников сравнивайте суммы с допуском в `Decimal`: `abs(a[k] - b[k]) > Decimal("0.01")`. Это `FULL OUTER JOIN` со страницы [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/), написанный на Python.
+
+## Практика
+
+<Drill id="y-dedupe">
+
+«Уже было?» — множество: каждая проверка O(1). `in` по списку результата — O(n), и цикл становится O(n²). Порядок сохраняется, потому что код идёт по входу один раз. В продакшене дубль отсекает уникальный ключ в базе, см. [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/).
+
+</Drill>
+
+<Drill id="y-first-dup">
+
+Один проход с множеством: O(n) по времени и O(n) по памяти. Два вложенных цикла — O(n²). «Первый id, который встретился второй раз» — не то же, что «первый id, у которого есть дубль»: здесь ответ `b`, хотя `a` стоит раньше.
+
+</Drill>
+
+<Drill id="y-reconcile">
+
+Сверка двух источников — три множества ключей: только слева, только справа и в обоих с разницей больше допуска. Это `FULL OUTER JOIN`, написанный на Python. Допуск — `Decimal`, не float. У `mer_01/north/07` разница ровно `0.01`, поэтому это совпадение; у `mer_02/north/07` разница `2.00` — это расхождение.
+
+</Drill>
+
+<Aside type="note" title="На интервью">
+До кода назовите результат для маленького входа, чтобы договориться о порядке: *"For a, b, a, c, b I return a, b, c, in arrival order."* После кода разговор часто идёт так:
+
+- Вы: *"I keep the ids I have seen in a set, so each check is O(1) and the pass is O(n)."*
+- Интервьюер: *"Two workers get the same webhook at the same moment. Does the set help?"*
+- Вы: *"No, the set lives in one process. The database has to refuse the second row: a unique key on event_id and INSERT … ON CONFLICT DO NOTHING."*
+</Aside>
+
+## Что почитать
+
+- [Set types — set, frozenset](https://docs.python.org/3/builtins/stdtypes.html#set-types-set-frozenset) — операции и какие значения могут быть элементами множества.
+- [Dictionary view objects](https://docs.python.org/3/builtins/stdtypes.html#dict-views) — почему `keys()` поддерживает `-`, `&`, `|` и `^`.
+- [dict.fromkeys](https://docs.python.org/3/builtins/stdtypes.html#dict.fromkeys) — словарь из последовательности ключей.
+- [TimeComplexity](https://wiki.python.org/moin/TimeComplexity) — таблица стоимости операций list, dict и set в Python wiki.
+
+## Связанные темы
+
+- [dict, defaultdict и Counter](/python/dicts-and-counting/) — та же хеш-таблица, но со значением на ключ.
+- [Тесты и сложность](/python/testing-and-complexity/) — как назвать сложность и проверить граничные случаи.
+- [Дубли и идемпотентность](/sql-patterns/duplicates-and-idempotency/) — дубли в SQL и уникальный ключ, который их не пускает.
+- [UNION ALL и сверка](/sql-patterns/union-and-reconciliation/) — то же сравнение через `FULL OUTER JOIN`.
+- [События и время](/python-tasks/events-and-time/) — идемпотентный обработчик вебхуков как полная задача.

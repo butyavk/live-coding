@@ -1,0 +1,331 @@
+---
+title: Python and SQL
+description: "Calling the database from Python: placeholders instead of f-strings, filtering in SQL, fetching in batches, transactions from code, and threads and the GIL."
+sidebar:
+  order: 12
+---
+import { Aside } from '@astrojs/starlight/components';
+import Talk from '~/components/practice/Talk.astro';
+import Playground from '~/components/practice/Playground.astro';
+
+Some tasks mix the two languages: SQL fetches the rows, Python does the logic that is awkward in SQL. The interviewer then watches three things. How do you pass a value into the query? Which part of the work runs where? What happens when the result is large? An f-string in a query or a `SELECT *` filtered in a Python loop is noticed at once.
+
+<Aside type="tip" title="TL;DR">
+- Pass values as parameters: `con.execute("… WHERE merchant_id = ?", ["mer_01"])`. Never build SQL with an f-string.
+- Filter, join and aggregate in SQL; fetch a small result. Keep in Python only the logic that is hard to write in SQL.
+- For a large result, iterate the cursor or call `fetchmany(n)` in a loop instead of `fetchall()`.
+- Writes that belong together go in one transaction: commit at the end, roll back on any error.
+- Threads help while the program waits for the network or the database. The GIL makes them useless for CPU-heavy Python: use processes or move the work to SQL.
+</Aside>
+
+## The db module on this site
+
+Python exercises on this site reach the same PostgreSQL as the SQL pages through a small `db` module. Its interface is close to the Python database standard (DB-API) and to DuckDB's client: `connect()`, `execute(sql, parameters)`, `fetchall()`, `fetchone()`, `fetchmany(n)`.
+
+```python
+import db
+
+con = db.connect()
+rows = con.execute(
+    "SELECT channel, period_month, amount_usd FROM advances WHERE merchant_id = ? ORDER BY period_month, channel",
+    ["mer_01"],
+).fetchall()
+print(len(rows))
+print(rows[:2])
+print(sum(amount for _, _, amount in rows))
+```
+
+```text
+6
+[('north_market', datetime.date(2026, 6, 1), Decimal('68.38')), ('south_market', datetime.date(2026, 6, 1), Decimal('20.80'))]
+359.72
+```
+
+- Each row is a tuple. `NUMERIC` arrives as `Decimal`, `DATE` as `date`, `TIMESTAMP` as `datetime`, so money stays exact.
+- `?` marks a parameter. The module sends the values to PostgreSQL separately, as `$1`, `$2`, and never pastes them into the SQL text.
+- Each `execute` runs in its own transaction that is rolled back, so an `INSERT` in an exercise does not change the data for the next run.
+
+## Parameters, never f-strings
+
+An f-string pastes the user's text into the SQL, and the text becomes code. A runnable example on `sqlite3`, which comes with Python:
+
+```python
+import sqlite3
+
+con = sqlite3.connect(":memory:")
+con.execute("CREATE TABLE products (id TEXT, merchant_id TEXT)")
+con.executemany("INSERT INTO products VALUES (?, ?)",
+                [("prd_01", "mer_01"), ("prd_02", "mer_02"), ("prd_03", "mer_02")])
+
+merchant = "mer_01' OR '1'='1"                    # what a user typed
+
+unsafe = f"SELECT id FROM products WHERE merchant_id = '{merchant}'"
+print(con.execute(unsafe).fetchall())             # every merchant's products
+
+safe = "SELECT id FROM products WHERE merchant_id = ?"
+print(con.execute(safe, [merchant]).fetchall())   # the value is data, not SQL
+print(con.execute(safe, ["mer_01"]).fetchall())
+```
+
+```text
+[('prd_01',), ('prd_02',), ('prd_03',)]
+[]
+[('prd_01',)]
+```
+
+The f-string version returned every merchant's products. With a parameter, the whole string is one value, and no merchant has that id. Parameters give three things:
+
+- **No SQL injection.** The value is never read as SQL: the driver sends it apart from the query or quotes it safely.
+- **Types and quoting.** The driver handles `Decimal`, `date`, `None` and a name like `O'Brien`.
+- **Plan reuse, with some drivers.** The query text stays the same for every value, so a driver can prepare it once: asyncpg does, psycopg 3 only after the same query has run a few times (`prepare_threshold`, 5 by default), and psycopg2 puts the values into the text on the client and prepares nothing.
+
+The placeholder depends on the library. PEP 249 calls this the `paramstyle`:
+
+| Library | Placeholder | Call |
+|---|---|---|
+| this site's `db`, DuckDB, sqlite3 | `?` | `con.execute(sql, [a, b])` |
+| psycopg (PostgreSQL) | `%s` or `%(name)s` | `cur.execute(sql, (a, b))` |
+| SQLAlchemy `text()` | `:name` | `conn.execute(sa.text(sql), {"name": a})` |
+| asyncpg | `$1`, `$2` | `await con.fetch(sql, a, b)` |
+
+Some interview editors connect Python to a PostgreSQL database through SQLAlchemy. The same query there (run here on SQLite with two products):
+
+```python
+with engine.connect() as conn:
+    rows = conn.execute(
+        sa.text("SELECT id, name FROM products WHERE merchant_id = :merchant_id"),
+        {"merchant_id": "mer_01"},
+    ).mappings().all()          # a list of dict-like rows
+print(rows)
+print(rows[0]["name"])
+```
+
+```text
+[{'id': 'prd_01', 'name': 'Product 01'}]
+Product 01
+```
+
+Two cases need care:
+
+- **A list of values for `IN`.** Generate one placeholder per value. The values still go as parameters:
+
+  ```python
+  merchants = ["mer_01", "mer_02"]
+  marks = ", ".join("?" * len(merchants))        # "?, ?"
+  sql = f"SELECT id FROM products WHERE merchant_id IN ({marks}) ORDER BY id"
+  print(sql)
+  print(con.execute(sql, merchants).fetchall())
+  ```
+
+  ```text
+  SELECT id FROM products WHERE merchant_id IN (?, ?) ORDER BY id
+  [('prd_01',), ('prd_02',), ('prd_03',)]
+  ```
+
+- **Names of tables and columns cannot be parameters.** `ORDER BY ? DESC` with `["id"]` sorts by the constant string `'id'`, not by the column: it returns `prd_01, prd_02, prd_03` in insertion order instead of starting with `prd_03`. Check the name against a fixed set (`if column not in {"id", "merchant_id"}: raise ValueError(...)`) and only then put it into the text.
+
+<Talk q="How do you pass a user value into SQL from Python?">
+
+"Only as a parameter: `cur.execute('… WHERE product_id = %s', (product_id,))` or `:product_id` with SQLAlchemy. Never an f-string — that is SQL injection, and parameters also handle types and quoting."
+
+If asked about column names, add: identifiers cannot be parameters, so check them against a list of allowed names.
+
+</Talk>
+
+## Where the work belongs
+
+The database filters, joins and aggregates next to the data, with indexes. Python should receive a small result. September net revenue by channel for one merchant:
+
+```python
+from datetime import datetime
+
+SQL = """
+SELECT t.channel, COUNT(*) AS n, SUM(t.revenue_usd) AS net_usd
+FROM transactions t
+JOIN products p ON p.id = t.product_id
+WHERE p.merchant_id = ?
+  AND NOT t.is_test
+  AND t.start_time >= ? AND t.start_time < ?
+GROUP BY t.channel
+ORDER BY t.channel
+"""
+rows = con.execute(SQL, ["mer_01", datetime(2026, 9, 1), datetime(2026, 10, 1)]).fetchall()
+for channel, n, net in rows:
+    print(channel, n, net)
+```
+
+```text
+north_market 8 114.93
+south_market 9 88.92
+web 4 60.96
+```
+
+Three rows travel to Python. The alternative, `SELECT * FROM transactions` and a loop with `if`, moves all 8,294 rows over the network and builds 8,294 tuples in memory to keep 21 of them. On a table with millions of rows, the cost grows with every row.
+
+What stays in Python: logic that is awkward in SQL, like a loop that allocates a payment over debts or finds the longest streak of days, and anything that calls another service per row. Even then, let SQL do the filtering first. The [SQL + Python tasks](/python-tasks/sql-and-python/) practise exactly this split.
+
+<Talk q="Should you filter and group in Python or in SQL?">
+
+"In SQL: the database filters and aggregates close to the data and uses indexes, and I fetch a small result. In Python I keep the logic that is hard to express in SQL, like an allocation loop. Fetching all rows and filtering in Python is slow and wastes memory."
+
+A good addition: *"For a big table I'd check that an index serves the filter, with EXPLAIN."* See [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/).
+
+</Talk>
+
+## Fetching in batches
+
+`fetchall()` builds the whole result as a list. When Python needs every row (for example, to send each one to another service), read in batches:
+
+```python
+from decimal import Decimal
+
+cur = con.execute("SELECT revenue_usd FROM transactions WHERE channel = ? AND NOT is_test", ["north_market"])
+total, batches = Decimal("0"), 0
+while rows := cur.fetchmany(500):
+    batches += 1
+    for (price,) in rows:
+        total += price
+print(batches, total)
+```
+
+```text
+9 56826.77
+```
+
+That is 4,442 rows in 9 batches, and the total matches `SUM(revenue_usd)` in SQL. A real sum belongs in SQL, of course. The loop only shows the pattern.
+
+Whether `fetchmany` saves memory depends on the driver. `sqlite3` reads rows as you fetch them. psycopg's default cursor receives the whole result during `execute`, so you need a named (server-side) cursor to stream. The module on this site also holds the result in memory. The same idea works for writing: insert in batches of a few hundred rows with `executemany` (see [Iteration and generators](/python/iteration-and-generators/)).
+
+## Transactions from code
+
+Writes that must succeed or fail together go into one transaction. An advance and its ledger entry are the usual example:
+
+```python
+import sqlite3
+
+con = sqlite3.connect(":memory:")
+con.execute("CREATE TABLE advances (advance_id TEXT PRIMARY KEY, amount_usd TEXT)")
+con.execute("CREATE TABLE ledger_entries (entry_id TEXT PRIMARY KEY, advance_id TEXT, amount_usd TEXT)")
+
+
+def record_advance(con, advance_id, amount, entry_id):
+    with con:                                   # commit at the end, rollback on an exception
+        con.execute("INSERT INTO advances VALUES (?, ?)", [advance_id, amount])
+        con.execute("INSERT INTO ledger_entries VALUES (?, ?, ?)", [entry_id, advance_id, amount])
+
+
+record_advance(con, "adv_1", "100.00", "le_1")
+try:
+    record_advance(con, "adv_2", "50.00", "le_1")      # le_1 already exists
+except sqlite3.IntegrityError as e:
+    print("rolled back:", e)
+
+print(con.execute("SELECT advance_id FROM advances").fetchall())
+print(con.execute("SELECT entry_id, advance_id FROM ledger_entries").fetchall())
+```
+
+```text
+rolled back: UNIQUE constraint failed: ledger_entries.entry_id
+[('adv_1',)]
+[('le_1', 'adv_1')]
+```
+
+The second ledger entry failed, so the second advance was rolled back too. There is no advance without its entry. The same pattern in other libraries: `with conn.transaction():` in psycopg 3, `with engine.begin() as conn:` in SQLAlchemy.
+
+Two rules:
+
+- **No calls to other services inside a transaction.** The transaction holds locks and a connection while it waits for the bank. If it rolls back after a timeout, the payment may already be sent.
+- **The database guards uniqueness.** A check in Python ("is there a payout with this key?") races with a second worker. A unique key does not. See [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/).
+
+## Threads, processes and the GIL
+
+A thread is useful while the program waits. During a network call or a database query, the thread releases the GIL (global interpreter lock), and other threads run:
+
+```python
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+
+def fetch_product_report(product_id):
+    time.sleep(0.2)                    # stands for a network call: the thread waits
+    return product_id, "ok"
+
+
+products = ["prd_01", "prd_02", "prd_03", "prd_04", "prd_05"]
+
+t0 = time.perf_counter()
+results = [fetch_product_report(p) for p in products]
+print(f"one by one: {time.perf_counter() - t0:.1f} s")
+
+t0 = time.perf_counter()
+with ThreadPoolExecutor(max_workers=5) as pool:
+    results = list(pool.map(fetch_product_report, products))
+print(f"5 threads:  {time.perf_counter() - t0:.1f} s")
+print(results[:2])
+```
+
+```text
+one by one: 1.0 s
+5 threads:  0.2 s
+[('prd_01', 'ok'), ('prd_02', 'ok')]
+```
+
+For CPU-heavy Python code, threads do not help: in the standard CPython build, only one thread runs Python code at a time. In one run, four calls that each sum 3 million squares took 0.6 s one by one and 0.6 s in four threads. For that kind of work use processes (`ProcessPoolExecutor`), or move the work to SQL. Python 3.13 added an optional free-threaded build without the GIL, but the usual build still has it.
+
+Threads bring a second problem: shared state. `count += 1` or "check the deque, then append" are several steps, and two threads can interleave between them. Protect such code with a lock:
+
+```python
+import threading
+
+lock = threading.Lock()
+
+with lock:                 # only one thread at a time inside this block
+    ...                    # read, change, write
+```
+
+Also, give each thread its own connection or take one from a pool. A `sqlite3` connection refuses use from another thread by default. With psycopg, use a connection pool, so threads do not queue on one connection.
+
+<Talk q="Your cache (or rate limiter) is called from many threads. Is it safe?">
+
+"Not as written: read, change and write are separate steps, so two threads can interleave. I would protect them with a threading.Lock. If there are several processes or servers, the state has to live outside — Redis with an atomic operation, or a unique constraint in the database."
+
+The lock goes around the whole read-change-write, not around each line. See [Time windows](/python/time-windows/) for the limiter it usually refers to.
+
+</Talk>
+
+## Practice
+
+This page has no drills. Run the query below, then change it: count the advances per channel instead of listing them, pass the month as a second parameter, and try to break it with an f-string to see the difference. The full tasks are on [SQL + Python](/python-tasks/sql-and-python/).
+
+<Playground lang="python" code={`import db
+
+con = db.connect()
+rows = con.execute(
+    "SELECT channel, period_month, amount_usd FROM advances WHERE merchant_id = ? ORDER BY period_month, channel",
+    ["mer_01"],
+).fetchall()
+for channel, month, amount in rows:
+    print(channel, month, amount)
+`} />
+
+<Aside type="note" title="In the interview">
+Before you write the query, say where each part of the work will run: *"SQL filters the merchant and the month and sums by channel, so Python gets three rows. Only the logic that is hard in SQL stays in Python."* It shows that the split is a choice, not an accident.
+
+If the table grows to a hundred million rows, the split stays the same; add the index: *"I'd check with EXPLAIN that an index on the product and the start time serves this filter."* If a second worker appears, answer with the database: *"One transaction per unit of work, and a unique key stops the duplicate. A check in Python would race."*
+</Aside>
+
+## Further reading
+
+- [PEP 249: paramstyle](https://peps.python.org/pep-0249/#paramstyle) — the five placeholder styles of the Python database standard.
+- [sqlite3: How to use placeholders](https://docs.python.org/3/library/sqlite3.html#sqlite3-placeholders) — `?` and named parameters, and why not string formatting.
+- [sqlite3: Transaction control](https://docs.python.org/3/library/sqlite3.html#sqlite3-controlling-transactions) — commit, rollback and `with con:`.
+- [ThreadPoolExecutor](https://docs.python.org/3/library/concurrent.futures.html#threadpoolexecutor) — running I/O-bound calls in threads.
+- [Global interpreter lock](https://docs.python.org/3/glossary.html#term-global-interpreter-lock) — the glossary entry: what the GIL is and when it is released.
+
+## Related topics
+
+- [Filters and dates](/sql/filters-and-dates/) — the half-open date range that the parameters fill.
+- [SQL + Python](/python-tasks/sql-and-python/) — full tasks where SQL returns days and Python finds the streak.
+- [Database concepts](/sql-patterns/database-concepts/) — transactions, isolation levels and row locks in more depth.
+- [Indexes and EXPLAIN](/sql-patterns/indexes-and-explain/) — making the filter that stays in SQL fast.
+- [Iteration and generators](/python/iteration-and-generators/) — batches and streams on the Python side.

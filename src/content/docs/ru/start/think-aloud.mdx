@@ -1,0 +1,173 @@
+---
+title: Думать вслух
+description: Короткие английские фразы для каждого этапа лайвкодинг-задачи — от первых вопросов до вопроса-продолжения, — чтобы объяснять работу прямо во время кода.
+sidebar:
+  order: 5
+---
+import { Aside } from '@astrojs/starlight/components';
+
+На лайвкодинг-интервью оценивают то, что интервьюер видит и слышит. Тишина прячет хорошие мысли; короткая фраза их показывает, а неверную идею с ней легко поправить. На этой странице собраны простые фразы для каждого этапа задачи. Они короткие и без идиом, поэтому их легко произнести под давлением. Фразы оставлены по-английски: именно их вы будете говорить на интервью.
+
+<Aside type="tip" title="Коротко">
+- Не учите все фразы. Выберите по две-три на этап и произносите их на каждой тренировке, пока они не пойдут сами.
+- Не молчите дольше 30 секунд: если думаете — скажите, о чём.
+- Задайте один вопрос о среде и три-пять — о задаче. Ответы и остальные допущения записывайте комментариями, чтобы их видели и вы, и интервьюер.
+- Перед «готово» скажите, что проверяете, — и проверьте.
+</Aside>
+
+## Порядок для любой задачи
+
+Задача занимает примерно 20–25 минут; на интервью их одна или две, часто одна на SQL и одна на Python. Фразы для каждого этапа — ниже.
+
+1. **Repeat** — перескажите задачу своими словами (30 секунд).
+2. **Ask** — три-пять вопросов о задаче, к каждому — ответ, который вы бы предположили: одна-две минуты на лёгкую задачу, около трёх на среднюю, до пяти на трудную. Ответы и остальные допущения запишите комментариями в коде.
+3. **Example** — маленький вход и ожидаемый выход.
+4. **Plan** — два-четыре шага вслух, до кода.
+5. **Code** — сначала простое правильное решение.
+6. **Test** — прогон на примере, затем граничные случаи.
+7. **Discuss** — сложность, что изменится на больших данных и что вы сделали бы в продакшене.
+
+Полный протокол с бюджетом времени — на странице [«Протокол интервью»](/start/interview-protocol/).
+
+## До начала: среда
+
+Хватит одного вопроса. Задайте его до задачи или сразу после того, как её услышали:
+
+- "Can I run code here, and can I use the docs?"
+
+Если код запускать можно, остальное узнайте сами, а не спрашивайте: `SELECT version();` покажет базу и её версию, а `import sys; print(sys.version)` — версию Python. Кто пользуется результатом, возвраты и тесты — это вопросы о задаче: они идут позже, вместе с другими вопросами о задаче.
+
+**Если в редакторе нельзя запускать код.** Иногда редактор — просто общий документ без данных. Тогда добавьте один вопрос и скажите, как будете проверять:
+
+- "Which database should I write it for? PostgreSQL?"
+- "Since I can't run it, I'll write a small example with the expected output and walk through the code on it."
+
+## Repeat: пересказ
+
+Пересказ показывает, что вы поняли задачу, и даёт интервьюеру шанс поправить вас до того, как вы начнёте писать код.
+
+- "Let me repeat the task in my own words, to make sure I understand it."
+- "So the input is …, and the output is … . Is that right?"
+- "The goal is to find … for each … ."
+
+## Ask: вопросы для задач с данными
+
+Выберите три-пять вопросов — те, что сильнее всего меняют результат, — и задайте их одной пачкой, к каждому — ответ, который вы бы предположили. На лёгкую задачу уходит одна-две минуты, на среднюю — около трёх, на трудную — до пяти. Всё остальное из списка становится допущением: запишите его в блок комментариев и проговорите один раз, чтобы интервьюер мог поправить.
+
+- "Who will use this result: finance, support or the product team? For finance I'd subtract refunds."
+- "Which time zone should I use? Is UTC fine?"
+- "Is the end of the period included or excluded?"
+- "Can there be duplicates? Which copy should I keep?"
+- "Can this column be NULL? What does NULL mean here?"
+- "Should I exclude test purchases?"
+- "What about refunds and free trials?"
+- "Do you want rows with zero, or only rows with data?"
+- "How should I order the result? What about ties?"
+- "How big is the data? Thousands of rows or billions?"
+- "Can I assume the input is sorted?"
+- "Do you want me to write tests, or is it enough to check it on examples?"
+- "Let me write down your answers as comments, so we both see them."
+- "For the rest I'll assume: today is 30 September, test purchases are excluded, and ties go by id. Tell me if any of that is wrong."
+
+В редакторе ответы на заданные вопросы и то, что вы только предположили, стоят рядом:
+
+```sql
+-- ответы:     возвраты вычитаем (отчёт для финансов); promo остаётся, с выручкой 0; UTC
+-- допущения:  сегодня = 2026-09-30; без тестовых покупок; периоды [start, end);
+--             ничьи — по id
+```
+
+## Example и Plan: пример и план
+
+Маленький пример ловит непонимание раньше, чем оно обойдётся в десять минут кода.
+
+- "Let me take a small example: two customers, three transactions."
+- "For this input I expect this output: … ."
+- "My plan has three steps. First, … . Second, … . Third, … ."
+- "I will start with a simple version that is correct, and then improve it if we have time."
+- "I see two options. The first is simpler, the second is faster. I will start with the first."
+
+## Code: что и почему
+
+Называйте причину каждого решения, а не только само решение.
+
+- "Here I use a LEFT JOIN, because days without data must still appear."
+- "I filter here, before the join, so the join works on fewer rows."
+- "I use a half-open interval: the start is included, the end is not."
+- "I use a window function, because I need the previous row for the same customer."
+- "I keep money in Decimal, not float, because float cannot store cents exactly."
+- "I use a dictionary here, so each lookup takes constant time."
+- "I will name this CTE `daily_revenue`, so the next step reads clearly."
+
+## Test: проверка
+
+Скажите, что проверяете, и проверяйте вслух.
+
+- "Let me run it on my small example."
+- "Before I say it's done, let me check the code against the answers I wrote down: test purchases, trials, refunds."
+- "The first row looks right: … ."
+- "Now the edge cases: an empty input, one row, duplicates, a period that ends exactly at midnight."
+- "This number looks too high. Let me check the join: I think it multiplies rows."
+- "I found a bug: I forgot to exclude test purchases. Let me fix it."
+
+## Discuss: сложность и продакшен
+
+Здесь виден опыт. Хватит одной-двух конкретных фраз.
+
+- "The time complexity is O(n log n), because of the sort. The memory is O(n)."
+- "For a large table, I would add an index on (product_id, start_time)."
+- "In production, I would process webhooks idempotently, with a unique constraint on event_id."
+- "I would add a test for this edge case, because it is easy to break later."
+- "If this runs every day, I would add an alert when the numbers do not match."
+- "Another option is … . It is faster, but harder to read. For this task I prefer the simple one."
+
+## Если застряли
+
+Попросить направление — нормально; молчать — нет.
+
+- "Let me go back to the example and check it again."
+- "I am not sure about the exact syntax. In PostgreSQL I think it is `date_trunc('month', ts)`. May I check the documentation?"
+- "I have the general idea, but I'm not sure about the details yet. Let me write the simple part first."
+- "Could you point me in the right direction?"
+- "I would like to check one assumption with you: … ."
+
+## Время
+
+Следите за часами и говорите, что сделаете с оставшимся временем.
+
+- "I have about ten minutes left. I will finish the main case first, then talk about the edge cases."
+- "This part works. Do you want me to optimise it, or move to the next part?"
+- "If I had more time, I would add tests for … ."
+
+## Слова, которые стоит проговорить
+
+Эти термины встречаются почти в каждой задаче с данными, а ударение или звук в них легко произнести не так. Ударный слог выделен заглавными буквами. Произнесите каждое слово три раза.
+
+| Слово | Как произносить |
+|---|---|
+| cache | КЭШ, как cash |
+| deque | ДЕК, как deck |
+| debt | ДЕТ: b не произносится |
+| schema | СКИ-ма |
+| tuple | ТУ-пл или ТА-пл |
+| query | КВИ-ри |
+| aggregate (существительное) | АГ-ри-гит |
+| aggregate (глагол) | АГ-ри-гейт |
+| coalesce | коу-э-ЛЕС |
+| idempotent | ай-дем-ПОУ-тент |
+| cohort | КОУ-хорт |
+| reconciliation | ре-кэн-си-ли-ЭЙ-шн |
+| PostgreSQL | ПОСТ-грес-кью-эл или просто ПОСТ-грес |
+
+Проговорите и словосочетания: half-open interval, window function, partition by, deduplicate, churn, test purchase, timestamp.
+
+<Aside type="note" title="На интервью">
+Частый вердикт после слабого раунда — «код в порядке, но за ходом мысли было трудно следить». Лечится это механически: одна фраза перед каждым шагом и одна после. "Now I join products, so each transaction gets its merchant. … Twelve rows, one per merchant, as expected."
+</Aside>
+
+## Связанные темы
+
+- [Протокол интервью](/start/interview-protocol/) — шаги, к которым относятся эти фразы, с бюджетом времени.
+- [Мок-интервью](/start/mock-interview/) — следующая страница: здесь эти фразы говорят под таймер.
+- [Вопросы интервьюеру](/start/questions-to-ask/) — фразы для последних пяти минут интервью.
+- [Словарь](/reference/glossary/) — слова предметной области, по одной строке на каждое.

@@ -1,0 +1,195 @@
+---
+title: Шпаргалка Python
+description: Стандартная библиотека Python для лайвкодинга на одной странице. Идиомы, что когда брать, даты, деньги, декоратор, сложность, ловушки, pytest и документация.
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+
+Задачам на Python в лайвкодинге редко нужна библиотека. Им нужны `dict`, `set`, `sorted`, `Decimal`, `datetime` и несколько модулей стандартной библиотеки — быстро и без ошибок. Первый блок — то, что стоит держать в пальцах; остальное — справочно и для вопросов, которые задают, когда код уже работает.
+
+<Aside type="tip" title="Коротко">
+- Группировать — `defaultdict`, считать — `Counter`, «уже видели» — `set`, скользящее окно — `deque`, топ-k — `heapq`.
+- Сортировка по нескольким ключам — ключ-кортеж: `key=lambda r: (-r["amount"], r["id"])`.
+- Деньги — `Decimal` из строк, округление — `quantize`. `round()` у `Decimal` округляет по-банковски.
+- Месяцы не прибавляются через `timedelta`: посчитать год и месяц, день ограничить через `calendar.monthrange`.
+- Забыли сигнатуру? `help(heapq.nsmallest)` прямо в редакторе или страница модуля на docs.python.org. Ни то ни другое не AI.
+</Aside>
+
+## Держать в пальцах
+
+```python
+from collections import defaultdict, Counter, deque, OrderedDict
+from datetime import datetime, date, timedelta, time, timezone
+from decimal import Decimal, ROUND_HALF_UP, ROUND_DOWN
+from dataclasses import dataclass, field
+import heapq, bisect, calendar, functools, itertools, re
+
+d = defaultdict(list); d[key].append(x)
+c = Counter(items); c.most_common(3)
+q = deque(maxlen=100); q.append(x); q.popleft()
+od = OrderedDict(); od.move_to_end(k); od.popitem(last=False)      # LRU: выбросить самый старый
+
+sorted(rows, key=lambda r: (r["date"], r["id"]))                    # несколько ключей
+sorted(rows, key=lambda r: (-r["amount"], r["id"]))                 # сумма по убыванию, потом id
+min(cands, key=lambda c: (abs(c.diff), c.id))                       # лучший, с правилом на равенство
+heapq.nsmallest(5, rows, key=...)                                   # топ-N без полной сортировки
+bisect.bisect_left(sorted_list, x)                                  # поиск в отсортированном списке
+
+for a, b in zip(xs, xs[1:]): ...                                    # соседние пары
+for i, x in enumerate(xs, 1): ...                                   # нумерация с 1
+itertools.groupby(sorted_rows, key=...)                             # только по отсортированному!
+```
+
+## Что когда брать
+
+- Сгруппировать и сложить → `defaultdict(Decimal)`; список на ключ → `defaultdict(list)`.
+- Посчитать штуки → `Counter`.
+- «Уже видели?», дубли → `set` с именем `seen`.
+- Последняя запись по ключу → `dict`, перезаписывать, только если новая запись новее.
+- Топ-k → `heapq.nsmallest(k, rows, key=lambda r: (-r.amount, r.id))`.
+- Скользящее окно по времени, лимит запросов → `deque`, старое выбрасывать слева.
+- Поиск в отсортированном списке → `bisect`.
+- Пересекающиеся периоды → сортировка по началу и один проход.
+- Распределить сумму по долгам → один цикл: `pay = min(left, due)`, `if pay > 0`, `break` при `left == 0`.
+- Данные из базы → фильтр и `GROUP BY` в SQL; в Python забирать только маленький результат.
+
+Порядок работы над любой функцией: маленький пример входа и выхода руками, правило одной фразой, граничные случаи комментарием, код, `print` примера, потом граничные случаи.
+
+## Даты
+
+```python
+datetime(2026, 9, 30) + timedelta(days=30)      # 2026-10-30 00:00:00
+calendar.monthrange(2026, 2)[1]                 # 28: дней в месяце
+dt.replace(day=1)                               # начало месяца
+(d2 - d1).days                                  # разница в днях
+datetime.combine(d, time())                     # полночь даты
+datetime.fromisoformat("2026-09-30 10:00:00")   # разобрать ISO-строку
+```
+
+Месяцы через `timedelta` не прибавить. Год и месяц считают через `//` и `%`, а день ограничивают через `calendar.monthrange`: 31 января плюс месяц — 28 февраля 2026 года. Datetime с часовым поясом (aware) и без него (naive) не сравниваются: Python бросит `TypeError`.
+
+## Деньги
+
+```python
+Decimal("0.1") + Decimal("0.2") == Decimal("0.3")          # True; с float — False
+amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)   # 0.125 -> 0.13
+amount.quantize(Decimal("0.01"), rounding=ROUND_DOWN)      # вниз: 23.9976 -> 23.99
+round(amount, 2)                                           # тоже Decimal, но банковское: 0.125 -> 0.12
+Decimal(str(0.1))                                          # из float — только через str
+```
+
+`Decimal(0.1)` без `str` сохраняет двоичную ошибку float: `0.1000000000000000055511151231257827021181583404541015625`.
+
+## Декоратор
+
+У декоратора с параметром три уровня: фабрика принимает параметр, декоратор — функцию, обёртка — вызов.
+
+```python
+import functools
+
+
+def retry(times: int):
+    """Повторить вызов после ConnectionError, всего не больше `times` попыток."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(1, times + 1):
+                try:
+                    return func(*args, **kwargs)
+                except ConnectionError:
+                    if attempt == times:
+                        raise
+        return wrapper
+    return decorator
+
+
+@retry(times=3)
+def fetch_payout(payout_id: str) -> str:
+    """Запросить у API маркетплейса одну выплату."""
+    ...
+```
+
+Благодаря `functools.wraps` у `fetch_payout.__name__` остаётся `"fetch_payout"`, и docstring тоже сохраняется. Без него оба принадлежат `wrapper`.
+
+## Сложность, которую стоит называть
+
+- Поиск в `dict` и `set` — `O(1)` в среднем. `x in list` — `O(n)`. Сортировка — `O(n log n)`. Добавить в кучу или достать из неё — `O(log n)`.
+- Два вложенных цикла по n элементам — `O(n²)`: на 100 000 строк это уже медленно.
+- Топ-k через кучу — `O(n log k)` по времени и `O(k)` по памяти.
+- Заметающая прямая (sweep line): периоды превратить в события +1 и −1, отсортировать, один проход. `O(n log n)`.
+
+## Ловушки, о которых спрашивают
+
+- **Изменяемый аргумент по умолчанию** (`def f(x, seen=set())`, `_cache={}`) живёт между вызовами. По умолчанию — `None`, объект создавать внутри.
+- **Деньги во `float`:** `0.1 + 0.2 != 0.3`. Нужен `Decimal` из строк. `round()` у `Decimal` банковский; для half-up и вниз — `quantize`.
+- **Деление:** `int / int` даёт `float`, `Decimal / Decimal` — `Decimal` (деньги делят так). `//` у `int` округляет вниз (`-7 // 2 == -4`), у `Decimal` — к нулю (`Decimal(-7) // 2 == -3`).
+- **`x in list` — это `O(n)`,** а в цикле — `O(n²)`. Нужен `set` или `dict`.
+- **Менять `dict`, пока по нему идёт цикл,** — `RuntimeError: dictionary changed size during iteration`; `list` молча пропустит элементы. Идти по копии: `for k in list(d)`.
+- **`defaultdict` создаёт ключ при чтении:** `d["missing"]` его добавит. Наружу отдавать `dict(d)`, проверять через `k in d` или `d.get(k)`.
+- **`sorted` устойчива:** элементы с равным ключом сохраняют порядок. Для «по сумме по убыванию, потом по id» — ключ-кортеж `(-amount, id)`.
+- **`is` или `==`:** `is` проверяет, что это тот же объект, `==` сравнивает значения. `is` — только для `None`.
+- **«А если функцию вызывают из многих потоков?»** (кэш, ограничитель частоты) → `threading.Lock` вокруг «прочитать — изменить — записать». Между процессами и серверами — Redis или уникальный ключ в базе.
+
+## База из Python
+
+```python
+# sqlite3, DuckDB и задачи Python на этом сайте: плейсхолдеры ?
+rows = con.execute(
+    "SELECT product_id, start_time FROM transactions WHERE product_id = ? AND start_time >= ?",
+    [product_id, since],
+).fetchall()
+
+# SQLAlchemy, частая во встроенных редакторах интервью: плейсхолдеры :name
+rows = conn.execute(
+    sa.text("SELECT product_id, start_time FROM transactions WHERE product_id = :product"),
+    {"product": product_id},
+).mappings().all()
+```
+
+Значения передавайте только параметрами, никогда через f-строку: это SQL-инъекция, а параметры к тому же сами разбираются с типами и кавычками. Тяжёлую работу (фильтры, `GROUP BY`) оставьте SQL, в Python забирайте маленький результат.
+
+## pytest
+
+```bash
+pytest -k merge        # только тесты, в имени которых есть "merge"
+pytest -x              # остановиться на первой ошибке
+pytest -k merge -vv    # подробно: каждый тест и полный diff
+```
+
+## Если забыли: без AI
+
+Быстрее всего помощь прямо в редакторе. Это работает в большинстве редакторов для интервью и не считается AI:
+
+```python
+help(heapq.nsmallest)            # сигнатура и описание: "Equivalent to: sorted(iterable, key=key)[:n]"
+dir(itertools)                   # что есть в модуле: accumulate, groupby, pairwise, …
+print(Decimal.quantize.__doc__)  # docstring одного метода
+```
+
+Документацию на интервью обычно открывать можно:
+
+- Страница модуля — `docs.python.org/3/library/<module>.html`: `heapq`, `itertools`, `collections`, `datetime`, `decimal`, `bisect`, `functools`. Ищите по странице имя функции; в конце страниц часто есть примеры и рецепты.
+- Sorting HOWTO — про `key`, несколько ключей и устойчивость сортировки.
+- У страницы `decimal` есть FAQ: ищите `quantize` или «two decimal places».
+- На странице `datetime` есть таблица кодов формата для `strftime()` и `strptime()`.
+
+<Aside type="note" title="На интервью">
+Посмотреть сигнатуру — нормально. Скажите об этом и смотрите: *"Let me quickly check the docs for the exact signature."* Верный вызов лучше уверенной догадки. Когда тесты прошли, назовите сложность, не дожидаясь вопроса: *"It's O(n log n) because of the sort, and the memory is O(n)."* Но сначала ещё раз прочитайте циклы: `x in list` внутри цикла делает всё решение квадратичным.
+</Aside>
+
+## Что почитать
+
+- [Python: collections](https://docs.python.org/3/library/collections.html) — `defaultdict`, `Counter`, `deque`, `OrderedDict`.
+- [Python: Sorting HOWTO](https://docs.python.org/3/howto/sorting.html) — функции-ключи, несколько ключей, устойчивость.
+- [Python: decimal](https://docs.python.org/3/library/decimal.html) — `quantize`, режимы округления и FAQ.
+- [Python: datetime](https://docs.python.org/3/library/datetime.html) — aware и naive, `fromisoformat`, коды формата.
+- [Python: heapq](https://docs.python.org/3/library/heapq.html) и [functools.wraps](https://docs.python.org/3/library/functools.html#functools.wraps).
+
+## Связанные темы
+
+- [Приёмы на листок](/reference/recipes/) — приёмы Python, по одной строке.
+- [dict и Counter](/python/dicts-and-counting/) — группировка и подсчёт, с упражнениями.
+- [Деньги и Decimal](/python/money-and-decimal/) — округление, деление и распределение денег.
+- [Тесты и сложность](/python/testing-and-complexity/) — что сказать, когда код заработал.
+- [Python и SQL](/python/python-and-sql/) — параметры и где должна идти работа.

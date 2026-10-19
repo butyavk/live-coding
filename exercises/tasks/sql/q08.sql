@@ -1,0 +1,22 @@
+-- Q08. Trial conversion by plan — Q2 2026
+-- Level: medium. Target time: 10 min.
+--
+-- TASK
+--   For trials that started in April–June 2026, show per plan how many trials there were, how many converted to paid, and the conversion rate.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: How do I know a trial converted?
+--   A: The same chain (original_transaction_id) has a transaction with is_trial_conversion = true.
+--   Q: Rate format?
+--   A: conversions / trials, rounded to 3 decimals. Watch out for integer division in PostgreSQL.
+--   Q: Test?
+--   A: Excluded everywhere.
+--   Q: A trial started in late June and converted in July. Does it count?
+--   A: Yes. The start of the trial decides the quarter; the conversion can come later.
+--
+-- OUTPUT COLUMNS: plan_id, trials, conversions, conversion_rate
+-- ORDER BY: plan_id
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q08.sql   Check: pytest -k q08
+
+-- your query below

@@ -1,0 +1,75 @@
+---
+title: Flashcards
+description: 78 flashcards on SQL, Python, database concepts and the interview protocol, with spaced repetition in the browser and Anki decks in English and Russian.
+sidebar:
+  order: 6
+---
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+import Flashcards from '~/components/Flashcards.astro';
+
+Solving a drill once is not the same as recalling the recipe under time pressure. This deck turns the key ideas of the site into questions you answer from memory: the recipes, what each trap returns and how to fix it, the database concepts interviewers ask about, and the steps and phrases of the protocol. It schedules each card so that you see the hard ones often and the easy ones rarely.
+
+<Aside type="tip" title="TL;DR">
+- 78 cards in six sections: SQL foundations, SQL patterns, SQL traps, Python, database concepts, and the protocol with its phrases. Each answer links to the page it comes from.
+- Say the answer out loud **before** you flip the card. Recall is what makes the memory stick, not rereading.
+- Press **Got it** only if your answer was complete. Cards you know move to later boxes and come back after 1, 3, 7 and 16 days.
+- Ten minutes a day beats an hour once a week. Prefer Anki? Download the decks at the bottom of the page.
+</Aside>
+
+## Why spaced repetition
+
+You forget most of what you read within days, and each successful recall slows that forgetting down. Spaced repetition uses this: review a fact just before you would forget it, and the gap before the next review can grow. Two habits make it work. **Active recall**: answer from memory before seeing the answer. **Spacing**: return to each card at growing intervals instead of cramming them all in one evening.
+
+Flashcards suit recipes, trap outcomes, definitions and the phrases you say: what `NOT IN` does with a `NULL`, how to round money half up, which questions to ask before you write code. They do not replace solving whole tasks out loud on a timer. Use them alongside the [study plan](/start/study-plan/) and the [interview protocol](/start/interview-protocol/).
+
+## The deck
+
+<Flashcards />
+
+## How the deck works
+
+The deck uses the **Leitner system**: five boxes, and a card's box sets how long it waits before it is due again.
+
+| Box | How long a card waits there |
+|---|---|
+| New | Due now |
+| 1 | Today, at the end of the round |
+| 2 | 1 day |
+| 3 | 3 days |
+| 4 | 7 days |
+| 5 | 16 days, and it stays in box 5 |
+
+- **Got it** (key `2`) moves the card up one box, where it waits that box's interval; a new card goes straight to box 2. **Again** (key `1`) sends it back to box 1, and it returns at the end of the current round.
+- **Due** counts cards to review now in the selected section; **Learned** counts cards in box 2 or higher.
+- By default the weakest cards come first. **Shuffle** mixes the order instead.
+- When nothing is due, you can run a practice round over every card in the section. Practice rounds do not change the schedule.
+- Progress is saved in your browser and shared by the English and Russian versions: a card you know in one language counts in the other. Clearing site data or using a private window starts from scratch. **Reset progress** puts every card back to new.
+- Without JavaScript, open **Browse all cards** to read every question and answer.
+
+<Aside type="note" title="Grade honestly">
+"Got it" means you said the whole answer, including the number, the exact syntax or the fix, before flipping. If you only recognised it once you saw it, press "Again". Recognition feels like knowledge, but it does not help when the interviewer asks a follow-up.
+</Aside>
+
+## Use them in Anki
+
+[Anki](https://apps.ankiweb.net/) is a free spaced-repetition program for computers and phones. Both decks have the same cards as the deck above; each answer ends with a link to the page on this site.
+
+<CardGrid>
+  <LinkCard title="English deck (.tsv)" description="78 cards, tab-separated, with HTML formatting" href={`${import.meta.env.BASE_URL.replace(/\/$/, '')}/flashcards/live-coding-en.tsv`} download="live-coding-en.tsv" />
+  <LinkCard title="Russian deck (.tsv)" description="The same 78 cards in Russian" href={`${import.meta.env.BASE_URL.replace(/\/$/, '')}/flashcards/live-coding-ru.tsv`} download="live-coding-ru.tsv" />
+</CardGrid>
+
+To import a deck:
+
+1. Download the file and open Anki on a computer (version 2.1.54 or later).
+2. Choose **File → Import** and select the file.
+3. Anki reads the settings from the file header: tab-separated, HTML allowed, note type **Basic**, deck **Live Coding Map**. Check them in the dialog and click **Import**.
+
+Each card is tagged `live-coding` plus a section tag such as `lcm::traps`, so you can study one section with a filtered deck. Cards carry stable IDs: when the site publishes a new version of the deck, importing it again updates the existing notes and keeps your review history.
+
+## Related topics
+
+- [Study plan](/start/study-plan/) — when to review the cards and what to practise alongside them.
+- [Recipes for a sheet of paper](/reference/recipes/) — the recipes behind many cards, one line each.
+- [Common mistakes](/reference/common-mistakes/) — the longer story behind the trap cards.
+- [Interview protocol](/start/interview-protocol/) — the steps the protocol cards ask about, in full.

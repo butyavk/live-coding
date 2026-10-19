@@ -1,0 +1,144 @@
+---
+title: Introduction
+description: What a SQL and Python live-coding interview tests, the usual format, how this site is organised and how an exercise works in your browser.
+sidebar:
+  order: 1
+---
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+A live-coding interview is a short task that you solve on a shared screen while the interviewer watches and asks questions. For data, analytics and backend roles it is usually SQL, Python or both. This site prepares you for that hour: the patterns the tasks are built from, the traps that break them, and a protocol that helps you use the time well.
+
+<Aside type="tip" title="TL;DR">
+- The interviewer checks more than working code: a correct result, edge cases, how you talk through the work, small steps and the follow-up.
+- The usual format: 45–60 minutes in a shared online editor, one or two tasks in SQL, Python or both. Usually no AI, documentation allowed.
+- Some companies now allow AI. Then the round checks how you verify the code it writes.
+- Learn the [protocol](/start/interview-protocol/) first: restate, ask, plan, code in small steps, check before "done".
+- Every exercise here runs in your browser on real PostgreSQL and real Python. Press Check before you read the answer.
+</Aside>
+
+## What the interview tests
+
+Working code is only part of the grade. Interviewers usually watch five things.
+
+- **A correct result.** The numbers match the question: the right period, the right filters, one row per the right thing. A query that runs but counts test purchases, or loses the last day of the month, is a wrong answer.
+- **Edge cases.** Zeros and empty groups, NULL, duplicates, ties, a period that ends exactly at midnight, a negative amount. A strong candidate raises them before the interviewer does.
+- **Talking through the work.** You say what you are doing and why. Silence of more than 30 seconds is hard to grade; a clear sentence about a wrong idea is easy to correct. The [think-aloud phrases](/start/think-aloud/) give you the words.
+- **Small steps.** You build the answer in pieces and run each piece. A 40-line query written in one go and run once at the end worries an interviewer, even when it works.
+- **The follow-up.** After the code works, a question follows. Which index would help? What is the complexity? What changes with a billion rows? What happens if the same event arrives twice? A short, concrete answer counts as much as the code.
+
+## The usual format
+
+Formats differ between companies, but most fall inside these ranges.
+
+| | Typical |
+|---|---|
+| Tool | A shared online editor, sometimes a notebook |
+| Length | 45–60 minutes |
+| Tasks | One or two: SQL, Python, or one of each |
+| Time per task | About 25 minutes with two tasks; up to 45 with one |
+| AI assistants | Usually not allowed. Where they are, the round checks how you verify the AI's code |
+| Documentation | Usually allowed; ask at the start |
+| Data | A small schema you see for the first time |
+
+The SQL is usually PostgreSQL. The Python is usually the standard library, sometimes with pytest. In the first minute, ask one question about the environment: "Can I run code here, and can I use the docs?" Then ask three to five questions about the task. If AI is allowed, the [protocol](/start/interview-protocol/#if-ai-is-allowed) shows how to work with it.
+
+<Aside type="note" title="What this site does not cover">
+- pandas and other data-frame tasks.
+- Algorithm rounds: graphs, dynamic programming and other puzzle-style tasks.
+- asyncio and concurrency tasks.
+- Recursive CTEs and JSON queries in SQL.
+- System design. For that round, see the sibling project [System Design Map](https://butyavk.github.io/system-design/).
+</Aside>
+
+## How this site is organised
+
+The site moves from the protocol to the building blocks, then to full tasks. Each section has its own entry in the sidebar.
+
+| Section | What you will learn | Start with |
+|---|---|---|
+| Start here | The protocol, the phrases, a mock interview, the practice dataset, the plans | [Interview protocol](/start/interview-protocol/) |
+| SQL foundations | Filters and dates, grouping, NULL, CASE, joins, CTE | [Filters and dates](/sql/filters-and-dates/) |
+| SQL patterns | Row multiplication, top N per group, running totals, calendars, duplicates, reconciliation, ledgers, indexes | [Row multiplication](/sql-patterns/row-multiplication/) |
+| Python for live coding | dict and Counter, sets, sorting, Decimal, dates, intervals, classes, decorators, time windows | [dict and Counter](/python/dicts-and-counting/) |
+| Practice: SQL tasks | 15 interview tasks in five groups | [Revenue reports](/sql-tasks/revenue-reports/) |
+| Practice: Python tasks | 13 interview tasks in five groups | [Events and time](/python-tasks/events-and-time/) |
+| Reference | Recipes, cheat sheets, common mistakes, a glossary, flashcards | [Recipes](/reference/recipes/) |
+
+The About section holds [Contributing](/about/contributing/) and [Credits and licence](/about/credits-and-license/).
+
+Three pages help you plan. The [skill map](/start/skill-map/) shows every topic with what it needs first. The [study plan](/start/study-plan/) turns the topics into a checklist for 1 week, 2–3 weeks or 4–6 weeks. The [interview protocol](/start/interview-protocol/) is what you do inside each task. When you are ready to test all of it at once, the [mock interview](/start/mock-interview/) gives you a random task with the clock running and the hints hidden.
+
+### How a topic page is built
+
+Topic pages share one layout, so you always know where to look:
+
+1. A short opening and a **TL;DR** box: the recipe lines worth copying onto paper.
+2. The idea, a short query or function on the practice data, and its real output.
+3. Traps next to the idea they break.
+4. **Practice**: drills with an editor.
+5. An **In the interview** box: what to say out loud, and the follow-up that usually comes next.
+6. **Further reading** (the PostgreSQL and Python documentation first) and **Related topics**.
+7. The topic on the skill map: what to learn first, what it leads to, and a **Mark as learned** button.
+
+Task pages are different: each task comes with its statement, an editor and a walkthrough that you open after you solve it.
+
+### How an exercise works
+
+There are four kinds of exercise.
+
+- **Drill.** One question, as an interviewer would say it, and an editor. **Run** executes your code and shows the result. **Check** compares your result with the reference: for SQL, the rows (and their order, when the order matters); for Python, a set of tests. **Show answer** opens the reference solution and an explanation.
+- **Trap.** A short query that looks right and is not. Guess the result, run it, then read why. Some traps ask you to fix the query, and Check compares your fix with the correct one.
+- **Task.** A full interview task: the statement, the questions worth asking with their answers, notes about the data, an editor, Check and the reference solution. A walkthrough explains the steps, the traps, the check and the follow-up.
+- **Playground.** A free editor with Run, for your own queries and experiments.
+
+For SQL, Check also runs your query on a hidden dataset of edge cases: a day with no activity, a quiet month for one merchant, sales on the last day of a month, ties, a payout nobody expected, an advance for a merchant who is not enrolled. A query that fits only the visible rows fails there, so a missing calendar or a lost tie shows up at once. Column names do not need to match the reference unless the task asks for them; the values do.
+
+Task texts are in English on both language versions, because that is what you will hear in the interview. Explanations are in the language of the page.
+
+SQL runs on PostgreSQL 18 compiled to WebAssembly ([PGlite](https://pglite.dev/)). Python runs on CPython 3.14 compiled to WebAssembly ([Pyodide](https://pyodide.org/)). Both load into your browser when you first press Run: about 19 MB for PostgreSQL and 13 MB for Python, then cached by the browser. There is no server and nothing to install. Python code can also query the practice database; the [dataset page](/start/dataset/) shows how.
+
+### The practice dataset
+
+Every SQL exercise runs on one small dataset: a made-up subscription marketplace. Merchants sell subscription products to customers through two partner marketplaces, their own web checkout and free promo access. The marketplaces pay each merchant once a month, after a delay, and an advances program pays merchants early against those payouts. It has seven tables, 12 merchants, 20 products and 8,294 transactions. "Today" is 2026-09-30, always written as a literal. Read the [dataset page](/start/dataset/) before the SQL pages: most mistakes in data tasks come from the meaning of a column, not from SQL.
+
+### Your progress
+
+Progress is saved in this browser: the pages you open and mark as learned, the study-plan ticks and the flashcards. There is no account, and nothing is sent anywhere. Another browser or device starts empty. To move your progress, use **Download progress** under the [skill map](/start/skill-map/).
+
+## How to use this site
+
+<Steps>
+
+1. Pick a [study plan](/start/study-plan/) for the time you have.
+
+2. Learn the [protocol](/start/interview-protocol/) and say the [phrases](/start/think-aloud/) out loud.
+
+3. Get to know the [practice dataset](/start/dataset/) and run your first query.
+
+4. Work through the topic pages. Solve each drill before you open the answer, and guess each trap before you run it.
+
+5. Solve the tasks on a timer: 25 minutes each, or the target time plus 10 minutes for a task with a target over 15 (the [protocol](/start/interview-protocol/#time-budget-for-one-task) explains the clock). Work out loud, from an empty editor, and open the walkthrough only after Check passes.
+
+6. Three days later, solve the task that went worst again, without looking at your old solution.
+
+7. Before the interview, do at least one [mock interview](/start/mock-interview/) and review it with the checklist.
+
+</Steps>
+
+<Aside type="note" title="In the interview">
+A small syntax slip rarely fails anyone: you can look up a function name. What fails is a confident "done" on a result that nobody checked. Say "Let me check the result before I say it's done", then count the rows and check one of them by hand.
+</Aside>
+
+## Further reading
+
+- [PostgreSQL documentation](https://www.postgresql.org/docs/current/): the reference you may open during the interview; learn where things are.
+- [Python documentation](https://docs.python.org/3/): the standard library reference, in the same role for Python.
+- [PGlite](https://pglite.dev/): PostgreSQL compiled to WebAssembly, which runs the SQL on this site.
+- [Pyodide](https://pyodide.org/): CPython compiled to WebAssembly, which runs the Python on this site.
+
+## Related topics
+
+- [Study plan](/start/study-plan/): the next page, a route through the site for the time you have.
+- [Mock interview](/start/mock-interview/): a timed rehearsal of the whole round.
+- [Interview protocol](/start/interview-protocol/): what to do in each task, minute by minute.
+- [Practice dataset](/start/dataset/): the tables every SQL exercise runs on.

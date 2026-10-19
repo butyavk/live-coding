@@ -1,0 +1,22 @@
+-- Q11. Duplicate webhooks
+-- Level: easy. Target time: 8 min.
+--
+-- TASK
+--   Webhooks can arrive more than once with the same event_id. For September 2026, count unique events per day and type, and how many duplicate deliveries we received.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Which copy is the real one?
+--   A: The first by received_at. The others are duplicates.
+--   Q: Is a duplicate an exact copy of the event?
+--   A: Yes: same event_id, type and occurred_at; only received_at differs.
+--   Q: Which day?
+--   A: The day of occurred_at (UTC), from 2026-09-01 to 2026-09-29.
+--   Q: Days or types with no events?
+--   A: Leave them out.
+--
+-- OUTPUT COLUMNS: day (DATE), type, events, duplicates
+-- ORDER BY: day, type
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q11.sql   Check: pytest -k q11
+
+-- your query below

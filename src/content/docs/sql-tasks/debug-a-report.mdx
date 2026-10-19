@@ -1,0 +1,46 @@
+---
+title: Debug a report
+description: "A debugging task in SQL: a monthly revenue report is too high and loses a day. Find each bug, say it out loud, fix it, and prove the fix with numbers."
+sidebar:
+  order: 3
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+Here the query is already written, and the report is wrong. A debugging task checks how you look for errors, not how fast you type: run, compare with a simpler query, find the cause, say it, then fix it. The bugs are the classic ones from [Revenue reports](/sql-tasks/revenue-reports/) and [Row multiplication](/sql-patterns/row-multiplication/).
+
+<Aside type="tip" title="How to practise">
+Run the query unchanged and write down the total of one merchant. Read the bug report and the "should show" part twice: they are your specification. Then fix one bug at a time and watch that merchant's number move. Name each bug before you edit: *"The bug is …, because …"*.
+</Aside>
+
+## D01. Merchant revenue report for August 2026
+
+<Task id="d01" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** Finance sees totals that are too high and misses the sales of 31 August. Such an error stays invisible until someone compares the report with another source.
+
+**The bugs.**
+
+1. `LEFT JOIN channel_payouts` on the merchant multiplies each transaction by the number of that merchant's payouts (13 to 15 here). The report does not need this join at all: remove it.
+2. `charged_usd` is gross. Revenue net of refunds is `revenue_usd`.
+3. `BETWEEN '2026-08-01' AND '2026-08-31'` stops at 31 August 00:00. Use a half-open interval: `>= '2026-08-01'` and `< '2026-09-01'`.
+
+**How to find them.** Compare `COUNT(*)` with a simple query without the join. If the report has more rows, the join multiplied them. Then recalculate one merchant by hand. For mer_06, fixing one bug at a time:
+
+| Step | transactions | net_usd |
+|---|---|---|
+| The query as written | 756 | 17255.42 |
+| 1. Payouts join removed | 54 | 1232.53 |
+| 2. `revenue_usd` instead of gross | 54 | 1219.54 |
+| 3. Half-open interval | 56 | 1299.52 |
+
+756 = 54 × 14: mer_06 has 14 payouts, and each one repeats every transaction. Across all merchants, `BETWEEN` lost 7 sales of 31 August, worth 148.94 net.
+
+**What to say.** One sentence per bug, before the fix: *"The bug is the join to channel_payouts, because every transaction is repeated once per payout."* The reason earns more credit than the edit.
+
+**In production.** After the fix the query is the Q01 shape with two joins through primary keys, so an index on `transactions(start_time)` is enough. A simple guard would have caught bug 1: compare the report total with a plain sum of transactions for the same month.
+
+</Reveal>

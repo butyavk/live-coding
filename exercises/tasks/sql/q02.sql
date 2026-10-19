@@ -1,0 +1,22 @@
+-- Q02. Top 5 products in the last 30 days
+-- Level: easy. Target time: 7 min.
+--
+-- TASK
+--   Show the five products with the highest net revenue in the last 30 days, with the product name and the merchant name.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: What is "today"?
+--   A: 2026-09-30 00:00 UTC. Never use CURRENT_DATE in these tasks.
+--   Q: Last 30 days exactly?
+--   A: start_time >= today - 30 days and start_time < today.
+--   Q: Net revenue?
+--   A: SUM(revenue_usd), test purchases excluded.
+--   Q: Ties?
+--   A: Order by net revenue, then product_id.
+--
+-- OUTPUT COLUMNS: product_id, product_name, merchant_name, net_usd
+-- ORDER BY: net_usd DESC, product_id; LIMIT 5
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q02.sql   Check: pytest -k q02
+
+-- your query below

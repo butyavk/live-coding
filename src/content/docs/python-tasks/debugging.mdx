@@ -1,0 +1,67 @@
+---
+title: Debugging
+description: "Two Python debugging tasks: a subscription report with shared state and float money, and webhook delivery that loses events and retries too much."
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+import Task from '~/components/practice/Task.astro';
+import Reveal from '~/components/practice/Reveal.astro';
+
+In both tasks the code is already written, the tests fail, and a bug report says what the team sees. The bugs are classic Python ones: a mutable default argument, an end that should be excluded, money in float, an `except` that catches too much. So they test whether you know the language and can read a failing test. They build on [Testing and complexity](/python/testing-and-complexity/) and [Money and Decimal](/python/money-and-decimal/).
+
+<Aside type="tip" title="How to practise">
+Press Check before you study the code: the failing tests are your map. Take one failure, find its bug and name it before you edit (*"The bug is …, because …"*). Fix only that bug, then press Check again.
+</Aside>
+
+## D02. Subscription report
+
+<Task id="d02" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** The product team sees active numbers that are too high and results that "stick". These are the usual signs of shared state and wrong boundaries.
+
+**The bugs.**
+
+1. The cache in `active_at` is a mutable default argument. `_cache={}` is created once, lives between calls, and its key ignores `transactions`. Remove it; do not try to repair it.
+2. `<= t["end_time"]`: the end of the period is not included, so it must be `<`.
+3. Promo access and refunds at or before `moment` are not excluded.
+4. `revenue_by_product` adds money in float: 0.10 + 0.20 + 9.99 gives `10.290000000000001`. Keep `Decimal` and add it up exactly. Rounding the float at the end would only hide the error, and the result would still be a float.
+
+**How to find them.**
+
+- Read the failure messages. "Does not change for a different list" means state between calls. A float where a `Decimal` was expected means float money.
+- Fix the cache first. While it is there, it returns the result of an earlier call, and the other failures are misleading. In one Check run, `test_promo_and_refunds` shows `{'a': 1}`, left over from the previous test, instead of the real `{'a': 3, 'b': 1}`.
+
+**Complexity.** One pass, `O(n)` per call. The cache was never worth it: a correct one would need the whole list of transactions in its key.
+
+</Reveal>
+
+## D03. Webhook delivery to merchants
+
+<Task id="d03" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** We deliver webhooks to our merchants' servers. Some events are lost, and a worker that has just served one merchant sends nothing to the next one.
+
+**The bugs.**
+
+1. `seen=set()` as a default is created once and shared by every call that does not pass `seen`. The next call on the same worker then skips ids that were delivered for another merchant. Use `seen=None` and create the set inside the function.
+2. The id is added to `seen` before the send succeeds, so an event that failed is never retried.
+3. `except Exception` also retries bugs in our payload. Catch only `TemporaryError` and let everything else go up.
+4. It sleeps after the final failure as well. Wait only when another attempt follows.
+
+**How to find them.** The failing tests point at the bugs one by one:
+
+- `test_fresh_calls_do_not_share_state` gets `[]` instead of `['x']`: bug 1.
+- The waits are `[1.0, 2.0, 1.0, 2.0, 4.0]` instead of `[1.0, 2.0, 1.0, 2.0]`: bug 4.
+- `ValueError` is not raised for the payload bug: bug 3.
+- After the waits are fixed, the same retry test shows bug 2: `b` is in `seen`, although it was never delivered.
+
+**Complexity.** `O(n log n)` for the sort by `created_at`, plus at most `max_attempts` sends per event.
+
+**In production.** `seen` lives in a database or a queue with acknowledgements, not in a Python set. The retry delays usually get random jitter, so many workers do not retry at the same moment.
+
+</Reveal>

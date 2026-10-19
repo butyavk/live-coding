@@ -1,0 +1,22 @@
+-- Q04. Daily active subscriptions — September 2026
+-- Level: medium. Target time: 15 min.
+--
+-- TASK
+--   For every day of September 2026, show how many paid subscriptions were active at 00:00 UTC of that day. Every day must appear, even with 0.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Same definition of active and paid as in Q03?
+--   A: Yes.
+--   Q: Days?
+--   A: 2026-09-01 … 2026-09-30, 30 rows. Hint: generate_series.
+--   Q: Why not GROUP BY start_time?
+--   A: A subscription is active on many days, not only on the day it started.
+--   Q: Can I simply repeat the Q03 count for every day?
+--   A: Yes, any correct way is fine.
+--
+-- OUTPUT COLUMNS: day (DATE), active_subscriptions
+-- ORDER BY: day
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q04.sql   Check: pytest -k q04
+
+-- your query below

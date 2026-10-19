@@ -1,0 +1,241 @@
+---
+title: Common mistakes
+description: The mistakes that cost points in SQL and Python live coding, as rules. What each looks like, why it happens, the fix and what to say. Read it the day before.
+sidebar:
+  order: 4
+---
+import { Aside } from '@astrojs/starlight/components';
+
+The same mistakes come up again and again in SQL and Python live-coding tasks. Few of them are about syntax. Most are a requirement that never reached the code, a join that quietly changed the numbers, or a result that nobody checked. Go through the list the day before the interview.
+
+<Aside type="tip" title="TL;DR">
+- Write every answer of the interviewer as a comment, and check the code against the comments before you say "done". This one mistake costs more points than all the others.
+- "Today" is a fixed date. "For each X" starts from the table of X. A balance has no date window.
+- Before every join, ask: do both sides have many rows per key? Before every `GROUP BY` or `PARTITION BY`: within what am I choosing or counting?
+- Check your own result before the interviewer does: the number of rows, one row by hand, the maximum against the average.
+</Aside>
+
+## 1. The interviewer's answer did not reach the code
+
+**What it looks like.** You asked whether trials count and heard "exclude them", but the final query still has them. The rounding was agreed as one decimal, and the code says `ROUND(…, 2)`. "Then the larger `payout_id`" became `payout_id` without `DESC`. In Python, a helper function is written but never called.
+
+**Why it happens.** The answers live in your head for ten minutes while you write code, and the code wins.
+
+**The fix.** In the first minutes, write every answer as a comment. Before "done", go through the comments line by line and find each one in the code.
+
+```sql
+-- RESULT: one row per enrolled merchant: merchant_id, headroom_usd
+-- today = 2026-09-30; last 30 days = [today - 30 days, today)
+-- proceeds = charged_usd * (1 - fee_rate); north_market + south_market; no test purchases; no refunds
+-- owed = SUM(ledger_entries.amount_usd), all time
+-- "enrolled" = merchants.advances_enrolled_at IS NOT NULL
+```
+
+Say: *"Let me write your answers down as comments, so we both see them."* And at the end: *"Before I say it's done, let me check the code against these comments."*
+
+Read more: [Interview protocol](/start/interview-protocol/).
+
+## 2. "Today" is not NOW()
+
+**What it looks like.** `start_time >= NOW() - INTERVAL '30 days'` on a dataset that does not change. The window slides into a period with no data. The last transaction in the practice data starts at `2026-09-29 23:40:35`. With the fixed date, "the last 30 days" has 483 transactions; with `NOW()`, the count drops every day and reaches 0 a month later.
+
+**Why it happens.** In production, "today" is the current time. Interview datasets are frozen.
+
+**The fix.** Ask, then write "today" as a typed literal:
+
+```sql
+SELECT COUNT(*) AS last_30_days
+FROM transactions
+WHERE start_time >= TIMESTAMP '2026-09-30' - INTERVAL '30 days'
+  AND start_time <  TIMESTAMP '2026-09-30';
+```
+
+If you are not sure, look: `SELECT MAX(start_time) FROM transactions`. If "today" really is now, ask one more question: 30 × 24 hours back from this moment, or 30 full days up to midnight?
+
+Say: *"Is 'today' the current time, or a fixed date for this dataset?"*
+
+Read more: [Filters and dates](/sql/filters-and-dates/).
+
+## 3. Joining two "many" sides
+
+**What it looks like.** A merchant has several products and several advances. Joining both tables to the merchant pairs every product with every advance. For `mer_09`, 2 products and 7 advances give 14 rows, and the advanced amount becomes 2245.62 instead of 1122.81: exactly double.
+
+**Why it happens.** The join key is the merchant, but neither table has one row per merchant.
+
+**The fix.** Reduce each side to one row per key in its own CTE, then join.
+
+```sql
+WITH proceeds AS (SELECT merchant_id, SUM(…) AS proceeds_30d FROM … GROUP BY merchant_id),
+     owed     AS (SELECT merchant_id, SUM(amount_usd) AS outstanding FROM ledger_entries GROUP BY merchant_id)
+SELECT …
+FROM merchants m
+LEFT JOIN proceeds p ON p.merchant_id = m.id
+LEFT JOIN owed     o ON o.merchant_id = m.id
+```
+
+To catch it, check one key with a separate simple query. A number that is 2, 10 or 100 times larger than expected almost always means multiplied rows.
+
+Say: *"Both sides have many rows per merchant, so I aggregate each side first, then join."*
+
+Read more: [Row multiplication](/sql-patterns/row-multiplication/).
+
+## 4. "For each X" does not start from X
+
+**What it looks like.** The task says "for every enrolled merchant", and the query starts `FROM advances JOIN proceeds`. A merchant with no sales, or with no debt, disappears. The same happens with "revenue per merchant" that starts from `transactions`: merchants without sales are missing.
+
+**Why it happens.** It feels natural to start from the table with the numbers. The table that lists every X is a different one.
+
+**The fix.** `FROM` the table where every X lives, then `LEFT JOIN` and `COALESCE(…, 0)`. A narrowing word in the task ("enrolled", "paid", "active") becomes a `WHERE` line, or a question.
+
+```sql
+FROM merchants m
+LEFT JOIN proceeds p ON p.merchant_id = m.id
+LEFT JOIN owed     o ON o.merchant_id = m.id
+WHERE m.advances_enrolled_at IS NOT NULL
+```
+
+Write every narrowing word as a comment: *enrolled, paid, active, last 30 days*. If you do not know which column it means, ask: *"How do I know a merchant is enrolled?"*
+
+Read more: [LEFT JOIN and zeros](/sql/left-join-and-zeros/).
+
+## 5. A date window on something that must be "all time"
+
+**What it looks like.** The task asks for "proceeds in the last 30 days" and "what the merchant owes". The 30-day filter lands on the ledger too. With that filter, `mer_03` "owes" −45.96, as if the platform owed the merchant money. Over all time, it owes 116.39.
+
+**Why it happens.** The same filter is copied into every CTE, for consistency.
+
+**The fix.** Put a date filter only where the task has one. A debt is everything paid out and not yet repaid, over the whole history. Ask yourself one question for every number: is it a flow (for a period) or a balance (at a moment)?
+
+Read more: [Money and ledgers](/sql-patterns/money-and-ledgers/).
+
+## 6. Grouping by the wrong key
+
+**What it looks like.** The share of each sales channel is written as `SUM(net_usd) OVER (PARTITION BY channel)` after `GROUP BY channel`. Every channel gets 100.0, and `promo` (0 / 0) fails with `division by zero`. Or "the best product per merchant" has an outer `GROUP BY merchant_id, product_id` after the same grouping in the CTE, so `MAX` picks from one row.
+
+**Why it happens.** The key of the previous step is copied into the next step.
+
+**The fix.** Ask "a share of what?" or "the best within what?". The answer goes into `PARTITION BY` or `GROUP BY`.
+
+```sql
+SUM(net_usd) OVER ()                                                            -- share of all rows
+SUM(net_usd) OVER (PARTITION BY merchant_id)                                    -- share within the merchant
+ROW_NUMBER() OVER (PARTITION BY merchant_id ORDER BY net_usd DESC, product_id)  -- best within the merchant
+```
+
+The signal: the key of the next step is the same as the grouping of the previous step. Every group has one row, so the step does nothing.
+
+Read more: [Shares and running totals](/sql-patterns/running-totals-and-shares/).
+
+## 7. ROW_NUMBER when ties must stay
+
+**What it looks like.** "If two products tie, keep both", answered with `ROW_NUMBER` and `rn = 1`.
+
+**Why it happens.** `ROW_NUMBER` is the default tool for "best per group", and it works until there is a tie.
+
+**The fix.** `ROW_NUMBER` always gives different numbers, so one of the tied rows gets 2. `RANK` gives equal values the same place:
+
+| product_id | revenue | ROW_NUMBER | RANK | DENSE_RANK |
+|---|---|---|---|---|
+| prd_01 | 300 | 1 | 1 | 1 |
+| prd_02 | 300 | 2 | 1 | 1 |
+| prd_03 | 200 | 3 | 3 | 2 |
+
+Say: *"ROW_NUMBER always gives unique numbers, so for ties I switch to RANK."*
+
+Read more: [Top N per group](/sql-patterns/top-n-per-group/).
+
+## 8. DESC applied to one column only
+
+**What it looks like.** "The latest payout; on equal dates, the larger `payout_id`" is written as `ORDER BY paid_at DESC, payout_id`. The tie goes to the smaller id.
+
+**Why it happens.** `DESC` reads as if it applied to the whole list.
+
+**The fix.** Write the direction after every column: `ORDER BY paid_at DESC, payout_id DESC`. Python has the opposite trap: `reverse=True` reverses every key, so use a tuple key such as `(-amount, id)`.
+
+Read more: [Top N per group](/sql-patterns/top-n-per-group/).
+
+## 9. An inverted filter or the wrong column
+
+**What it looks like.** A churn query keeps `refunded_at IS NOT NULL` (only the refunds) when the task wanted to exclude refunds. The end of a subscription is taken as `MAX(start_time)`, when it is the end of the last period, `MAX(end_time)`.
+
+**Why it happens.** Both lines look plausible, they are typed fast, and nobody reads them again.
+
+**The fix.** Read every `WHERE` line out loud in plain words: "I keep the rows that **have** a refund". The mistake is audible at once. For every column, check that it means what the word in the task means.
+
+Read more: [Conversion and churn](/sql-tasks/funnels-and-churn/).
+
+## 10. Not checking your own result
+
+**What it looks like.** The interviewer starts the checking: *"Are you sure about this number?"* Or, to *"How do you know it works?"*, you explain the code instead of running it.
+
+**Why it happens.** The query returns rows, and that feels like the end. The check feels optional.
+
+**The fix.** Before "done", make three checks yourself: the number of rows, one row by hand or with a separate simple query, and the total against a query without grouping. Then one more for plausibility: if the maximum is ten times the average, look at the row behind it. In the webhook data, the delivery delay averages 1.4 minutes, but the maximum is 16.1 minutes. The maximum is a repeated delivery: there are 1285 rows and only 1226 distinct `event_id` values. Over first deliveries only, the average is 1.0 minute and the maximum is 2.0.
+
+When the interviewer asks how you know it works, the answer is to run it: *"Good point, let me run it."* Then two checks: exactly on the boundary, and one second before it.
+
+Say: *"Let me sanity-check one merchant with a separate query before I say it's done."* Or: *"The maximum looks too big compared to the average. Let me look at that row."*
+
+Read more: [Interview protocol](/start/interview-protocol/), [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/).
+
+## 11. Treating a negative number as a bug
+
+**What it looks like.** "Available to advance" comes out negative. You start looking for a bug, or hide it with `GREATEST(…, 0)`.
+
+**Why it happens.** A negative amount looks like an error.
+
+**The fix.** Work out what it means. Available = 70% of recent proceeds − what the merchant owes. A negative value means the merchant already owes more than the limit. On the practice data, `mer_11` comes out at −437.87: its North Market payout for July and its South Market payout for August never arrived, while advances went on. Keep the minus in the report. If needed, add `GREATEST(…, 0) AS can_advance` and an `over_limit` flag. Ask early: *"What if the result is negative or zero?"*
+
+Say: *"A negative headroom means the merchant already owes more than the limit. I'd stop new advances and check why the marketplace payouts stopped."*
+
+Read more: [Money and ledgers](/sql-patterns/money-and-ledgers/).
+
+## 12. Names that confuse
+
+**What it looks like.** A CTE called `advance` holds the debt. A CTE called `paid` has trials inside. A column is called `id`, and nobody knows which entity it belongs to.
+
+**Why it happens.** The name was chosen before it was clear what the step would hold.
+
+**The fix.** Name a thing after what is inside it: `owed` or `outstanding`, `available_to_advance` or `headroom`, `customer_txns`, `m.id AS merchant_id`. The interviewer reads your code, and a misleading name misleads you too.
+
+Read more: [CTE and EXISTS](/sql/subqueries-and-cte/).
+
+## 13. Questions nobody asked
+
+**What it looks like.** The query is right for a question the interviewer did not ask: refunds included for a finance report, the wrong sales channels, a different "today", no rule for ties.
+
+**Why it happens.** Asking feels slow, and the task text seems clear.
+
+**The fix.** Before the task, one question about the environment: *"Can I run code here, and can I use the docs?"* Then pick three to five of these, the ones that change the result most, and ask them in one batch, each with the answer you would assume. Write the others down as assumptions and say them once:
+
+- *"Who will use this result?"* Finance, support or product: it decides refunds, channels and rounding.
+- *"What is today?"*
+- *"How do I know a merchant is enrolled, or a subscription is paid?"* For every narrowing word.
+- *"What if the result is negative or zero?"*
+- *"How should I order the result, and what about ties?"*
+- *"Anything I should know about data quality: duplicates, test data, missing values?"*
+
+Read more: [Interview protocol](/start/interview-protocol/), [Think aloud](/start/think-aloud/).
+
+## 14. Python: the same family
+
+- **A function written but never called.** After the code works, walk through the agreed answers and find each one in the code. → [Interview protocol](/start/interview-protocol/)
+- **Ties in sorting.** Use a tuple key, `(-revenue, customer_id)`, not only the amount. → [Sorting and top-k](/python/sorting-and-top-k/)
+- **A cache that caches nothing.** `_cache=None` in the signature and `_cache = {}` inside the function create a new, empty cache on every call. When state is wrong, remove it rather than patch it. → [Classes and state](/python/classes-and-state/)
+- **A `defaultdict` returned to the caller.** Reading a missing key adds it. Return `dict(counts)`. → [dict and Counter](/python/dicts-and-counting/)
+- **`round()` on a `Decimal`.** It is banker's rounding. For half-up or rounding down, use `quantize(Decimal("0.01"), rounding=…)`. → [Money and Decimal](/python/money-and-decimal/)
+- **Whole parts only, when partial payments are allowed.** If the rule is "pay what you can and stop, even part of the fee", a version that pays only whole parts hands money to the merchant while a debt is still open. The money rule: every cent of a payout goes to the debt first. → [Money and Decimal](/python/money-and-decimal/)
+- **A loop around the loop.** `while payout > 0:` around the `for` over debts: when the payout is larger than all the debt, the second pass pays the first debt again. Make one pass over the sorted debts, and `break` when the money runs out. → [Money and Decimal](/python/money-and-decimal/)
+- **Zero lines.** On an exact boundary, a line like `('a2', 'fee', Decimal('0.00'))` appears. Add a line only `if take > 0`. → [Money and Decimal](/python/money-and-decimal/)
+- **Edge cases left to the interviewer.** Test them yourself before "done": zero, less than the first part (a partial fee), exactly on a boundary, more than all the debt, equal dates. → [Testing and complexity](/python/testing-and-complexity/)
+
+<Aside type="note" title="In the interview">
+Most of this list comes down to two habits of a few seconds each: the requirements go into comments at the start, and the code is checked against them at the end. A question like *"Is this what we agreed?"* is a hint, not an attack. Answer it with a check, not a quick "yes": *"Let me re-read what we agreed."*
+</Aside>
+
+## Related topics
+
+- [Interview protocol](/start/interview-protocol/) — the order of work that prevents most of these mistakes.
+- [Recipes for a sheet of paper](/reference/recipes/) — the correct version of each pattern, one line each.
+- [SQL cheat sheet](/reference/sql-cheatsheet/) — the checks to run before "done".
+- [Debug a report](/sql-tasks/debug-a-report/) — practise finding these mistakes in a query someone else wrote.

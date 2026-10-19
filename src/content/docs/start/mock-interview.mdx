@@ -1,0 +1,62 @@
+---
+title: Mock interview
+description: A timed mock live-coding interview on a random SQL or Python task with the hints hidden, how to run it alone or with a friend, and a checklist to review it.
+sidebar:
+  order: 6
+---
+import { Aside } from '@astrojs/starlight/components';
+import MockInterview from '~/components/practice/MockInterview.astro';
+
+Topic pages teach the patterns; a mock teaches the hour. You do not choose the task, the clock is already running, and nobody tells you which page it belongs to. Do at least one mock before the real interview, and one a week if you have a month or more.
+
+<Aside type="tip" title="TL;DR">
+- Pick SQL, Python or both. You get a random task from your study plan in mock mode, with the clock started.
+- Each task gets 25 minutes, the slot a task gets in a real round. The hardest tasks get their target time plus 10 minutes. Both tasks get the sum.
+- The page title, the task's labels, the notes about the data and the questions to ask stay hidden. The hint opens after five minutes; the walkthrough and the solution when Check passes or the time is up.
+- Say everything out loud. Record yourself, or ask a friend to play the interviewer.
+- When it ends, go through the review checklist before you open the walkthrough.
+</Aside>
+
+<MockInterview />
+
+The task comes from the pages of your [study plan](/start/study-plan/); tick **Any task** to pick from all of them. The editor starts from the template, even if you solved the task before: **Restore my draft** brings your saved code back. A reload does not stop the clock.
+
+## Two ways to run it
+
+**Alone, with a recorder.** Start a voice or screen recording before you start the task. Read the statement out loud. Type each question you would ask in **Your questions** and say it out loud. Then press **Show the questions**: the task's own list opens with the interviewer's answers, and you tick each one you asked. A question you missed is the one to practise. Listen to the recording the same day. A silence of more than 30 seconds and a "done" without a check are easy to hear on a recording and easy to miss while you work.
+
+**With a friend as the interviewer.** A video call with a shared screen is closest to the real thing. The friend opens the same task page without the mock part of the link (everything from `?mock=`). There **Ask first** shows the questions with their answers. The friend reads the statement aloud and answers only the questions you actually ask: a question you forget gets no answer, as in a real round. When your code works, the friend asks a follow-up, for example:
+
+- "Which index would help this query on a big table?"
+- "What happens if the same event arrives twice?"
+- "What is the complexity, and what changes with a billion rows?"
+
+The friend does not need to know SQL or Python: the answers are written in the task, and the follow-ups above fit almost any task.
+
+## The rules
+
+1. **The timer is the interview clock.** It has no pause. When the time is up, stop, even in the middle of a line, and note where you are.
+2. **No walkthrough and no reference solution before the end.** The PostgreSQL and Python documentation is allowed, as in most interviews. Other pages of this site are not.
+3. **Say everything out loud**: the restatement, each question, the plan, each step and the check. If you are silent for more than 30 seconds, say what you are thinking about.
+4. **Follow the [protocol](/start/interview-protocol/)**: the answers as comments at the top of the editor, then the plan, then code in small steps.
+5. **Press Check only after your own check**, at the moment you would say "done" to an interviewer. For SQL, Check also runs your query on hidden edge-case data, so a fail there is a case you did not think of.
+6. **No AI**, unless you are preparing for a round that allows it. Then practise exactly that: read and check every line, as in [If AI is allowed](/start/interview-protocol/#if-ai-is-allowed).
+
+## After the mock: review it
+
+Go through the list right after the mock, with the recording or the friend's notes, before you open the walkthrough. Tick each line you can answer with yes. The end of a mock shows the same list.
+
+<MockInterview review />
+
+Then open the walkthrough and compare it with your solution. Write down one thing to do differently next time, and add the task to your list to solve again in three days.
+
+<Aside type="note" title="In the interview">
+A round that goes badly can still be saved in the middle. Stop typing and say: "Let me step back and re-read what we agreed." Read your comment block, find the last step that worked, and go on from there. Practise this sentence in a mock, so it is ready when you need it.
+</Aside>
+
+## Related topics
+
+- [Interview protocol](/start/interview-protocol/): the steps the review checklist follows.
+- [Think aloud](/start/think-aloud/): the phrases to say during the mock.
+- [Questions to ask](/start/questions-to-ask/): end a full mock with your two questions.
+- [Study plan](/start/study-plan/): where the mocks fit in each plan.

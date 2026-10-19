@@ -1,0 +1,20 @@
+-- Q09. Running revenue and 7-day average per merchant
+-- Level: medium. Target time: 15 min.
+--
+-- TASK
+--   For every merchant and every day from 2026-09-01 to 2026-09-29, show the net revenue of that day, the running total since the start of the month, and the average of the last 7 days.
+--
+-- ASK FIRST (say the question out loud, then read the answer):
+--   Q: Days without revenue?
+--   A: Must appear with 0 and count in the average.
+--   Q: 7-day average of what window?
+--   A: The current day and the 6 days before it. For the first days of the month, average over the days that exist (no August data). Round to 2 decimals.
+--   Q: Net revenue?
+--   A: SUM(revenue_usd) by the day of start_time, test purchases excluded.
+--
+-- OUTPUT COLUMNS: merchant_id, day (DATE), net_usd, running_usd, avg_7d_usd
+-- ORDER BY: merchant_id, day
+--
+-- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q09.sql   Check: pytest -k q09
+
+-- your query below

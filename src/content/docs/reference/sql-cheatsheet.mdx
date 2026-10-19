@@ -1,0 +1,237 @@
+---
+title: SQL cheat sheet
+description: PostgreSQL on one page for live coding. Order of execution, seven questions for any task, task words mapped to tools, the checks before "done", and the syntax.
+sidebar:
+  order: 2
+---
+import { Aside } from '@astrojs/starlight/components';
+
+The first half is a method to keep in your head: the order in which SQL runs, seven questions that turn a task text into a query, and the checks before you say "done". The second half is syntax by topic (dates, aggregation, joins, windows, NULL) to look up when you need it. Find each syntax item once in the PostgreSQL documentation, so that in the interview you know where it lives.
+
+<Aside type="tip" title="TL;DR">
+- **FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT → ORDER BY → LIMIT.** This is why `WHERE` cannot see aliases or window functions.
+- Start from **one row of the result**. It decides the `GROUP BY`, the `FROM` table and whether you need a `LEFT JOIN`.
+- Before "done", check four things: rows multiplied by a join, a filter on the right side of a `LEFT JOIN`, half-open dates with a fixed "today", empty sums and integer division.
+- Write date literals with a type (`TIMESTAMP '2026-09-01'`) and keep the end of every range open.
+- Write the skeleton query below from memory, run it, and compare with the output on this page.
+</Aside>
+
+## Order of execution
+
+**FROM → JOIN → WHERE → GROUP BY → HAVING → SELECT (window functions are computed here) → ORDER BY → LIMIT**
+
+| You want to… | What happens | Do this instead |
+|---|---|---|
+| Filter by a `SELECT` alias in `WHERE` | `column "…" does not exist`: `WHERE` runs first | Repeat the expression, or compute it in a CTE and filter outside |
+| Use an alias in `HAVING` | The same error in PostgreSQL | Write the aggregate: `HAVING COUNT(*) > 1000` |
+| Filter by a window function | `window functions are not allowed in WHERE` | Compute it in a CTE, then `WHERE rn = 1` outside |
+| Sort by an alias | Works: `ORDER BY` runs after `SELECT` | `ORDER BY revenue DESC, m.id` |
+| Show a column that is not grouped | `must appear in the GROUP BY clause` | Add it to `GROUP BY` or wrap it in an aggregate |
+
+`GROUP BY 1, 2` and `GROUP BY` an output alias both work in PostgreSQL.
+
+## Seven questions for any task
+
+Ask them in this order. Most wrong queries skip the first one.
+
+1. **What is one row of the result?** A row of a table: a plain `SELECT … WHERE`. A group (a merchant, a month): `GROUP BY` that group.
+2. **Is everything in one table?** If not, `JOIN` by the key: a transaction → `products` → `merchants`.
+3. **Do I need every X, even without data?** Then `FROM x LEFT JOIN …` and `COALESCE(…, 0)`.
+4. **Do I need a CTE, and which one?** If a property comes from the rows of a group and is then counted one level up ("how many advances are still open"), build a chain: `GROUP BY` the advance, then `GROUP BY` the merchant from that CTE. If the data comes from two different tables, reduce each one to one row per key, then join.
+5. **Do I need a row plus something about its group or its neighbour?** That is a window. `GROUP BY` collapses rows into one; a window keeps every row and adds a column.
+6. **How should it look?** `ORDER BY` with an `id` for ties, `ROUND` at the very end.
+7. **How do I check it?** The number of rows, one row by hand, and every agreed answer found in the code.
+
+## Word in the task → tool
+
+| Words in the task | Tool |
+|---|---|
+| *per X, by X* | `GROUP BY x` |
+| *for every X, including zero* | `FROM x LEFT JOIN …` + `COALESCE` |
+| *never, without, no …* | `NOT EXISTS` or `LEFT JOIN … WHERE b.id IS NULL` |
+| *how many of them are …* (several counters) | `COUNT(*) FILTER (WHERE …)` |
+| *share of total* | `v / SUM(v) OVER ()` |
+| *share within X* | `v / SUM(v) OVER (PARTITION BY x)` |
+| *top N per X, latest, first, dedupe* | `ROW_NUMBER() OVER (PARTITION BY x ORDER BY … DESC, id)`, then `WHERE rn = 1` |
+| *keep ties* | `RANK()` |
+| *previous, change vs last month* | `LAG(v) OVER (PARTITION BY x ORDER BY t)` |
+| *running total, cumulative* | `SUM(v) OVER (PARTITION BY x ORDER BY t)` |
+| *every day or month, even empty* | `generate_series` + `LEFT JOIN` |
+| *label, status, bucket* | `CASE WHEN … THEN … ELSE … END` |
+| *sales and refunds as one stream* | `UNION ALL` (not `UNION`) |
+| *compare two sources, missing on either side* | `FULL OUTER JOIN` + `COALESCE` of the keys |
+
+## Before you say "done"
+
+- **Many rows per key on both sides of a `JOIN`** multiply the rows. Reduce each side in its own CTE first.
+- **A filter on the right table of a `LEFT JOIN`** belongs in `ON` or in a CTE. In `WHERE` it turns the `LEFT JOIN` into an inner join.
+- **`GROUP BY` or `PARTITION BY` with the same key as the previous step** does nothing: every group has one row.
+- **Dates are half-open:** `>= '2026-08-01' AND < '2026-09-01'`. "Today" is a fixed date, not `NOW()`.
+- **A flow** (revenue for a period) has a date filter. **A balance** (what a merchant owes, an account balance) is computed over all time.
+- **`SUM` of no rows is `NULL`:** wrap it in `COALESCE`. An integer divided by an integer is an integer (`7 / 2 = 3`); use `NULLIF(b, 0)` for the divisor.
+- **`DESC` applies to one column:** `ORDER BY paid_at DESC, payout_id DESC`.
+
+## The skeleton to write from memory
+
+August revenue per merchant, every merchant included, with the share of the total. Write it in an empty editor without looking, run it, then compare.
+
+```sql
+WITH sales AS (                              -- 1. filter, then reduce to the key
+  SELECT p.merchant_id, SUM(t.revenue_usd) AS revenue
+  FROM transactions t
+  JOIN products p ON p.id = t.product_id
+  WHERE NOT t.is_test
+    AND t.start_time >= TIMESTAMP '2026-08-01'
+    AND t.start_time <  TIMESTAMP '2026-09-01'
+  GROUP BY p.merchant_id
+)
+SELECT m.id AS merchant_id,
+       COALESCE(s.revenue, 0) AS revenue,                                 -- 2. every X
+       ROUND(100.0 * s.revenue / SUM(s.revenue) OVER (), 1) AS share_pct  -- 3. window
+FROM merchants m
+LEFT JOIN sales s ON s.merchant_id = m.id
+ORDER BY revenue DESC, m.id;
+```
+
+12 rows; the first three:
+
+| merchant_id | revenue | share_pct |
+|---|---|---|
+| mer_06 | 1299.52 | 18.3 |
+| mer_12 | 902.36 | 12.7 |
+| mer_04 | 885.53 | 12.5 |
+
+**Why `OVER ()` and not `PARTITION BY`.** A window works on the rows that are left after `JOIN`, `WHERE` and `GROUP BY`. Here each merchant has one row, so `OVER (PARTITION BY m.id)` would give every merchant 100%. "Share of the total" means one group for all rows, and that is `OVER ()`. `PARTITION BY` is for several rows per group: one row per product, and the share within its merchant.
+
+```sql
+SUM(revenue) OVER (PARTITION BY merchant_id)   -- the share of each product inside its merchant
+```
+
+For `mer_02` in August, with one row per product:
+
+| product_id | revenue | share_in_merchant_pct |
+|---|---|---|
+| prd_16 | 362.68 | 45.2 |
+| prd_02 | 261.85 | 32.6 |
+| prd_13 | 177.83 | 22.2 |
+
+## Dates and times
+
+```sql
+TIMESTAMP '2026-09-01'                       -- a typed literal
+ts::date  or  CAST(ts AS DATE)               -- the date of a timestamp
+date_trunc('month', ts)                      -- start of the month, still a timestamp
+ts + INTERVAL '30 days'                      -- a shift; also '1 month', '1 week'
+date_a - date_b                              -- whole days (DATE - DATE is an integer)
+EXTRACT(DOW FROM ts)                         -- day of the week, 0 = Sunday
+EXTRACT(EPOCH FROM ts2 - ts1)                -- seconds between two timestamps
+generate_series(TIMESTAMP '2026-09-01', TIMESTAMP '2026-09-30', INTERVAL '1 day') AS g(d)
+```
+
+- **Type the literal.** A quoted string has no type at first and takes the type of its neighbour. Next to a column it works: `start_time >= '2026-08-01'`. Next to an interval it does not: `'2026-09-30' - INTERVAL '30 days'` fails with `invalid input syntax for type interval`, while `TIMESTAMP '2026-09-30' - INTERVAL '30 days'` gives `2026-08-31 00:00:00`. With plain strings, `generate_series` returns `timestamp with time zone`; with `TIMESTAMP` literals it returns a plain `timestamp`, like the columns.
+- **Half-open interval:** `ts >= '2026-09-01' AND ts < '2026-10-01'`. `BETWEEN '2026-09-01' AND '2026-09-30'` loses all of 30 September after 00:00.
+- **A month as a column:** `CAST(date_trunc('month', ts) AS DATE)`. `date_trunc` always returns a timestamp, and `EXTRACT(MONTH …)` merges the years.
+- **Active at moment m:** `start_time <= m AND end_time > m`.
+- **Two periods `[a, b)` and `[c, d)` overlap** when `a < d AND c < b`.
+- **Days without data:** a calendar from `generate_series`, then `LEFT JOIN`.
+- **Time zones.** Ask which time zone defines "a day". A `TIMESTAMP` column that stores UTC needs two steps; a `timestamptz` column needs one. One step on a `TIMESTAMP` shifts the wrong way:
+
+```sql
+SELECT TIMESTAMP '2026-09-01 02:00' AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York' AS two_steps,
+       TIMESTAMP '2026-09-01 02:00' AT TIME ZONE 'America/New_York' AS one_step;
+```
+
+| two_steps | one_step |
+|---|---|
+| 2026-08-31 22:00:00 | 2026-09-01 06:00:00+00 |
+
+## Aggregation
+
+```sql
+COUNT(*)                                     -- all rows
+COUNT(col)                                   -- rows where col IS NOT NULL (after LEFT JOIN: matches only)
+COUNT(DISTINCT customer_id)                  -- different values
+COUNT(*) FILTER (WHERE is_trial)             -- a conditional count (PostgreSQL)
+SUM(CASE WHEN … THEN amount ELSE 0 END)      -- the same, portable
+COALESCE(SUM(x), 0)                          -- zero instead of NULL
+```
+
+- **Integer division:** in PostgreSQL `3 / 4 = 0`. Write `1.0 * a / b` or `a::numeric / b`, and `NULLIF(b, 0)` against division by zero.
+- **`AVG` and `ELSE 0`:** `AVG(CASE WHEN … THEN x END)` skips the other rows, because `NULL` does not count. `ELSE 0` adds zeros and lowers the average. For a rate, `ELSE 0` is exactly what you want: `AVG(CASE WHEN … THEN 1.0 ELSE 0 END)`.
+- **`ROUND(x, 2)`** exists for `numeric` only. For `double precision`, cast first: `ROUND(x::numeric, 2)`.
+- **`WHERE` filters rows before grouping, `HAVING` filters groups after it.**
+- **Duplicates:** `COUNT(DISTINCT id)` only removes repeats inside its own group. If a copy can fall into another group (another type, another day), number the copies first with `ROW_NUMBER() OVER (PARTITION BY id ORDER BY …)`, keep `rn = 1`, then group.
+- **Sorting:** always add a second key for ties, `ORDER BY net_usd DESC, product_id`. Without it, the order and the `LIMIT` are random.
+
+## Joins
+
+- **`LEFT JOIN t ON … AND t.flag`:** a condition on the right table goes in `ON`. In `WHERE`, rows with `NULL` on the right are dropped and the join becomes inner.
+- **Row multiplication:** a one-to-many join followed by `SUM` multiplies the sum. Aggregate in a CTE first, then join.
+- **A plain `JOIN` or a CTE?** A plain join when you attach one row from the right to each row (a transaction → its product → its merchant). A CTE when you must aggregate first (or the rows multiply), when the next step filters by an aggregate or a window, or when there are two or more steps and names make them easier to read.
+- **Reconciliation of two sources:** `FULL OUTER JOIN` and `COALESCE(a.key, b.key)`.
+- **Anti-join:** `LEFT JOIN … WHERE b.id IS NULL` or `NOT EXISTS (…)`. `NOT IN` with a `NULL` in the subquery returns nothing.
+
+### Stack rows: UNION ALL
+
+- Two sets of rows with the same columns, one under the other: sales with `+` and refunds with `−` in one stream, or events from two tables.
+- **`UNION ALL`, not `UNION`.** `UNION` removes equal rows: two payments of 9.99 on the same day become one, and the total drops.
+- Columns match by position. Their number and types must agree; the names come from the first `SELECT`.
+
+## Window functions
+
+The first two lines are what most tasks need. The rest is for reference.
+
+```sql
+100.0 * x / SUM(x) OVER ()                                            -- share of the total
+ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY start_time DESC) -- latest row: WHERE rn = 1 outside
+DISTINCT ON (customer_id) … ORDER BY customer_id, start_time DESC     -- the same in PostgreSQL
+LAG(end_time) OVER (PARTITION BY customer_id ORDER BY start_time)     -- the previous row
+SUM(amount) OVER (PARTITION BY merchant_id ORDER BY day)              -- running total
+AVG(x) OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)   -- moving average over 7 rows
+RANK() / DENSE_RANK()                                                 -- equal values share a place
+```
+
+- You cannot filter by a window function in the same `SELECT`. Wrap the query in a CTE, then `WHERE rn = 1`.
+- **The default frame.** With `ORDER BY` in the window, the frame is `RANGE … CURRENT ROW`: rows with equal `ORDER BY` values are added together. For an exact number of rows, use `ROWS`:
+
+| day | amount | default frame | ROWS frame |
+|---|---|---|---|
+| 2026-09-01 | 10 | 10 | 10 |
+| 2026-09-02 | 5 | 22 | 15 |
+| 2026-09-02 | 7 | 22 | 22 |
+| 2026-09-03 | 1 | 23 | 23 |
+
+- A moving "last 7 days" with `ROWS` is right only if every day is present as one row. Build the calendar first.
+
+## NULL
+
+- **`NULL = NULL` is `NULL`, not true.** Test with `IS NULL`, or `IS DISTINCT FROM` for "not equal, counting NULL".
+- **`NOT (x = 1 AND …)`** is `NULL` when `x` is `NULL`, and the row disappears from `WHERE`. Protect it with `COALESCE(x = 1, false)` or `x IS DISTINCT FROM 1`. Another way: compute a status in a subquery, then filter `WHERE status <> 'ok'`.
+- **`SUM` over an empty set is `NULL`, not 0.** So is `SUM(x) FILTER (WHERE …)` for a group without matches; `COUNT` returns 0.
+- **`NOT IN` with a `NULL` in the list** returns no rows. Use `NOT EXISTS`.
+
+## Money and idempotency, for the discussion
+
+- **Duplicate webhooks:** `UNIQUE (event_id)` plus `INSERT … ON CONFLICT (event_id) DO NOTHING`.
+- **A job queue with several workers:** `SELECT … FOR UPDATE SKIP LOCKED`.
+- **Money:** `NUMERIC(12,2)`, never `float`.
+
+<Aside type="note" title="In the interview">
+Give the plan in one sentence before you type: *"First I'll reduce each table to one row per merchant, then join both to the merchants table, then add the share with a window."* When it runs, pick the top merchant and check its number with a small separate query: *"Let me check mer_06 on its own before I trust the join."* If the talk moves to scale, name an index and how you would confirm it: *"An index on start_time could help; I'd look at EXPLAIN ANALYZE to see if it's used."*
+</Aside>
+
+## Further reading
+
+- [PostgreSQL: SELECT](https://www.postgresql.org/docs/current/sql-select.html) — every clause, in the order the database processes them.
+- [PostgreSQL: date/time functions and operators](https://www.postgresql.org/docs/current/functions-datetime.html) — `date_trunc`, `EXTRACT`, `AT TIME ZONE`, intervals.
+- [PostgreSQL: aggregate functions](https://www.postgresql.org/docs/current/functions-aggregate.html) and [the FILTER clause](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-AGGREGATES).
+- [PostgreSQL: window functions](https://www.postgresql.org/docs/current/functions-window.html) and [window function calls](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — frames, `ROWS` and `RANGE`.
+- [PostgreSQL: INSERT … ON CONFLICT](https://www.postgresql.org/docs/current/sql-insert.html#SQL-ON-CONFLICT).
+
+## Related topics
+
+- [Recipes for a sheet of paper](/reference/recipes/) — the same ideas, one line each.
+- [Filters and dates](/sql/filters-and-dates/) — half-open intervals, typed literals and "today", with drills.
+- [Row multiplication](/sql-patterns/row-multiplication/) — the trap behind most wrong sums.
+- [Top N per group](/sql-patterns/top-n-per-group/) — `ROW_NUMBER`, `RANK` and `DISTINCT ON` in practice.
+- [Common mistakes](/reference/common-mistakes/) — what goes wrong when these checks are skipped.
