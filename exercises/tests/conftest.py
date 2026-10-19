@@ -4,7 +4,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-USE_SOLUTIONS = os.environ.get("SOLUTIONS") == "1"   # SOLUTIONS=1 pytest  -> checks the reference solutions
+USE_SOLUTIONS = os.environ.get("SOLUTIONS") == "1"   # SOLUTIONS=1 uv run pytest  -> checks the reference solutions
 TODO_MARK = 'raise NotImplementedError("your code")'
 DEBUG_MARK = "START: delete this line to run the tests"
 

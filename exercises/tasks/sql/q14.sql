@@ -21,6 +21,6 @@
 -- OUTPUT COLUMNS: merchant_id, outstanding_usd, open_advances, oldest_open_advance_on (DATE)
 -- ORDER BY: outstanding_usd DESC, merchant_id
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q14.sql   Check: pytest -k q14
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q14.sql   Check: uv run pytest -k q14
 
 -- your query below

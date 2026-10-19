@@ -15,6 +15,6 @@
 -- OUTPUT COLUMNS: merchant_id, month (DATE, first day of month), net_usd
 -- ORDER BY: merchant_id, month
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q05.sql   Check: pytest -k q05
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q05.sql   Check: uv run pytest -k q05
 
 -- your query below

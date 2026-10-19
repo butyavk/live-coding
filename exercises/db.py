@@ -1,9 +1,9 @@
 """Practice database: data/csv loaded into an in-memory DuckDB (PostgreSQL-like SQL).
 
-    python db.py tasks/sql/q01.sql             # run every query in the file and print each result
-    python db.py tasks/sql/q01.sql --line 25   # run only the query on line 25
-    python db.py scratch.sql --watch           # re-run the file every time you save it (Ctrl+C to stop)
-    python db.py                               # interactive: end a query with ;  \\d = tables, \\d name = columns, \\q = exit
+    uv run db.py tasks/sql/q01.sql             # run every query in the file and print each result
+    uv run db.py tasks/sql/q01.sql --line 25   # run only the query on line 25
+    uv run db.py scratch.sql --watch           # re-run the file every time you save it (Ctrl+C to stop)
+    uv run db.py                               # interactive: end a query with ;  \\d = tables, \\d name = columns, \\q = exit
 
 VS Code / Cursor (.vscode/tasks.json): Cmd+Shift+B runs the open .sql file.
 Every run starts from a fresh copy of the data, so CREATE TEMP TABLE and friends are safe.

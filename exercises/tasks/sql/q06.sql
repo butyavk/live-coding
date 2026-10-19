@@ -19,6 +19,6 @@
 -- OUTPUT COLUMNS: customer_id, product_id, lapsed_on (DATE), returned_on (DATE), gap_days
 -- ORDER BY: returned_on, customer_id, product_id
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q06.sql   Check: pytest -k q06
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q06.sql   Check: uv run pytest -k q06
 
 -- your query below

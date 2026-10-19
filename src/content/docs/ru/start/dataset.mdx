@@ -214,7 +214,7 @@ ORDER BY t.channel;
 
 ## Тренировка без сети
 
-В [папке `exercises/`](https://github.com/butyavk/live-coding/tree/main/exercises) репозитория лежат те же данные в CSV, каждая задача как на интервью в виде файла, проверки на pytest и эталонные решения. SQL выполняется на DuckDB, который понимает синтаксис PostgreSQL, нужный задачам; Python — на вашем собственном интерпретаторе. Установите `duckdb` и `pytest`, затем запустите `python db.py tasks/sql/q01.sql`, чтобы выполнить запрос, и `pytest -k q01`, чтобы его проверить. Подробности — в README этой папки.
+В [папке `exercises/`](https://github.com/butyavk/live-coding/tree/main/exercises) репозитория лежат те же данные в CSV, каждая задача как на интервью в виде файла, проверки на pytest и эталонные решения. SQL выполняется на DuckDB, который понимает синтаксис PostgreSQL, нужный задачам; Python запускается локально через [uv](https://docs.astral.sh/uv/): он сам ставит Python, DuckDB и pytest. Запустите `uv run db.py tasks/sql/q01.sql`, чтобы выполнить запрос, и `uv run pytest -k q01`, чтобы его проверить. Подробности — в README этой папки.
 
 <Aside type="note" title="На интервью">
 Превратите колонки новой схемы в вопросы до того, как писать запрос. На этих данных четыре вопроса закрывают большую часть ловушек: "Do test purchases count?", "Is promo access a sale?", "What does NULL in refunded_at mean?" и "Which amount is revenue: charged or net of refunds?"

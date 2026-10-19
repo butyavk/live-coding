@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: product_id, active_subscriptions
 -- ORDER BY: active_subscriptions DESC, product_id
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q03.sql   Check: pytest -k q03
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q03.sql   Check: uv run pytest -k q03
 
 -- your query below

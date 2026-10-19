@@ -21,6 +21,6 @@
 -- OUTPUT COLUMNS: advance_id, merchant_id, issue
 -- ORDER BY: advance_id, issue
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q13.sql   Check: pytest -k q13
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q13.sql   Check: uv run pytest -k q13
 
 -- your query below

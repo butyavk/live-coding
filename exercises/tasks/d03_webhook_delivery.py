@@ -17,7 +17,7 @@ What deliver_all SHOULD do (the tests check this):
 
 ASK FIRST: Who owns seen?  A: The caller. If it is not passed, every call starts with an empty set.
 
-HOW TO PRACTISE: delete the START line, run `pytest -k d03`, fix one bug at a time, say each one out loud.
+HOW TO PRACTISE: delete the START line, run `uv run pytest -k d03`, fix one bug at a time, say each one out loud.
 """
 import time
 

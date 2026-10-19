@@ -1,0 +1,12 @@
+[project]
+name = "live-coding-exercises"
+version = "1.0.0"
+description = "Offline practice for Live Coding Map: the dataset, interview tasks, pytest checks and reference solutions."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb==1.5.6",
+    "pytest>=8",
+]
+
+[tool.uv]
+package = false

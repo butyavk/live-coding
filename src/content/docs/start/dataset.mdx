@@ -214,7 +214,7 @@ The expected output is `[('mer_01', 'Pocket Quest'), ('mer_02', 'Lumen Labs'), (
 
 ## Practise offline
 
-The [`exercises/` folder](https://github.com/butyavk/live-coding/tree/main/exercises) in the repository has the same data as CSV files, every interview task as a file, pytest checks and the reference solutions. SQL runs on DuckDB, which accepts the PostgreSQL syntax the tasks use; Python runs on your own interpreter. Install `duckdb` and `pytest`, then run `python db.py tasks/sql/q01.sql` to execute a query and `pytest -k q01` to check it. The folder's README has the details.
+The [`exercises/` folder](https://github.com/butyavk/live-coding/tree/main/exercises) in the repository has the same data as CSV files, every interview task as a file, pytest checks and the reference solutions. SQL runs on DuckDB, which accepts the PostgreSQL syntax the tasks use; Python runs locally through [uv](https://docs.astral.sh/uv/), which installs Python, DuckDB and pytest by itself. Run `uv run db.py tasks/sql/q01.sql` to execute a query and `uv run pytest -k q01` to check it. The folder's README has the details.
 
 <Aside type="note" title="In the interview">
 Turn the columns of a new schema into questions before you write a query. On this data, four questions cover most of the traps: "Do test purchases count?", "Is promo access a sale?", "What does NULL in refunded_at mean?" and "Which amount is revenue: charged or net of refunds?"

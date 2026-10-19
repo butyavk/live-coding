@@ -28,8 +28,8 @@ ASK FIRST: Can I change split_payout?  A: No. It is correct: only add tests. If 
                cases you can work out by hand, and the sum for more cases.
            How many tests do you expect?  A: Not many: each test should catch something the others miss.
 
-HOW TO PRACTISE: replace test_first with your tests and run `pytest -k p14`. To run only your own tests:
-`pytest tasks/p14_write_tests.py`.
+HOW TO PRACTISE: replace test_first with your tests and run `uv run pytest -k p14`. To run only your own tests:
+`uv run pytest tasks/p14_write_tests.py`.
 """
 from decimal import Decimal
 

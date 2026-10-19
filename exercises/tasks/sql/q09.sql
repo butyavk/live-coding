@@ -15,6 +15,6 @@
 -- OUTPUT COLUMNS: merchant_id, day (DATE), net_usd, running_usd, avg_7d_usd
 -- ORDER BY: merchant_id, day
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q09.sql   Check: pytest -k q09
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q09.sql   Check: uv run pytest -k q09
 
 -- your query below

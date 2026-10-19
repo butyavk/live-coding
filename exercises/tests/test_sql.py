@@ -1,7 +1,7 @@
 """Checks the SQL tasks: your query in tasks/sql/<id>.sql against the reference in solutions/sql/<id>.sql.
 
-    pytest -k q01            # your query for Q01 (skipped while the file has no query yet)
-    SOLUTIONS=1 pytest       # the references themselves: they run and match the PostgreSQL results
+    uv run pytest -k q01            # your query for Q01 (skipped while the file has no query yet)
+    SOLUTIONS=1 uv run pytest       # the references themselves: they run and match the PostgreSQL results
 
 Your query is the text after the line `-- your query below`. Column names do not matter; the
 values, the number of columns and the number of rows do. Numbers are compared rounded to three

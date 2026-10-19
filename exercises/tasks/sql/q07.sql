@@ -16,6 +16,6 @@
 -- OUTPUT COLUMNS: product_id, status, customers
 -- ORDER BY: product_id, status
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q07.sql   Check: pytest -k q07
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q07.sql   Check: uv run pytest -k q07
 
 -- your query below

@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: channel, transactions, gross_usd, net_usd
 -- ORDER BY: gross_usd DESC, channel
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q01.sql   Check: pytest -k q01
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q01.sql   Check: uv run pytest -k q01
 
 -- your query below

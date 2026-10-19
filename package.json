@@ -10,7 +10,7 @@
     "build": "astro build",
     "preview": "astro preview",
     "exercises": "node scripts/build-exercises.mjs",
-    "check:solutions": "cd exercises && SOLUTIONS=1 python3 -m pytest -q",
+    "check:solutions": "cd exercises && SOLUTIONS=1 uv run --locked pytest -q",
     "flashcards": "node scripts/export-flashcards.mjs",
     "check:links": "python3 scripts/check_links.py dist",
     "check:external": "node scripts/check-external-links.mjs",

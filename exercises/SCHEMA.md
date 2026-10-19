@@ -37,7 +37,7 @@ one DuckDB optimizer, filter pushdown: with it, every DuckDB from 0.10.3 to 1.5.
 correlated `EXISTS` with an equality, a `<>` and a `<` on the outer row
 (`EXISTS (SELECT 1 FROM advances b WHERE b.idempotency_key = a.idempotency_key
 AND b.advance_id <> a.advance_id AND b.created_at < a.created_at)`), which is correct SQL.
-`requirements.txt` pins the DuckDB version these files were checked with.
+`pyproject.toml` and `uv.lock` pin the DuckDB version these files were checked with.
 
 The tests compare values, not types: numbers are rounded to three decimals, and a timestamp
 exactly at midnight counts as its date, as on the site.

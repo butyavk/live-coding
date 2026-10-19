@@ -20,24 +20,27 @@ DuckDB (PostgreSQL syntax) and Python on your own interpreter, with real pytest.
 
 ## Set up
 
-Python 3.10 or newer.
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/). It brings the Python
+version from `.python-version` and the packages pinned in `uv.lock` (DuckDB and pytest), so
+there is nothing else to install.
 
 ```bash
 cd exercises
-python3 -m venv .venv && source .venv/bin/activate   # optional
-pip install -r requirements.txt                       # duckdb and pytest
+uv sync
 ```
+
+`uv run` also syncs by itself, so `uv sync` is optional.
 
 ## SQL tasks
 
 Write your query under `-- your query below` in `tasks/sql/q01.sql`, then:
 
 ```bash
-python db.py tasks/sql/q01.sql             # run every query in the file and print the results
-python db.py tasks/sql/q01.sql --line 25   # run only the query on line 25
-python db.py tasks/sql/q01.sql --watch     # run the file again on every save
-python db.py                               # interactive prompt: \d lists tables, \d name the columns, \q exits
-pytest -k q01                              # compare your result with the reference
+uv run db.py tasks/sql/q01.sql             # run every query in the file and print the results
+uv run db.py tasks/sql/q01.sql --line 25   # run only the query on line 25
+uv run db.py tasks/sql/q01.sql --watch     # run the file again on every save
+uv run db.py                               # interactive prompt: \d lists tables, \d name the columns, \q exits
+uv run pytest -k q01                       # compare your result with the reference
 ```
 
 Column names in your output do not need to match the reference: the check compares only the
@@ -55,8 +58,8 @@ under the cursor (`.vscode/tasks.json`).
 Replace `raise NotImplementedError("your code")` in `tasks/p01_ttl_cache.py` with your code, then:
 
 ```bash
-pytest -k p01          # run the checks for P01
-pytest -k p01 -x -vv   # stop at the first failure and show the full comparison
+uv run pytest -k p01          # run the checks for P01
+uv run pytest -k p01 -x -vv   # stop at the first failure and show the full comparison
 ```
 
 A task is skipped while it still has `NotImplementedError("your code")`. P05, P10 and P11 also
@@ -80,7 +83,7 @@ bug at a time. Say each bug out loud before you fix it: "The bug is …, because
 ## Check the references
 
 ```bash
-SOLUTIONS=1 pytest
+SOLUTIONS=1 uv run pytest
 ```
 
 This runs every reference solution through the same tests. For the SQL tasks it also checks

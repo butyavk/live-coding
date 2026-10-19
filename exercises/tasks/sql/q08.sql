@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: plan_id, trials, conversions, conversion_rate
 -- ORDER BY: plan_id
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q08.sql   Check: pytest -k q08
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q08.sql   Check: uv run pytest -k q08
 
 -- your query below

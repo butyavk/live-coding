@@ -97,15 +97,14 @@ SQL и Python не зависят друг от друга: этапы 2–3 и 
 
 В папке [`exercises/`](exercises/) лежат учебные данные, все задачи как на интервью в виде
 файлов, проверки на pytest и эталонные решения. SQL выполняется в DuckDB с синтаксисом
-PostgreSQL, Python — вашим интерпретатором:
+PostgreSQL. Python и пакеты ставит [uv](https://docs.astral.sh/uv/):
 
 ```bash
 cd exercises
-pip install -r requirements.txt
-python db.py tasks/sql/q01.sql    # выполнить запросы из файла задачи
-python db.py                      # интерактивная консоль SQL
-pytest -k q01                     # проверить свой ответ
-SOLUTIONS=1 pytest                # проверить эталонные решения
+uv run db.py tasks/sql/q01.sql    # выполнить запросы из файла задачи
+uv run db.py                      # интерактивная консоль SQL
+uv run pytest -k q01              # проверить свой ответ
+SOLUTIONS=1 uv run pytest         # проверить эталонные решения
 ```
 
 Подробности — в [exercises/README.md](exercises/README.md) (на английском).

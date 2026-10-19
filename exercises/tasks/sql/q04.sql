@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: day (DATE), active_subscriptions
 -- ORDER BY: day
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q04.sql   Check: pytest -k q04
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q04.sql   Check: uv run pytest -k q04
 
 -- your query below

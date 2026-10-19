@@ -19,6 +19,6 @@
 -- OUTPUT COLUMNS: product_id, active_at_start, churned, churn_rate
 -- ORDER BY: churn_rate DESC, product_id
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q10.sql   Check: pytest -k q10
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q10.sql   Check: uv run pytest -k q10
 
 -- your query below

@@ -6,8 +6,8 @@
     {
       "label": "Run SQL under the cursor",
       "type": "shell",
-      "command": "python3",
-      "args": ["db.py", "${file}", "--line", "${lineNumber}"],
+      "command": "uv",
+      "args": ["run", "db.py", "${file}", "--line", "${lineNumber}"],
       "group": { "kind": "build", "isDefault": true },
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
       "problemMatcher": []
@@ -15,16 +15,16 @@
     {
       "label": "Run the whole SQL file",
       "type": "shell",
-      "command": "python3",
-      "args": ["db.py", "${file}"],
+      "command": "uv",
+      "args": ["run", "db.py", "${file}"],
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
       "problemMatcher": []
     },
     {
       "label": "Check this task (pytest)",
       "type": "shell",
-      "command": "python3",
-      "args": ["-m", "pytest", "-q", "-k", "${fileBasenameNoExtension}"],
+      "command": "uv",
+      "args": ["run", "pytest", "-q", "-k", "${fileBasenameNoExtension}"],
       "presentation": { "reveal": "always", "panel": "dedicated", "clear": true },
       "problemMatcher": []
     }

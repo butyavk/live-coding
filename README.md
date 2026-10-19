@@ -91,16 +91,15 @@ SQL and Python are independent: stages 2–3 and stage 4 can go in parallel.
 ## Practise offline
 
 The [`exercises/`](exercises/) folder has the dataset, every interview task as a file, pytest
-checks and the reference solutions. SQL runs on DuckDB with PostgreSQL syntax, Python on your
-own interpreter:
+checks and the reference solutions. SQL runs on DuckDB with PostgreSQL syntax;
+[uv](https://docs.astral.sh/uv/) installs Python and the packages:
 
 ```bash
 cd exercises
-pip install -r requirements.txt
-python db.py tasks/sql/q01.sql    # run the queries in a task file
-python db.py                      # interactive SQL prompt
-pytest -k q01                     # check your answer
-SOLUTIONS=1 pytest                # check the reference solutions
+uv run db.py tasks/sql/q01.sql    # run the queries in a task file
+uv run db.py                      # interactive SQL prompt
+uv run pytest -k q01              # check your answer
+SOLUTIONS=1 uv run pytest         # check the reference solutions
 ```
 
 See [exercises/README.md](exercises/README.md) for the details.

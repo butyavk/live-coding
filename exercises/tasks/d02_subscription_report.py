@@ -17,7 +17,7 @@ ASK FIRST: Is a period that ends exactly at moment still active?  A: No, the end
            Which fields mark promo and refunded transactions?  A: t["channel"] == "promo";
                                                     t["refunded_at"] is a datetime or None.
 
-HOW TO PRACTISE: delete the START line, run `pytest -k d02`, read the failures, find each bug, say it
+HOW TO PRACTISE: delete the START line, run `uv run pytest -k d02`, read the failures, find each bug, say it
 out loud ("The bug is …, because …"), fix it, run again.
 """
 # START: delete this line to run the tests

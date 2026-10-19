@@ -28,13 +28,16 @@ const { sqlDrills } = await data('sql-drills.ts');
 const { pyDrills } = await data('py-drills.ts');
 const { traps } = await data('traps.ts');
 
-const python = (args, opts = {}) => {
+// Python drills need only the standard library (python3); Python tasks run their pytest tests
+// through uv, with the packages pinned in exercises/uv.lock.
+const exec = (cmd, args, opts = {}) => {
   try {
-    return { ok: true, out: execFileSync('python3', args, { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'], ...opts }) };
+    return { ok: true, out: execFileSync(cmd, args, { encoding: 'utf8', timeout: 120000, stdio: ['ignore', 'pipe', 'pipe'], ...opts }) };
   } catch (e) {
     return { ok: false, out: `${e.stdout || ''}${e.stderr || e.message}` };
   }
 };
+const python = (args, opts = {}) => exec('python3', args, opts);
 
 // ---------------------------------------------------------------- Python drill
 const pyDrill = pyDrills.find((d) => d.id === id);
@@ -57,9 +60,9 @@ const pyTask = P.pyTasks[id];
 if (pyTask) {
   const dir = mkdtempSync(join(tmpdir(), 'lc-check-'));
   try {
-    cpSync(`${root}exercises`, dir, { recursive: true, filter: (s) => !s.includes('__pycache__') });
+    cpSync(`${root}exercises`, dir, { recursive: true, filter: (s) => !/(__pycache__|\.venv|\.pytest_cache)/.test(s) });
     writeFileSync(`${dir}/tasks/${pyTask.mod}.py`, answer);
-    const r = python(['-m', 'pytest', '-q', '-p', 'no:cacheprovider', `tests/test_${pyTask.mod}.py`], { cwd: dir });
+    const r = exec('uv', ['run', '--quiet', '--locked', 'pytest', '-q', '-p', 'no:cacheprovider', `tests/test_${pyTask.mod}.py`], { cwd: dir });
     console.log(r.out.trim().split('\n').slice(-40).join('\n'));
     const skipped = /\bskipped\b/.test(r.out);
     if (skipped) console.log('Some tests were skipped: the file still has the NotImplementedError or START marker, or a database test could not run.');

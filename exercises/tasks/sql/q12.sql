@@ -20,6 +20,6 @@
 -- OUTPUT COLUMNS: merchant_id, channel, period_month (DATE), expected_usd, paid_usd, status
 -- ORDER BY: merchant_id, channel, period_month
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q12.sql   Check: pytest -k q12
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q12.sql   Check: uv run pytest -k q12
 
 -- your query below

@@ -12,8 +12,8 @@
 -- OUTPUT COLUMNS: merchant_id, merchant_name, transactions, net_usd
 -- ORDER BY: net_usd DESC, merchant_id
 --
--- HOW TO PRACTISE: delete the START line below, run `python db.py tasks/sql/d01.sql`, look at the numbers,
--- find the bugs one by one and say each one out loud before you fix it. Check: pytest -k d01
+-- HOW TO PRACTISE: delete the START line below, run `uv run db.py tasks/sql/d01.sql`, look at the numbers,
+-- find the bugs one by one and say each one out loud before you fix it. Check: uv run pytest -k d01
 -- START: delete this line to run the tests
 
 -- your query below

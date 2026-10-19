@@ -106,7 +106,7 @@ node scripts/sql.mjs "SELECT …"   # run SQL on the dataset (PGlite): every num
 node scripts/check-mdx.mjs <files>         # MDX syntax, frontmatter, links, EN/RU twin, exercise ids, for your files
 node scripts/check-sql-blocks.mjs <files>  # run every SQL block of your pages; fragments fail on purpose
 npm run exercises                 # run every reference again and rewrite src/data/generated/practice.json
-npm run check:solutions           # the reference solutions through pytest on DuckDB (needs exercises/requirements.txt)
+npm run check:solutions           # the reference solutions through pytest on DuckDB (needs uv)
 npm run check:content             # every page; also checks that every exercise is placed in both languages
 npm run build                     # also validates the skill map graph and the study plans
 npm run check:links               # internal links and anchors in dist/

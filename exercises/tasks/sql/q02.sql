@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: product_id, product_name, merchant_name, net_usd
 -- ORDER BY: net_usd DESC, product_id; LIMIT 5
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q02.sql   Check: pytest -k q02
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q02.sql   Check: uv run pytest -k q02
 
 -- your query below

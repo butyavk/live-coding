@@ -17,6 +17,6 @@
 -- OUTPUT COLUMNS: day (DATE), type, events, duplicates
 -- ORDER BY: day, type
 --
--- Tables: SCHEMA.md.  Run: python db.py tasks/sql/q11.sql   Check: pytest -k q11
+-- Tables: SCHEMA.md.  Run: uv run db.py tasks/sql/q11.sql   Check: uv run pytest -k q11
 
 -- your query below
