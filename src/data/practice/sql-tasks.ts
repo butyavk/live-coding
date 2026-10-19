@@ -13,6 +13,12 @@ export interface SqlTask {
   notes: string[];
   example?: string;
   say: string;
+  /**
+   * The reference builds its own table but loads it from the dataset (Q15), so Check runs it on the
+   * hidden edge-case data too. Without it, a reference with CREATE, INSERT, UPDATE … is checked on
+   * the practice data only.
+   */
+  edge?: boolean;
 }
 
 export const sqlTasks: SqlTask[] = [
@@ -215,6 +221,25 @@ FROM ledger_entries
 WHERE advance_id = 'adv_0001'
 ORDER BY created_at, entry_id;`,
     say: "Index on (merchant_id, created_at); in production I would also keep the balance updated in the same transaction.",
+  },
+  {
+    id: "q15",
+    difficulty: "hard",
+    tables: ["transactions", "products"],
+    notes: [
+      "A transaction reaches its merchant through products: transactions.product_id → products.id → products.merchant_id.",
+      "A refund is not a row of its own: it is the same transaction with refunded_at set. Its sale and its refund can fall on different days, even in different months.",
+      "fee_rate is the channel's fee: 0.15 or 0.30 on a marketplace, 0.03 on the web checkout. charged_usd * (1 - fee_rate) is what the merchant keeps of one sale.",
+      "In the example, t_005659 was sold on 31 August and refunded on 17 September; t_007681 is the sale that step (4) refunds late.",
+      "Every run starts from the same data and is rolled back at the end, so CREATE TABLE and UPDATE are safe to run again and again.",
+    ],
+    example: `SELECT t.transaction_id AS id, p.merchant_id, t.channel, t.start_time, t.refunded_at, t.charged_usd, t.fee_rate
+FROM transactions t
+JOIN products p ON p.id = t.product_id
+WHERE t.transaction_id IN ('t_005659', 't_007681')
+ORDER BY t.start_time;`,
+    say: "The primary key is the grain, and the load replaces a day's rows instead of adding to them, so a retry or a late refund only means loading that day again.",
+    edge: true,
   },
   {
     id: "d01",

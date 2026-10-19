@@ -10,7 +10,7 @@ DuckDB (PostgreSQL syntax) and Python on your own interpreter, with real pytest.
 | path | what |
 | --- | --- |
 | `data/csv/` | the practice dataset: merchants, products, transactions, webhooks, channel payouts, advances, ledger ([SCHEMA.md](SCHEMA.md)) |
-| `tasks/sql/q01.sql` … `q14.sql` | SQL tasks: the task, the questions to ask first, the output columns; your query goes at the bottom |
+| `tasks/sql/q01.sql` … `q15.sql` | SQL tasks: the task, the questions to ask first, the output columns; your query goes at the bottom |
 | `tasks/sql/d01.sql` | a debug task: a broken report to fix |
 | `tasks/p01_….py` … `p14_….py` | Python tasks: the statement in the docstring, a function or class to write |
 | `tasks/d02_….py`, `d03_….py` | Python debug tasks: working code with bugs |

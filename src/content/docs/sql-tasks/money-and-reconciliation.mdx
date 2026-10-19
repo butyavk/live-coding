@@ -1,6 +1,6 @@
 ---
 title: Money and reconciliation
-description: "Four SQL tasks about money: duplicate webhooks, channel payouts against expected proceeds, advances that break the rules, and balances from a ledger."
+description: "Five SQL tasks about money: duplicate webhooks, payouts against expected proceeds, advances that break the rules, ledger balances and a daily revenue table."
 sidebar:
   order: 5
 ---
@@ -8,7 +8,7 @@ import { Aside } from '@astrojs/starlight/components';
 import Task from '~/components/practice/Task.astro';
 import Reveal from '~/components/practice/Reveal.astro';
 
-Money tasks compare two sources and expect every cent to add up: webhooks that arrive twice, payouts from the partner marketplaces against what the sales say, advances that break the rules, and what each merchant still owes. The habits: one row per real event before you count, `UNION ALL` and `FULL OUTER JOIN` for two sources, a status computed before you filter on it, and a balance as the sum of signed entries. They build on [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/), [Money and ledgers](/sql-patterns/money-and-ledgers/) and [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/); the advances program is described on the [dataset page](/start/dataset/).
+Money tasks compare two sources and expect every cent to add up: webhooks that arrive twice, payouts from the partner marketplaces against what the sales say, advances that break the rules, and what each merchant still owes. The last task builds the daily table that such reports read. The habits: one row per real event before you count, `UNION ALL` and `FULL OUTER JOIN` for two sources, a status computed before you filter on it, a balance as the sum of signed entries, and a load that replaces rows instead of adding to them. They build on [UNION ALL and reconciliation](/sql-patterns/union-and-reconciliation/), [Money and ledgers](/sql-patterns/money-and-ledgers/) and [Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/); the advances program is described on the [dataset page](/start/dataset/).
 
 <Aside type="tip" title="How to practise">
 These are the longest SQL tasks, 8 to 30 minutes. Write the plan first as SQL comments, one line per CTE, and fill them in from the top. When a number looks wrong, run that CTE alone for one merchant before you change anything else.
@@ -130,5 +130,55 @@ These are the longest SQL tasks, 8 to 30 minutes. Write the plan first as SQL co
 **Follow-up.** "How do you issue a new advance safely?" Check the debt and write the new entries in one transaction, with the merchant's row locked by `SELECT … FOR UPDATE`. Otherwise two workers can both pass the limit check at the same time (see [Database concepts](/sql-patterns/database-concepts/)).
 
 **In production.** An index on `ledger_entries (merchant_id, created_at)`. Many systems also keep the balance in its own column and update it in the same transaction as the ledger entry.
+
+</Reveal>
+
+## Q15. Daily revenue table per merchant and channel
+
+<Task id="q15" />
+
+<Reveal title="Walkthrough" try>
+
+**What it is for.** A data-modelling round: design a table for a report, fill it so that a rerun is safe, and query it. Reports then read ready totals: the rules for sales, refunds and fees live in one load, not in every report.
+
+**What to say.** Three sentences, in this order, before any code:
+
+1. The grain: *"One row per merchant, channel and UTC day. It's a fact table: four additive measures by day, merchant and channel. Merchant names stay in merchants, the dimension."*
+2. The key: *"The primary key is (day, merchant_id, channel), so the database refuses a second row for the same day, merchant and channel."*
+3. Idempotency: *"The load replaces the rows of the days it loads. A rerun gives the same table, and a late refund only means loading its day again."*
+
+**Steps.**
+
+1. `CREATE TABLE` with the grain as the primary key and money as `NUMERIC(12,2)`.
+2. The load: one list of rows from `transactions` with `UNION ALL`. Sales get the day of `start_time`; refunds get the day of `refunded_at` and a minus sign. Filter each branch to the range, then `GROUP BY day, merchant_id, channel` and `ON CONFLICT (day, merchant_id, channel) DO UPDATE SET … = EXCLUDED.…`.
+3. The same statement twice more: the same range, then only 22 September after the given `UPDATE`.
+4. The report: `GROUP BY merchant_id, channel` over the table, with `COUNT(*) FILTER (WHERE sales > 0)`.
+
+The other load is `DELETE` of the range, then `INSERT`, inside `BEGIN … COMMIT`. It also removes a row whose day lost all its activity, which an upsert never does.
+
+**Traps.**
+
+- An upsert that adds, `SET sales = daily_merchant_revenue.sales + EXCLUDED.sales`, is right for a balance ([Duplicates and idempotency](/sql-patterns/duplicates-and-idempotency/)) and wrong here: every run adds the days again. mer_01 on north_market ends with 15 sales instead of 7. A load of totals overwrites.
+- A plain `INSERT` without a key doubles every row on the second run. With the key, the second run stops with a duplicate-key error. Neither is safe to rerun.
+- `ON CONFLICT DO NOTHING` is safe to rerun, but it never corrects a row. After the late refund, mer_06 on north_market still shows 0.00 refunds instead of 79.99.
+- Refunds on the day of the sale: t_005659 was sold on 31 August and refunded on 17 September, so its refund drops out of September, and mer_01 on north_market shows 0.00 refunds instead of 39.99. A closed day would also change whenever an old sale is refunded.
+- Rows built from sales, with a `LEFT JOIN` to refunds, lose the days that have refunds and no sales: 6 of the 319 rows. Start from both lists, with `UNION ALL` or a `FULL JOIN` of the two totals.
+- A reload whose `DELETE` has no date range empties the table. After the reload of 22 September, the report has 10 rows instead of 35. Delete exactly the days you insert.
+- A sale is a paid transaction. With test purchases, mer_02 on south_market gets 22 sales instead of 21; trials add one sale to mer_01 on north_market; promo adds 3 rows.
+- Round each row to cents; `NUMERIC(12,2)` does it on insert. Without it, mer_01 on north_market sums to 63.699 instead of 63.69.
+- The range is half-open: `start_time >= '2026-09-01' AND start_time < '2026-09-30'`. `CAST(start_time AS DATE) BETWEEN '2026-09-01' AND '2026-09-30'` also takes 30 September. No practice sale falls on that day, so it looks right. Check also runs your script on hidden edge-case data, which has sales during 30 September, and this version fails there.
+- In the report, a missing row means 0. `AVG(net_usd)` over the table is the average of active days: 10.62 for mer_01 on north_market (6 rows), against 2.20 per calendar day (63.69 over 29 days).
+
+**Check.** 35 rows. The table holds 319 rows, and 6 of them have refunds and no sales. The late refund moves mer_06 on north_market on 22 September from 22.08 to −45.91 net. The first report row is mer_01, north_market: 5 days with sales, 7 sales, 114.93 gross, 39.99 refunds, 63.69 net.
+
+**Follow-up.** Each question has a short answer:
+
+- "A refund arrives three days late. What do you do?" — Load its day again. A refund counts on its own day, so no other day changes. For late data in general, reload the last few days every night, and run a backfill for older days: the same load with an older range.
+- "Do you reload all of September every night?" — No: an incremental load with a watermark. Store the newest change time you have loaded, and next time load only the days that changed after it. That needs a column such as `updated_at`, which `transactions` does not have: a refund changes `refunded_at` in place. Without it, reload a window of days.
+- "The table grows for years. How do you store it?" — Partition by day or month (`PARTITION BY RANGE (day)`). A reload replaces whole partitions, a monthly report reads one, and old ones move to cheap storage.
+- "Plan prices change. How do you report the price at the time of sale?" — A slowly changing dimension, type 2: `plan_prices (plan_id, price_usd, valid_from, valid_to)`, with a new row for each change. The join takes the row valid at `start_time`. Here `charged_usd` already holds what was paid, so this table does not need it.
+- "What changes in a warehouse?" — The load becomes `MERGE INTO … USING (…) ON … WHEN MATCHED THEN UPDATE … WHEN NOT MATCHED THEN INSERT …`, or, where the warehouse has it, `INSERT OVERWRITE` of the day's partition. PostgreSQL has `MERGE` too, since version 15, so it also works in this editor.
+
+**In production.** A key that starts with `day` serves the reload and the date range of the report; a merchant's dashboard wants an index on `(merchant_id, day)`. The same table could feed Q12, but agree first where to round: summed over a month, the rounded days differ from Q12's monthly rounding in 182 of the 192 merchant-channel months of January–August, by at most 0.07. A table that feeds other sums often keeps four decimals and rounds in the report.
 
 </Reveal>

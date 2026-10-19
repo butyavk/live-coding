@@ -174,8 +174,13 @@ is checked on the practice data only), and the hidden rows are never shown: the 
 only the expected number of columns or rows, or says that values differ. So a page never says "the data cannot show this": write "Check also runs your query on
 hidden edge-case data, so a missing calendar fails there." An exercise whose reference builds
 its own tables (`CREATE`, `INSERT`, `UPDATE`, `DELETE`, `ALTER`, `DROP`, `EXPLAIN`) is checked
-on the practice data only. Offline, `exercises/tests/test_sql.py` does the same with DuckDB, and
-`node scripts/check-answer.mjs <id> <file>` checks one answer the way the site does.
+on the practice data only, unless its entry in `sql-tasks.ts` says `edge: true`: Q15 loads its
+own table from the dataset, so its whole script runs on the hidden data too. Every run is one
+transaction that is rolled back; a script's own `BEGIN … COMMIT` runs as a savepoint inside it
+(`inOneTransaction` in `pg-setup.js`), so a reload written as `DELETE` + `INSERT` in a
+transaction works and leaves nothing behind. Offline, `exercises/tests/test_sql.py` does the
+same with DuckDB, and `node scripts/check-answer.mjs <id> <file>` checks one answer the way the
+site does.
 
 **How Check compares SQL.** Column names are not checked: the values, the number of columns and
 rows (and the order, when it is checked) are. A task whose column names differ from the spec

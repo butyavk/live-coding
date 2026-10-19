@@ -2,7 +2,7 @@
 // Messages: { type: "run", id, sql, schema? } (schema "edge" runs on the hidden edge-case copy),
 // { type: "query", id, sql, params } for Python's db.py. Every run is rolled back.
 import { PGlite } from "./pglite/index.js";
-import { loadData, PARSERS } from "./pg-setup.js";
+import { inOneTransaction, loadData, PARSERS } from "./pg-setup.js";
 
 const base = new URL(".", import.meta.url);
 const file = (p) => new URL(p, base);
@@ -40,10 +40,12 @@ async function run(id, sql, schema) {
   const t0 = performance.now();
   let results = [];
   let error = null;
+  // The script's own BEGIN … COMMIT becomes a savepoint, so the run stays one transaction.
+  const script = inOneTransaction(sql);
   try {
     await db.exec("BEGIN");
     if (schema === "edge") await db.exec("SET LOCAL search_path TO edge");
-    const res = await db.exec(sql, { rowMode: "array" });
+    const res = await db.exec(script.sql, { rowMode: "array" });
     results = res.map((r) => ({
       fields: (r.fields || []).map((f) => ({ name: f.name, typeId: f.dataTypeID })),
       rows: r.rows || [],
@@ -52,7 +54,7 @@ async function run(id, sql, schema) {
   } catch (e) {
     error = {
       message: String(e && e.message || e),
-      position: e && e.position ? Number(e.position) : null,
+      position: e && e.position ? script.pos(Number(e.position)) : null,
       hint: e && e.hint || null,
       detail: e && e.detail || null,
       code: e && e.code || null,

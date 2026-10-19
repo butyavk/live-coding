@@ -31,6 +31,11 @@ functions and `::` casts. Differences to keep in mind:
   `ROUND(AVG(x)::numeric, 2)` or `ROUND(1.0 * a / b, 2)` is the portable form.
 - `AVG` of a `DECIMAL` column is a `DOUBLE` in DuckDB and a `numeric` in PostgreSQL, so a
   rounded average can differ by one cent (8.325 → 8.32 here, 8.33 in PostgreSQL).
+- `INSERT … ON CONFLICT (key columns) DO UPDATE SET c = EXCLUDED.c` works in both (Q15).
+  DuckDB does not accept `ON CONFLICT ON CONSTRAINT name`: name the key columns instead.
+- When one `INSERT … ON CONFLICT DO UPDATE` proposes the same key twice (a `GROUP BY` finer than
+  the key), PostgreSQL stops with `ON CONFLICT DO UPDATE command cannot affect row a second time`.
+  DuckDB keeps the first of those rows and drops the others without an error.
 
 `db.py` switches DuckDB to integer division (`7 / 2 = 3`), as in PostgreSQL. It also turns off
 one DuckDB optimizer, filter pushdown: with it, every DuckDB from 0.10.3 to 1.5.6 returns no rows for a
@@ -142,7 +147,7 @@ positive, a repayment is negative), `created_at`. What a merchant owes right now
 | gross revenue | what customers paid | `SUM(charged_usd)` |
 | net revenue | revenue after refunds | `SUM(revenue_usd)` |
 | proceeds of one sale | what the merchant keeps after the channel's fee; 0 once refunded | `revenue_usd * (1 - fee_rate)` |
-| proceeds of a month | what a marketplace owes a merchant for one month (Q12, Q13) | each sale adds `charged_usd * (1 - fee_rate)` in the month of `start_time`; each refund subtracts the same amount in the month of `refunded_at` |
+| proceeds of a month | what a marketplace owes a merchant for one month (Q12, Q13; Q15 applies the same rule per day) | each sale adds `charged_usd * (1 - fee_rate)` in the month of `start_time`; each refund subtracts the same amount in the month of `refunded_at` |
 | payout | a marketplace's monthly payment to a merchant | a row of `channel_payouts` |
 | advance | an early payment against a payout that has not arrived yet | a row of `advances` |
 | churn | a subscription was active at the start of the period and is not active at its end: nobody renewed it | first `start_time` <= period start < last `end_time` <= period end (Q10: `last_end <= '2026-09-01'`) |

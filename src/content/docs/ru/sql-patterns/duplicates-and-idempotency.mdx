@@ -252,4 +252,5 @@ Upsert: `ON CONFLICT (merchant_id) DO UPDATE`, новая сумма — в `EXC
 - [Группировка и подсчёт](/sql/grouping-and-counting/) — `COUNT(*)`, `COUNT(column)` и `COUNT(DISTINCT)`.
 - [Понятия баз данных](/sql-patterns/database-concepts/) — транзакции, изоляция и ограничения для разговора после задачи.
 - [Деньги и журнал проводок](/sql-patterns/money-and-ledgers/) — ключ идемпотентности, который не даст выдать второй аванс.
+- [Деньги и сверка](/sql-tasks/money-and-reconciliation/) — Q15 перезагружает дневную таблицу через upsert, который перезаписывает, поэтому повторный запуск ничего не меняет.
 - [Множества и дубли](/python/sets-and-duplicates/) — «уже видели?» на Python, через множество.

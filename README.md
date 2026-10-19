@@ -26,7 +26,7 @@ with no login, open source, in English and Russian**.
   coding, SQL tasks, Python tasks and Reference) and two About pages.
 - **Exercises on every topic page**: 36 SQL drills, 26 Python drills and 23 traps (short
   queries that look right and are not: guess the result, run it, fix it).
-- **31 interview tasks**, 15 in SQL and 16 in Python, each with a target time, the questions to
+- **32 interview tasks**, 16 in SQL and 16 in Python, each with a target time, the questions to
   ask before coding, a timer, a check against the reference, and a walkthrough with the
   follow-up question that usually comes next. Three are debug tasks: working code with bugs and
   a bug report.

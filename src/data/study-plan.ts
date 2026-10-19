@@ -218,7 +218,7 @@ export const studyPhases: StudyPhase[] = [
       },
       { id: 't-debug-sql', path: 'sql-tasks/debug-a-report/', timelines: ALL, task: { en: 'SQL: debug a broken report', ru: 'SQL: найти ошибки в отчёте' } },
       { id: 't-funnels', path: 'sql-tasks/funnels-and-churn/', timelines: ML, task: { en: 'SQL: trial conversion, churn and running revenue', ru: 'SQL: конверсия триалов, отток и нарастающая выручка' } },
-      { id: 't-money-sql', path: 'sql-tasks/money-and-reconciliation/', timelines: ML, task: { en: 'SQL: duplicates, reconciliation and balances', ru: 'SQL: дубли, сверка и остатки' } },
+      { id: 't-money-sql', path: 'sql-tasks/money-and-reconciliation/', timelines: ML, task: { en: 'SQL: duplicates, reconciliation, balances and a daily table', ru: 'SQL: дубли, сверка, остатки и дневная таблица' } },
       {
         id: 't-events',
         path: 'python-tasks/events-and-time/',

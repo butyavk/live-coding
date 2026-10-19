@@ -3,11 +3,12 @@
 // Markdown table: handy for writing pages, where every number must come from a real run.
 // Usage:  node scripts/sql.mjs "SELECT channel, COUNT(*) FROM transactions GROUP BY channel"
 //         node scripts/sql.mjs path/to/query.sql
-// Every run is wrapped in BEGIN … ROLLBACK, so CREATE TABLE and INSERT are safe.
+// Every run is wrapped in BEGIN … ROLLBACK, so CREATE TABLE and INSERT are safe (the script's own
+// BEGIN … COMMIT becomes a savepoint, as on the site).
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
-import { loadData, PARSERS } from '../src/runtime/pg-setup.js';
+import { inOneTransaction, loadData, PARSERS } from '../src/runtime/pg-setup.js';
 
 const arg = process.argv[2];
 if (!arg) {
@@ -21,7 +22,7 @@ await loadData(db, async (t) => new Blob([readFileSync(`${root}exercises/data/cs
 const cell = (v) => (v === null ? 'NULL' : String(v).replace(/\|/g, '\\|'));
 try {
   await db.exec('BEGIN');
-  const res = await db.exec(sql, { rowMode: 'array' });
+  const res = await db.exec(inOneTransaction(sql).sql, { rowMode: 'array' });
   for (const r of res) {
     if (!r.fields?.length) continue;
     console.log(`| ${r.fields.map((f) => f.name).join(' | ')} |`);

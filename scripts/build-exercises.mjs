@@ -18,7 +18,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
-import { loadData, PARSERS, normRows } from '../src/runtime/pg-setup.js';
+import { inOneTransaction, loadData, PARSERS, normRows } from '../src/runtime/pg-setup.js';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const X = `${root}exercises`;
@@ -47,7 +47,7 @@ async function runAll(sql, schema = 'public') {
   await db.exec('BEGIN');
   try {
     if (schema !== 'public') await db.exec(`SET LOCAL search_path TO ${schema}`);
-    const res = await db.exec(sql, { rowMode: 'array' });
+    const res = await db.exec(inOneTransaction(sql).sql, { rowMode: 'array' });
     const last = [...res].reverse().find((r) => r.fields && r.fields.length);
     if (!last) throw new Error('no statement returns rows');
     return { cols: last.fields.map((f) => f.name), types: last.fields.map((f) => f.dataTypeID), rows: last.rows };
@@ -60,10 +60,14 @@ const json = (v) => JSON.parse(JSON.stringify(v, (k, x) => (typeof x === 'bigint
 
 /** The fingerprint the browser compares with (lib/compare.ts edgePrint does the same). */
 export const fingerprint = (rows) => createHash('sha256').update(rows.map((r) => JSON.stringify(r)).sort().join('\n')).digest('hex');
-/** A reference that builds its own tables does not read the dataset: no edge check for it. */
+/**
+ * A reference that builds its own tables does not read the dataset: no edge check for it, unless
+ * the task loads its table from the dataset and says so (`edge: true` in sql-tasks.ts, Q15). Then
+ * the whole script, its CREATE TABLE included, runs on the edge-case data too.
+ */
 const ownTables = (sql) => /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|EXPLAIN)\b/i.test(sql.replace(/--[^\n]*/g, ''));
-async function edgeOf(sql, where) {
-  if (ownTables(sql)) return null;
+async function edgeOf(sql, where, readsDataset = false) {
+  if (ownTables(sql) && !readsDataset) return null;
   try {
     const r = await runAll(sql, 'edge');
     const rows = normRows(r.rows, r.types);
@@ -269,7 +273,7 @@ for (const id of sqlTaskIds) {
       const ex = await db.query(meta.example, [], { rowMode: 'array' });
       example = { cols: ex.fields.map((f) => f.name), rows: ex.rows };
     }
-    out.sqlTasks[id] = { ...t, solution, expected: { ...expected(r, 20), ordered: !!t.order, edge: await edgeOf(solution, id) }, example };
+    out.sqlTasks[id] = { ...t, solution, expected: { ...expected(r, 20), ordered: !!t.order, edge: await edgeOf(solution, id, meta.edge === true) }, example };
   } catch (e) {
     fail(`${id}: ${e.message}`);
   }

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PGlite } from '@electric-sql/pglite';
-import { loadData, PARSERS, normRows } from '../src/runtime/pg-setup.js';
+import { inOneTransaction, loadData, PARSERS, normRows } from '../src/runtime/pg-setup.js';
 
 const [id, file] = process.argv.slice(2);
 if (!id || !file) {
@@ -108,7 +108,7 @@ async function run(sql, schema) {
   await db.exec('BEGIN');
   try {
     if (schema === 'edge') await db.exec('SET LOCAL search_path TO edge');
-    const res = await db.exec(sql, { rowMode: 'array' });
+    const res = await db.exec(inOneTransaction(sql).sql, { rowMode: 'array' });
     const last = [...res].reverse().find((r) => r.fields && r.fields.length);
     if (!last) throw new Error('no statement returns rows');
     return { cols: last.fields.map((f) => f.name), rows: normRows(last.rows, last.fields.map((f) => f.dataTypeID)) };
@@ -117,8 +117,13 @@ async function run(sql, schema) {
   }
 }
 const key = (r) => JSON.stringify(r);
-/** A reference that builds its own tables does not read the dataset: the site does not check it on edge. */
+/**
+ * A reference that builds its own tables does not read the dataset: the site does not check it on
+ * edge. A task that loads its table from the dataset (Q15) opts in (sql-tasks.ts `edge: true`), and
+ * the build then records an edge fingerprint for it, so for tasks practice.json decides.
+ */
 const ownTables = (sql) => /\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|EXPLAIN)\b/i.test(sql.replace(/--[^\n]*/g, ''));
+const onEdge = drill || trap ? !ownTables(ref) : !!P.sqlTasks[id].expected.edge;
 function compare(got, exp, ordered) {
   if (got.cols.length !== exp.cols.length) return `${got.cols.length} columns, expected ${exp.cols.length} (${exp.cols.join(', ')})`;
   if (got.rows.length !== exp.rows.length) return `${got.rows.length} rows, expected ${exp.rows.length}`;
@@ -134,7 +139,7 @@ function compare(got, exp, ordered) {
   return null;
 }
 let failed = false;
-for (const schema of ownTables(ref) ? ['public'] : ['public', 'edge']) {
+for (const schema of onEdge ? ['public', 'edge'] : ['public']) {
   const label = schema === 'public' ? 'practice data' : 'hidden edge-case data';
   let got;
   try {

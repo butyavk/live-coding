@@ -295,6 +295,16 @@ if (!ONLY || ONLY === 'mock') {
       ['q07', 'no tie-breaker', () => swap('q07', 'ORDER BY start_time DESC, transaction_id DESC', 'ORDER BY start_time DESC')],
       ['q12', 'LEFT JOIN misses the unexpected payout', () => swap('q12', 'FULL OUTER JOIN paid p', 'LEFT JOIN paid p')],
       ['q13', 'NULL enrollment not checked', () => swap('q13', 'm.advances_enrolled_at IS NULL OR adv.created_at < m.advances_enrolled_at', 'adv.created_at < m.advances_enrolled_at')],
+      // Q15 builds its own table, and runs on the edge-case data because sql-tasks.ts says edge: true.
+      ['q15', 'BETWEEN on dates takes 30 September', () => {
+        const all = (s, from, to) => {
+          if (!s.includes(from)) throw new Error(`q15: "${from}" not in the reference`);
+          return s.replaceAll(from, to);
+        };
+        let s = all(sol('q15'), "AND t.start_time >= TIMESTAMP '2026-09-01' AND t.start_time < TIMESTAMP '2026-09-30'", "AND CAST(t.start_time AS DATE) BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'");
+        s = all(s, "AND t.refunded_at >= TIMESTAMP '2026-09-01' AND t.refunded_at < TIMESTAMP '2026-09-30'", "AND CAST(t.refunded_at AS DATE) BETWEEN DATE '2026-09-01' AND DATE '2026-09-30'");
+        return all(s, "WHERE day >= DATE '2026-09-01' AND day < DATE '2026-09-30'\n", '');
+      }],
     ];
     const pageOf = new Map();
     for (const [id, why, make] of wrong) {
@@ -312,6 +322,22 @@ if (!ONLY || ONLY === 'mock') {
       } catch (e) {
         ok(`${id} wrong (${why})`, false, String(e).split('\n')[0]);
       }
+    }
+    // A script's own BEGIN … COMMIT runs as a savepoint (inOneTransaction in pg-setup.js), so the run
+    // stays one transaction: the table it creates is gone afterwards, and a second Check passes too.
+    try {
+      const path = placed.get('q15').page;
+      if (!pageOf.has(path)) pageOf.set(path, await open(path));
+      const { page } = pageOf.get(path);
+      const txn = sol('q15')
+        .replaceAll('INSERT INTO daily_merchant_revenue (', 'BEGIN;\nINSERT INTO daily_merchant_revenue (')
+        .replaceAll('    net_usd     = EXCLUDED.net_usd;', '    net_usd     = EXCLUDED.net_usd;\nCOMMIT;');
+      await setCode(page, 'q15', txn);
+      const a = await check(page, 'q15');
+      const b = await check(page, 'q15');
+      ok('q15 with BEGIN … COMMIT passes twice', txn.includes('COMMIT;') && a.pass && b.pass && b.text.includes(EDGE_PASS.en), `${a.text.slice(0, 120)} | ${b.text.slice(0, 120)}`);
+    } catch (e) {
+      ok('q15 with BEGIN … COMMIT', false, String(e).split('\n')[0]);
     }
     for (const [path, { ctx, errors }] of pageOf) {
       ok(`${path}: no console errors (edge cases)`, !errors.length, errors.join(' | ').slice(0, 300));

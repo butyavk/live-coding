@@ -36,7 +36,8 @@ START = "START: delete this line to run the tests"
 TASKS = sorted(p.stem for p in (ROOT / "tasks" / "sql").glob("*.sql"))
 PRACTICE = ROOT.parent / "src" / "data" / "generated" / "practice.json"
 EDGE_SQL = ROOT.parent / "src" / "runtime" / "edge.sql"
-# Queries that change the database are not run on the edge-case data (as in build-exercises.mjs).
+# Queries that change the database are not run on the edge-case data (as in build-exercises.mjs),
+# unless the task loads its own table from the dataset and the build checked it there (Q15).
 CHANGES_DB = re.compile(r"\b(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|EXPLAIN)\b", re.I)
 
 
@@ -82,11 +83,13 @@ def _run(sql, edge=False):
 def _edge_info(task, solution):
     """The PostgreSQL fingerprint of the reference on the edge-case data, {} when unknown, or None
     when the task is not checked there."""
-    if not EDGE_SQL.exists() or CHANGES_DB.search(re.sub(r"--[^\n]*", " ", solution)):
+    if not EDGE_SQL.exists():
         return None
-    if not PRACTICE.exists():
-        return {}
-    pg = json.loads(PRACTICE.read_text())["sqlTasks"].get(task)
+    pg = json.loads(PRACTICE.read_text())["sqlTasks"].get(task) if PRACTICE.exists() else None
+    if pg and pg["expected"].get("edge"):
+        return pg["expected"]["edge"]
+    if CHANGES_DB.search(re.sub(r"--[^\n]*", " ", solution)):
+        return None
     return pg["expected"].get("edge") if pg else {}
 
 

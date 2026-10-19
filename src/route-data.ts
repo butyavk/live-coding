@@ -9,8 +9,8 @@ export const onRequest = defineRouteMiddleware((context) => {
   const image = new URL(`${base}og/og-${lang}.jpg`, context.site).href;
   const alt =
     lang === 'ru'
-      ? 'Карта лайвкодинга: подготовка к интервью по SQL и Python. 36 упражнений SQL, 26 упражнений Python, 23 ловушки, 31 задача как на интервью и карта навыков.'
-      : 'Live Coding Map: practice for SQL and Python live-coding interviews. 36 SQL drills, 26 Python drills, 23 traps, 31 interview tasks and a skill map.';
+      ? 'Карта лайвкодинга: подготовка к интервью по SQL и Python. 36 упражнений SQL, 26 упражнений Python, 23 ловушки, 32 задачи как на интервью и карта навыков.'
+      : 'Live Coding Map: practice for SQL and Python live-coding interviews. 36 SQL drills, 26 Python drills, 23 traps, 32 interview tasks and a skill map.';
 
   route.head.push(
     { tag: 'meta', attrs: { property: 'og:image', content: image } },

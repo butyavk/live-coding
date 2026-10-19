@@ -58,6 +58,10 @@ export const taskHints: Record<string, { en: string; ru: string }> = {
     en: "Sum the ledger per advance first, so you know which advances are still open. Then roll those rows up per merchant.",
     ru: "Сначала сложите журнал проводок по каждому авансу, чтобы знать, какие авансы ещё открыты. Потом сверните эти строки по продавцу.",
   },
+  q15: {
+    en: "A refund counts on its own day, and that day may have no sales at all. So put sales and refunds into one list of rows, each with its own day, before you group. Then ask what the second run should do with a row that is already in the table.",
+    ru: "Возврат считается в свой день, и в этот день продаж может не быть вовсе. Поэтому сложите продажи и возвраты в один список строк, у каждой свой день, и только потом группируйте. Затем подумайте, что второй запуск должен сделать со строкой, которая уже есть в таблице.",
+  },
   d01: {
     en: "Run it as it is and pick one merchant. Count that merchant's August transactions with a plain query, compare the two numbers, and read each clause against the \"should show\" text.",
     ru: "Запустите запрос как есть и возьмите одного продавца. Посчитайте его августовские транзакции простым запросом, сравните два числа и сверьте каждую часть запроса с описанием того, что отчёт должен показывать.",
