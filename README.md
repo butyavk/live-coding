@@ -2,18 +2,24 @@
 
 **English** · [Русский](README.ru.md)
 
-Live Coding Map prepares data, analytics and backend engineers for a live-coding round in SQL
-and practical Python, and Russian-speaking engineers for interviews in English. Four things set
-it apart from a bank of SQL questions. **Interview tasks on one realistic business dataset**,
-including work-like Python (idempotency, money, retries, debugging broken code, messy input files, API clients, writing tests), checked by real
-tests in your browser. **A protocol for the hour itself**: the questions to ask with the
-interviewer's answers, a timer, phrases to think aloud and the follow-up question. **Checks
-that catch the traps**: Check also runs your SQL on hidden edge-case data. And it is **free,
-with no login, open source, in English and Russian**.
+Practice for a live-coding round in SQL and practical Python: 32 interview tasks on one business
+dataset, checked in your browser on real PostgreSQL ([PGlite](https://pglite.dev/)) and Python
+([Pyodide](https://pyodide.org/)). For data, analytics and backend engineers.
 
 ### [Open the site](https://butyavk.github.io/live-coding/) · [Skill map](https://butyavk.github.io/live-coding/start/skill-map/) · [Mock interview](https://butyavk.github.io/live-coding/start/mock-interview/)
 
 <img src=".github/readme/demo.gif" alt="An interview task on the site: Check fails on the first query, the query is fixed, and Check passes." width="800">
+
+What sets it apart from a bank of SQL questions:
+
+- **Interview tasks on one realistic business dataset**, including work-like Python
+  (idempotency, money, retries, debugging broken code, messy input files, API clients, writing
+  tests), checked by real tests in your browser.
+- **A protocol for the hour itself**: the questions to ask with the interviewer's answers, a
+  timer, phrases to think aloud and the follow-up question.
+- **Checks that catch the traps**: Check also runs your SQL on hidden edge-case data.
+- **Free, with no login, open source, in English and Russian.** Task texts and interview phrases
+  are in English, so it also prepares Russian-speaking engineers for interviews in English.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset=".github/readme/skill-map-en-dark.png">
@@ -109,9 +115,6 @@ See [exercises/README.md](exercises/README.md) for the details.
 Found a wrong answer, a confusing task or a typo? Open an
 [issue](https://github.com/butyavk/live-coding/issues). To run the site locally, edit a page or
 add an exercise, see [CONTRIBUTING.md](CONTRIBUTING.md).
-
-The site was written with the help of an AI assistant; every exercise, query and number is
-checked by automated tests.
 
 ## Licence
 
